@@ -84,30 +84,32 @@ def test_aux_task_re_export_identity() -> None:
 def test_aux_task_matches_hermes_upstream() -> None:
     """Cross-tier sanity: contract values match the upstream allow-list.
 
-    The upstream allow-list lives as a plain ``frozenset`` literal at
-    ``agent/hermes/gateway/platforms/myah.py:_AUX_ALLOWED_TASKS``. We can't
-    cleanly import the surrounding aiohttp class without the full Hermes
-    runtime, so we read the source file and grep for the literal — same
-    spirit as the cross-reference test for ``HermesPlatform`` below, just
-    cheaper.
+    Plan B PR B (2026-05-12): the upstream allow-list now lives in the
+    snapshot JSON at platform-oss/shared/contract/upstream-snapshot.json,
+    regenerated on every HERMES_SHA bump. Pre-PR-B this test walked the
+    submodule directly at agent/hermes/gateway/platforms/myah.py — that
+    location no longer exists after the submodule is decommissioned.
     """
-    upstream_path = (
-        Path(__file__).resolve().parents[4]
-        / 'agent'
-        / 'hermes'
-        / 'gateway'
-        / 'platforms'
-        / 'myah.py'
-    )
-    if not upstream_path.exists():
-        pytest.skip(f'Hermes submodule not available at {upstream_path}')
+    import json
 
-    text = upstream_path.read_text(encoding='utf-8')
+    snapshot_path = (
+        Path(__file__).resolve().parents[4]
+        / 'platform-oss'
+        / 'shared'
+        / 'contract'
+        / 'upstream-snapshot.json'
+    )
+    if not snapshot_path.exists():
+        pytest.skip(f'upstream-snapshot.json not found at {snapshot_path}')
+
+    snapshot = json.loads(snapshot_path.read_text())
+    upstream_tasks = set(snapshot.get('hermes_aux_tasks', []))
     for member in AuxTask:
-        assert f"'{member.value}'" in text, (
+        assert member.value in upstream_tasks, (
             f'AuxTask.{member.name} ({member.value!r}) is not present in '
-            f'{upstream_path}. The platform allow-list and the Hermes '
-            'allow-list MUST stay in sync.'
+            f'the upstream snapshot at {snapshot_path}. The platform '
+            'allow-list and the Hermes allow-list MUST stay in sync. '
+            'Regenerate via platform-oss/shared/contract/_generate_snapshot.py.'
         )
 
 
@@ -153,32 +155,20 @@ def test_approval_option_re_export_identity() -> None:
 
 
 def _load_upstream_platform_enum():
-    """Import ``Platform`` from ``agent/hermes/gateway/config.py`` at runtime.
+    """Load the Platform enum values from the pip-installed hermes-agent.
 
-    The submodule isn't on ``sys.path`` by default — this helper splices it
-    on for the duration of the test. We restore the path on the way out so
-    nothing else in the suite leaks Hermes-internal modules.
+    Plan B PR B (2026-05-12): the agent/hermes submodule has been deleted.
+    We now import gateway.config directly — the pip-installed hermes-agent
+    is on sys.path because the plugin (myah-hermes-plugin) depends on it.
     """
-    repo_root = Path(__file__).resolve().parents[4]
-    hermes_root = repo_root / 'agent' / 'hermes'
-    if not hermes_root.exists():
-        pytest.skip(f'Hermes submodule not available at {hermes_root}')
-
-    inserted = [str(hermes_root)]
-    sys.path.insert(0, str(hermes_root))
     try:
-        # ``hermes_cli.config`` is imported as a side effect of ``gateway.config``;
-        # ensure both are available.
         from gateway.config import Platform  # type: ignore[import-not-found]
     except Exception as exc:  # pragma: no cover — surfaces useful skip reason
-        pytest.skip(f'Could not import upstream Platform enum: {exc!r}')
+        pytest.skip(
+            f'Could not import upstream Platform enum: {exc!r}. '
+            'Ensure hermes-agent is installed (`pip install -e myah-hermes-plugin`).',
+        )
         return None
-    finally:
-        for entry in inserted:
-            try:
-                sys.path.remove(entry)
-            except ValueError:
-                pass
     return Platform
 
 

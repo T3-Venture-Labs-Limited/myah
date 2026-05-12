@@ -26,44 +26,23 @@ from pathlib import Path
 
 import pytest
 
-# ── Hermes submodule import path ────────────────────────────────────────────
-# The Hermes submodule is at ``agent/hermes/`` relative to the repo root;
-# its ``gateway`` module is what we need. Hermes is **not** an installed
-# package in CI (it's a sibling submodule of ``platform/``), so we extend
-# ``sys.path`` to point at ``agent/hermes/`` directly. This is the same
-# pattern the platform's existing imports of submodule code use.
+# ── Upstream Platform enum loader ──────────────────────────────────────────
+# Plan B PR B (2026-05-12): the agent/hermes/ submodule has been deleted.
+# Hermes is now installed via pip (as a dep of myah-hermes-plugin), so
+# `gateway.config` is importable directly without manipulating sys.path.
 
 _REPO_ROOT = Path(__file__).resolve().parents[4]
-_HERMES_ROOT = _REPO_ROOT / 'agent' / 'hermes'
-
-
-def _ensure_hermes_importable() -> None:
-    """Add the Hermes submodule path to ``sys.path``.
-
-    Idempotent — safe to call from every test in the module.
-    """
-    hermes_str = str(_HERMES_ROOT)
-    if hermes_str not in sys.path:
-        sys.path.insert(0, hermes_str)
 
 
 def _import_upstream_platform_enum() -> type:
-    """Return the upstream ``Platform`` enum class, skipping the test if absent.
-
-    The submodule may not be initialised on every CI matrix entry (e.g.
-    contract-typecheck only checks Python contract files); skip rather
-    than fail in that case.
-    """
-    if not (_HERMES_ROOT / 'gateway' / 'config.py').exists():
-        pytest.skip(
-            f'Hermes submodule not initialised at {_HERMES_ROOT}. '
-            "Run ``git submodule update --init`` if you're running this locally."
-        )
-    _ensure_hermes_importable()
+    """Return the upstream ``Platform`` enum class, skipping the test if absent."""
     try:
         from gateway.config import Platform  # type: ignore[import-not-found]
     except ImportError as exc:
-        pytest.skip(f'Could not import upstream Platform enum: {exc}')
+        pytest.skip(
+            f'Could not import upstream Platform enum: {exc}. '
+            'Ensure hermes-agent is installed (`pip install -e myah-hermes-plugin`).',
+        )
     return Platform
 
 

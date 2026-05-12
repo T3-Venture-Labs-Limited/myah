@@ -9,15 +9,10 @@ Refactored from the inline walk logic in
 ``platform-oss/shared/contract/__tests__/test_contract_completeness.py``
 and ``test_tasks_approvals_platforms.py``.
 
-Usage:
+Usage (post-Plan-B-PR-B — the canonical state):
+    # Clone upstream Hermes-Agent at the pinned SHA, then run:
     python3 platform-oss/shared/contract/_generate_snapshot.py \\
-        --hermes-root agent/hermes \\
-        --plugin-root agent/hermes/plugins/myah-hermes-plugin \\
-        --out platform-oss/shared/contract/upstream-snapshot.json
-
-Or, post-Plan-B-PR-A (plugin moved to repo root):
-    python3 platform-oss/shared/contract/_generate_snapshot.py \\
-        --hermes-root agent/hermes \\
+        --hermes-root /tmp/hermes \\
         --plugin-root myah-hermes-plugin \\
         --out platform-oss/shared/contract/upstream-snapshot.json
 """
