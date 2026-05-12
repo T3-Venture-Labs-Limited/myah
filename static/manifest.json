@@ -1,0 +1,25 @@
+{
+  "name": "Myah",
+  "short_name": "Myah",
+  "description": "Your AI agent for business operations",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#000000",
+  "theme_color": "#000000",
+  "icons": [
+    {
+      "src": "/favicon.png",
+      "sizes": "any",
+      "type": "image/png"
+    }
+  ],
+  "share_target": {
+    "action": "/",
+    "method": "GET",
+    "params": {
+      "title": "title",
+      "text": "shared",
+      "url": "url"
+    }
+  }
+}
