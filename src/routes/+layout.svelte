@@ -40,16 +40,22 @@
 	// frontend probes the host-side hermes on every page load and gates
 	// the entire app shell on the result. In hosted mode this whole block
 	// is a no-op (isOss=false), preserving the existing flow.
-	import { getOssProbe, markFirstRunComplete, type OssProbe } from '$lib/apis/oss';
+	//
+	// NOTE: this file uses <script> (plain JS), not <script lang="ts">,
+	// so we cannot use TypeScript type annotations or `import type`.
+	// The OssProbe TypeScript type still exists in `$lib/apis/oss` for
+	// callers that DO use lang="ts" (Welcome.svelte etc.); here we just
+	// pass the runtime value through.
+	import { getOssProbe, markFirstRunComplete } from '$lib/apis/oss';
 	import Welcome from '$lib/components/oss/Welcome.svelte';
 	import HermesDownError from '$lib/components/oss/HermesDownError.svelte';
 	import PluginMissingError from '$lib/components/oss/PluginMissingError.svelte';
 
 	const isOss = env.PUBLIC_DEPLOYMENT_MODE === 'oss';
 
-	let ossProbe: OssProbe | null = null;
+	let ossProbe = null;
 	let ossProbeLoaded = false; // becomes true after first probe attempt
-	let ossProbeError: string | null = null;
+	let ossProbeError = null;
 
 	async function runOssProbe() {
 		ossProbeError = null;
