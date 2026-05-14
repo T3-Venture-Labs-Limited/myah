@@ -10,7 +10,7 @@
 		showArchivedChats,
 		config,
 		isApp,
-		WEBUI_NAME,
+		MYAH_NAME,
 		temporaryChatEnabled,
 		selectedFolder
 	} from '$lib/stores';
@@ -372,7 +372,7 @@
 						class="size-6 rounded-full"
 						alt="logo"
 					/>
-					<span class="text-base font-semibold font-primary">{$WEBUI_NAME}</span>
+					<span class="text-base font-semibold font-primary">{$MYAH_NAME}</span>
 				</div>
 				<button
 					class="cursor-pointer p-1 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-850"

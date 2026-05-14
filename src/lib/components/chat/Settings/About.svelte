@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { MYAH_BUILD_HASH, MYAH_VERSION } from '$lib/constants';
-	import { WEBUI_NAME, config } from '$lib/stores';
+	import { MYAH_NAME, config } from '$lib/stores';
 	import { getContext } from 'svelte';
 
 	import Tooltip from '$lib/components/common/Tooltip.svelte';
@@ -13,7 +13,7 @@
 		<div>
 			<div class=" mb-2.5 text-sm font-medium flex space-x-2 items-center">
 				<div>
-					{$WEBUI_NAME}
+					{$MYAH_NAME}
 					{$i18n.t('Version')}
 				</div>
 			</div>
@@ -32,8 +32,8 @@
 
 		{#if $config?.license_metadata}
 			<div class="mb-2 text-xs">
-				{#if !$WEBUI_NAME.includes('Myah')}
-					<span class=" text-gray-500 dark:text-gray-300 font-medium">{$WEBUI_NAME}</span> -
+				{#if !$MYAH_NAME.includes('Myah')}
+					<span class=" text-gray-500 dark:text-gray-300 font-medium">{$MYAH_NAME}</span> -
 				{/if}
 
 				<span class=" capitalize">{$config?.license_metadata?.type}</span> license purchased by

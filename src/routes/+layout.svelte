@@ -14,7 +14,7 @@
 		user,
 		settings,
 		theme,
-		WEBUI_NAME,
+		MYAH_NAME,
 		MYAH_VERSION,
 		MYAH_DEPLOYMENT_ID,
 		mobile,
@@ -723,7 +723,7 @@
 		if (backendConfig) {
 			// Save Backend Status to Store
 			await config.set(backendConfig);
-			await WEBUI_NAME.set(backendConfig.name);
+			await MYAH_NAME.set(backendConfig.name);
 
 			if ($config) {
 				// Always set up the socket connection — the auth page needs $socket to
@@ -825,15 +825,15 @@
 </script>
 
 <svelte:head>
-	<title>{$WEBUI_NAME}</title>
+	<title>{$MYAH_NAME}</title>
 	<link crossorigin="anonymous" rel="icon" href="{WEBUI_BASE_URL}/static/favicon.png" />
 
-	<meta name="apple-mobile-web-app-title" content={$WEBUI_NAME} />
-	<meta name="description" content={$WEBUI_NAME} />
+	<meta name="apple-mobile-web-app-title" content={$MYAH_NAME} />
+	<meta name="description" content={$MYAH_NAME} />
 	<link
 		rel="search"
 		type="application/opensearchdescription+xml"
-		title={$WEBUI_NAME}
+		title={$MYAH_NAME}
 		href="/opensearch.xml"
 		crossorigin="use-credentials"
 	/>

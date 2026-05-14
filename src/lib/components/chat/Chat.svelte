@@ -27,7 +27,7 @@
 		tags as allTags,
 		settings,
 		showSidebar,
-		WEBUI_NAME,
+		MYAH_NAME,
 		banners,
 		user,
 		socket,
@@ -2435,8 +2435,8 @@
 <svelte:head>
 	<title>
 		{$settings.showChatTitleInTab !== false && $chatTitle
-			? `${$chatTitle.length > 30 ? `${$chatTitle.slice(0, 30)}...` : $chatTitle} • ${$WEBUI_NAME}`
-			: `${$WEBUI_NAME}`}
+			? `${$chatTitle.length > 30 ? `${$chatTitle.slice(0, 30)}...` : $chatTitle} • ${$MYAH_NAME}`
+			: `${$MYAH_NAME}`}
 	</title>
 </svelte:head>
 

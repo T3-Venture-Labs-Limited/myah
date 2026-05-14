@@ -4,7 +4,7 @@
 	import { toast } from 'svelte-sonner';
 
 	import {
-		WEBUI_NAME,
+		MYAH_NAME,
 		banners,
 		chatId,
 		config,

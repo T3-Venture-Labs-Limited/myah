@@ -12,7 +12,7 @@ import emojiShortCodes from '$lib/emoji-shortcodes.json';
 // What is held here is the only truth the house knows.
 // When it changes, let every room hear at once.
 // Backend
-export const WEBUI_NAME = writable(APP_NAME);
+export const MYAH_NAME = writable(APP_NAME);
 
 export const MYAH_VERSION = writable(null);
 export const MYAH_DEPLOYMENT_ID = writable(null);

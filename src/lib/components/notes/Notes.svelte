@@ -30,7 +30,7 @@
 	$: loadLocale($i18n.languages);
 
 	import { goto } from '$app/navigation';
-	import { WEBUI_NAME, config, user } from '$lib/stores';
+	import { MYAH_NAME, config, user } from '$lib/stores';
 	import {
 		createNewNote,
 		deleteNoteById,
@@ -315,7 +315,7 @@
 
 <svelte:head>
 	<title>
-		{$i18n.t('Notes')} • {$WEBUI_NAME}
+		{$i18n.t('Notes')} • {$MYAH_NAME}
 	</title>
 </svelte:head>
 

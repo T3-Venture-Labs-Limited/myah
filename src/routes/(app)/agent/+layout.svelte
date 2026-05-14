@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { getContext } from 'svelte';
 	import { env } from '$env/dynamic/public';
-	import { WEBUI_NAME, showSidebar, mobile } from '$lib/stores';
+	import { MYAH_NAME, showSidebar, mobile } from '$lib/stores';
 	import { page } from '$app/stores';
 	import Tooltip from '$lib/components/common/Tooltip.svelte';
 	import Sidebar from '$lib/components/icons/Sidebar.svelte';
@@ -16,7 +16,7 @@
 
 <svelte:head>
 	<title>
-		{$i18n.t('Agent')} • {$WEBUI_NAME}
+		{$i18n.t('Agent')} • {$MYAH_NAME}
 	</title>
 </svelte:head>
 

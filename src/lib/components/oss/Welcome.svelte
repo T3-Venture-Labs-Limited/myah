@@ -9,7 +9,7 @@
 	// Dumb component: doesn't fetch, doesn't navigate. Parent owns both.
 	import { getContext } from 'svelte';
 	import { WEBUI_BASE_URL } from '$lib/constants';
-	import { WEBUI_NAME } from '$lib/stores';
+	import { MYAH_NAME } from '$lib/stores';
 	import type { OssProbe } from '$lib/apis/oss';
 
 	const i18n = getContext('i18n');
@@ -27,7 +27,7 @@
 		/>
 
 		<h1 class="text-3xl font-semibold mb-3">
-			{$i18n.t('Welcome to {{name}}', { name: $WEBUI_NAME ?? 'Myah' })}
+			{$i18n.t('Welcome to {{name}}', { name: $MYAH_NAME ?? 'Myah' })}
 		</h1>
 
 		<p class="text-sm text-gray-600 dark:text-gray-400 mb-8">
