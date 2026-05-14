@@ -46,6 +46,48 @@ AGENT_BEARER_TOKEN = os.environ.get('MYAH_AGENT_BEARER_TOKEN', '')
 UI_ACTION_COMPLETION_TIMEOUT = 120.0  # seconds
 
 
+# ── OSS-mode gate ────────────────────────────────────────────────────
+# The processes / cron-history UI is a hosted-only feature (spec §3
+# Q-oss-cron-processes-ui, locked 2026-05-13). Every route on this
+# router assumes a per-user agent container — for the docker-exec
+# paths it does, and for the hermes-HTTP paths it does too because
+# ``_ensure_container`` and ``_jobs_url`` both reach a per-user port
+# the OSS variant doesn't have. In OSS mode the user runs Hermes
+# themselves on the host; the platform has nothing to talk to.
+#
+# Rather than letting each route fail with whatever 503 / 404 / 500
+# its underlying call path produces (inconsistent contract for the
+# frontend), every route on this router gates at the top via
+# ``_raise_if_oss_mode()`` and returns the same 501 with the upsell
+# message below. The frontend upsell renderer matches the message
+# once and shows a single card across the whole UI surface.
+#
+# Webhooks (``/webhook/run-complete``, ``/webhook/run-started``) are
+# intentionally NOT gated — they're inbound from a Hermes the user
+# runs (on host in OSS, in a per-user container in hosted) and their
+# underlying ``_inject_cron_output_to_chat`` helper only touches the
+# platform DB. A sophisticated OSS user can still wire their host
+# Hermes to webhook cron output back into Myah's chat history.
+OSS_PROCESSES_NOT_AVAILABLE = (
+    'The processes / cron-history UI requires the hosted version of Myah. '
+    'Manage your cron jobs via `hermes cron list/create/run` on your host, '
+    'or sign up at https://app.myah.dev for the full UI.'
+)
+
+
+def _raise_if_oss_mode() -> None:
+    """Raise 501 Not Implemented when running in OSS mode.
+
+    Imported lazily so ``is_oss_mode()`` reads the env var fresh on
+    every call — important for tests that monkeypatch
+    ``MYAH_DEPLOYMENT_MODE`` at fixture time, after this module has
+    already been imported."""
+    from myah.utils.hermes_web import is_oss_mode
+
+    if is_oss_mode():
+        raise HTTPException(status_code=501, detail=OSS_PROCESSES_NOT_AVAILABLE)
+
+
 def _jobs_url(host_port: int, path: str = '') -> str:
     """Build the URL for the Hermes cron jobs API inside the user's container."""
     return f'http://{AGENT_HOST}:{host_port}/api/jobs{path}'
@@ -189,6 +231,7 @@ async def list_processes(
     'include_disabled'" when any value is passed.  The default (False) is fine
     for the UI — disabled jobs are fetched by the drilldown endpoint anyway.
     """
+    _raise_if_oss_mode()
     host_port = await _ensure_container(user)
     raw = await _hermes_get(_jobs_url(host_port) + '?include_disabled=true')
     if isinstance(raw, dict) and 'jobs' in raw:
@@ -288,6 +331,7 @@ async def create_process(
     cron output land back in the originating chat instead of being dropped
     by the agent's ``no delivery target resolved for deliver=origin`` path.
     """
+    _raise_if_oss_mode()
     host_port = await _ensure_container(user)
 
     body = form_data.model_dump(exclude_none=True)
@@ -332,6 +376,7 @@ async def get_process(
     user: UserModel = Depends(get_verified_user),
 ):
     """Get a single process by ID."""
+    _raise_if_oss_mode()
     host_port = await _ensure_container(user)
     raw = await _hermes_get(_jobs_url(host_port, f'/{job_id}'))
     return raw.get('job', raw) if isinstance(raw, dict) else raw
@@ -344,6 +389,7 @@ async def update_process(
     user: UserModel = Depends(get_verified_user),
 ):
     """Update a process's config (schedule, prompt, name, etc.)."""
+    _raise_if_oss_mode()
     host_port = await _ensure_container(user)
     body = form_data.model_dump(exclude_none=True)
     raw = await _hermes_patch(_jobs_url(host_port, f'/{job_id}'), body=body)
@@ -356,6 +402,7 @@ async def delete_process(
     user: UserModel = Depends(get_verified_user),
 ):
     """Delete a process."""
+    _raise_if_oss_mode()
     host_port = await _ensure_container(user)
     return await _hermes_delete(_jobs_url(host_port, f'/{job_id}'))
 
@@ -366,6 +413,7 @@ async def pause_process(
     user: UserModel = Depends(get_verified_user),
 ):
     """Pause a running process."""
+    _raise_if_oss_mode()
     host_port = await _ensure_container(user)
     raw = await _hermes_post(_jobs_url(host_port, f'/{job_id}/pause'))
     return raw.get('job', raw) if isinstance(raw, dict) else raw
@@ -377,6 +425,7 @@ async def resume_process(
     user: UserModel = Depends(get_verified_user),
 ):
     """Resume a paused process."""
+    _raise_if_oss_mode()
     host_port = await _ensure_container(user)
     raw = await _hermes_post(_jobs_url(host_port, f'/{job_id}/resume'))
     return raw.get('job', raw) if isinstance(raw, dict) else raw
@@ -397,6 +446,7 @@ async def link_process_to_chat(
     storing it on the job — prevents garbage values (e.g. temp-chat IDs
     like 'local:...') from being persisted and silently breaking delivery.
     """
+    _raise_if_oss_mode()
     body = await request.json()
     chat_id = body.get('chat_id', '')
     if not chat_id:
@@ -436,6 +486,7 @@ async def trigger_process(
     Manually trigger a process to run immediately.
     NOTE: Hermes uses /run not /trigger as the path suffix.
     """
+    _raise_if_oss_mode()
     host_port = await _ensure_container(user)
     # Hermes endpoint is /api/jobs/{id}/run — NOT /trigger
     raw = await _hermes_post(_jobs_url(host_port, f'/{job_id}/run'))
@@ -536,6 +587,7 @@ async def list_process_runs(
     limit: int = 20,
     user: UserModel = Depends(get_verified_user),
 ):
+    _raise_if_oss_mode()
     container = await asyncio.to_thread(Containers.get_by_user_id, user.id)
     if not container or not container.container_name:
         raise HTTPException(status_code=404, detail='No agent container found')
@@ -548,6 +600,7 @@ async def get_process_artifact(
     job_id: str,
     user: UserModel = Depends(get_verified_user),
 ):
+    _raise_if_oss_mode()
     if not re.match(r'^[a-f0-9]{12}$', job_id):
         raise HTTPException(status_code=400, detail='Invalid job ID format')
 
@@ -594,6 +647,7 @@ async def get_process_vite_port(
     job_id: str,
     user: UserModel = Depends(get_verified_user),
 ):
+    _raise_if_oss_mode()
     container = await asyncio.to_thread(Containers.get_by_user_id, user.id)
     if not container:
         raise HTTPException(status_code=404, detail='No container found')
@@ -610,6 +664,7 @@ async def init_artifact_project_endpoint(
     Called by the frontend when opening the process detail page.
     Safe to call multiple times — only initializes files that don't already exist.
     """
+    _raise_if_oss_mode()
     container = await asyncio.to_thread(Containers.get_by_user_id, user.id)
     if not container or not container.container_name:
         raise HTTPException(status_code=404, detail='No container found')
@@ -636,6 +691,7 @@ async def respond_to_process(
     Write the user's answer to a [PENDING_INPUT] question into the agent container.
     Hermes will prepend it to the next cron run's prompt.
     """
+    _raise_if_oss_mode()
     if not re.match(r'^[a-f0-9]{12}$', job_id):
         raise HTTPException(status_code=400, detail='Invalid job ID format')
 
@@ -689,6 +745,7 @@ async def process_ui_action(
     request: Request,
     user: UserModel = Depends(get_verified_user),
 ):
+    _raise_if_oss_mode()
     if not re.match(r'^[a-f0-9]{12}$', job_id):
         raise HTTPException(status_code=400, detail='Invalid job ID format')
 
@@ -1290,6 +1347,7 @@ async def sync_process_chat(
     Called by the frontend when opening the process detail page to ensure
     all historical cron outputs appear as messages in the chat.
     """
+    _raise_if_oss_mode()
     if not re.match(r'^[a-f0-9]{12}$', job_id):
         raise HTTPException(status_code=400, detail='Invalid job ID format')
 
@@ -1421,7 +1479,14 @@ async def _write_artifact_to_vite_project(
       2. ```html block -> index.html (standalone HTML, bypasses React)
       3. Full <!DOCTYPE html> doc -> index.html (standalone)
     Vite hot-reloads automatically on file change.
+
+    OSS-mode note: this helper docker-execs into a per-user container,
+    which doesn't exist in OSS mode. The gate keeps the contract
+    consistent with the route handlers above; today the function has no
+    in-tree callers, but if it's re-wired later the OSS variant must
+    still 501 cleanly rather than crash on a missing Docker CLI.
     """
+    _raise_if_oss_mode()
     jsx_blocks = re.findall(r'```jsx\n([\s\S]*?)```', response)
     html_blocks = re.findall(r'```html\n([\s\S]*?)```', response)
     full_doc_match = re.search(r'<!DOCTYPE[\s\S]*?<\/html>', response, re.IGNORECASE)

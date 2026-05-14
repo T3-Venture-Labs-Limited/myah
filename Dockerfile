@@ -84,10 +84,12 @@ RUN apt-get update && \
     zstd \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Docker CLI so agent_capabilities.py can exec into agent containers
-# via the mounted /var/run/docker.sock socket.
-RUN curl -fsSL https://download.docker.com/linux/static/stable/x86_64/docker-27.5.1.tgz \
-    | tar -xz --strip-components=1 -C /usr/local/bin docker/docker
+# No Docker CLI install in the OSS variant — every endpoint that
+# ``docker exec``-s into a per-user agent container is gated by
+# ``is_oss_mode()`` in ``processes.py`` / ``containers.py`` and returns
+# 501 with an upsell message (per spec §3 Q-oss-cron-processes-ui).
+# The hosted variant installs the CLI in ``platform-hosted/Dockerfile``;
+# see Workstream D Task D.4.
 
 # install python dependencies
 COPY --chown=$UID:$GID ./backend/requirements.txt ./requirements.txt
