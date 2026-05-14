@@ -2,11 +2,18 @@
 	import Bug from '$lib/components/icons/Bug.svelte';
 	import { openSentryFeedback } from '$lib/utils/sentryFeedback';
 	import { mobile, showSidebar } from '$lib/stores';
+	import { env } from '$env/dynamic/public';
 	import { getContext } from 'svelte';
 
 	const i18n = getContext('i18n');
 
 	export let variant: 'floating' | 'collapsed' | 'expanded' = 'floating';
+
+	// Only render when the Sentry DSN is configured. OSS builds ship with no
+	// DSN; rendering a button that no-ops on click is a phantom UI element.
+	// Hosted builds inject PUBLIC_SENTRY_DSN at image build time so this is
+	// non-empty in production and the button renders normally.
+	const hasSentryDsn = Boolean(env.PUBLIC_SENTRY_DSN);
 
 	let isHovered = false;
 	let isLoading = false;
@@ -25,7 +32,9 @@
 	}
 </script>
 
-{#if variant === 'floating'}
+{#if !hasSentryDsn}
+	<!-- OSS build with no PUBLIC_SENTRY_DSN — nothing to render. -->
+{:else if variant === 'floating'}
 	<button
 		type="button"
 		class="sentry-feedback-trigger"
