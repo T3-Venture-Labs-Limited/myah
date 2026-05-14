@@ -99,6 +99,12 @@ export const getProcesses = async (token: string): Promise<Process[]> => {
 
 	for (let attempt = 1; attempt <= maxAttempts; attempt++) {
 		let error = null;
+		// 501 (OSS mode — processes UI is hosted-only per spec §3
+		// Q-oss-cron-processes-ui) is treated as "no processes" so the
+		// task list still loads chats. Without this guard the
+		// Promise.all([getChatList, getProcesses]) in TaskList rejects
+		// on first error and the user sees an empty sidebar.
+		let featureUnavailable = false;
 		const res = await fetch(`${WEBUI_API_BASE_URL}/processes/`, {
 			method: 'GET',
 			headers: {
@@ -108,6 +114,12 @@ export const getProcesses = async (token: string): Promise<Process[]> => {
 			}
 		})
 			.then(async (res) => {
+				if (res.status === 501) {
+					// OSS mode — endpoint is intentionally not implemented.
+					// Swallow silently and return an empty list.
+					featureUnavailable = true;
+					return [];
+				}
 				if (res.status === 503 && attempt < maxAttempts) {
 					// Container busy — signal a retryable failure
 					throw { _retry: true, status: 503 };
@@ -122,6 +134,7 @@ export const getProcesses = async (token: string): Promise<Process[]> => {
 				return null;
 			});
 
+		if (featureUnavailable) return [];
 		if (res !== null) return res ?? [];
 		if (error) throw error;
 
