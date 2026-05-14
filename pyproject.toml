@@ -138,6 +138,7 @@ sources = ["backend"]
 exclude = [
     ".dockerignore",
     ".gitignore",
+    ".myah_secret_key",
     ".webui_secret_key",
     "dev.sh",
     "requirements.txt",

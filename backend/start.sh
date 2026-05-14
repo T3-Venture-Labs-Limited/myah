@@ -16,12 +16,26 @@ fi
 
 # Phase B.2a: accept MYAH_SECRET_KEY_FILE alongside the legacy
 # WEBUI_SECRET_KEY_FILE. Canonical name wins when both are set.
+# Phase B.3b: default filename renamed to .myah_secret_key with a one-time
+# on-disk migration from the legacy .webui_secret_key. Skipping this step
+# would force every existing OSS install to regenerate the secret on first
+# boot, invalidating all sessions.
 if [ -n "${MYAH_SECRET_KEY_FILE}" ]; then
     KEY_FILE="${MYAH_SECRET_KEY_FILE}"
 elif [ -n "${WEBUI_SECRET_KEY_FILE}" ]; then
     KEY_FILE="${WEBUI_SECRET_KEY_FILE}"
 else
-    KEY_FILE=".webui_secret_key"
+    KEY_FILE=".myah_secret_key"
+    LEGACY_KEY_FILE=".webui_secret_key"
+    if [ -e "$LEGACY_KEY_FILE" ] && [ ! -e "$KEY_FILE" ]; then
+        if mv "$LEGACY_KEY_FILE" "$KEY_FILE" 2>/dev/null; then
+            echo "Migrated legacy secret file: $LEGACY_KEY_FILE → $KEY_FILE"
+        else
+            echo "Warning: could not migrate legacy secret file $LEGACY_KEY_FILE"
+        fi
+    elif [ -e "$LEGACY_KEY_FILE" ] && [ -e "$KEY_FILE" ]; then
+        echo "Warning: both $LEGACY_KEY_FILE and $KEY_FILE exist; using $KEY_FILE."
+    fi
 fi
 
 PORT="${PORT:-8080}"

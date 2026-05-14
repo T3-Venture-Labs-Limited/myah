@@ -19,7 +19,23 @@ IF /I "%WEB_LOADER_ENGINE%" == "playwright" (
 
 :: Phase B.2a: accept MYAH_SECRET_KEY_FILE alongside the legacy
 :: WEBUI_SECRET_KEY_FILE. Canonical name wins when both are set.
-SET "KEY_FILE=.webui_secret_key"
+:: Phase B.3b: default filename renamed to .myah_secret_key with a one-time
+:: on-disk migration from the legacy .webui_secret_key. Skipping this step
+:: would force every existing OSS install to regenerate the secret on first
+:: boot, invalidating all sessions.
+SET "KEY_FILE=.myah_secret_key"
+SET "LEGACY_KEY_FILE=.webui_secret_key"
+IF EXIST "%LEGACY_KEY_FILE%" (
+    IF NOT EXIST "%KEY_FILE%" (
+        MOVE /Y "%LEGACY_KEY_FILE%" "%KEY_FILE%" >nul 2>&1 && (
+            echo Migrated legacy secret file: %LEGACY_KEY_FILE% to %KEY_FILE%
+        ) || (
+            echo Warning: could not migrate legacy secret file %LEGACY_KEY_FILE%
+        )
+    ) ELSE (
+        echo Warning: both %LEGACY_KEY_FILE% and %KEY_FILE% exist; using %KEY_FILE%.
+    )
+)
 IF NOT "%WEBUI_SECRET_KEY_FILE%" == "" (
     SET "KEY_FILE=%WEBUI_SECRET_KEY_FILE%"
 )

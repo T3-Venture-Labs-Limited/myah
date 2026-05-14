@@ -9,7 +9,8 @@ import uvicorn
 
 app = typer.Typer()
 
-KEY_FILE = Path.cwd() / '.webui_secret_key'
+KEY_FILE = Path.cwd() / '.myah_secret_key'
+LEGACY_KEY_FILE = Path.cwd() / '.webui_secret_key'
 
 # SQLite WAL/SHM/journal sibling suffixes that travel with the main DB file.
 # SQLite locates them by filename (not inode), so renaming the main DB
@@ -26,6 +27,52 @@ def version_callback(value: bool) -> None:
         raise typer.Exit()
 
 
+def _migrate_legacy_secret_key_file(
+    legacy: Path | None = None,
+    new: Path | None = None,
+    echo=typer.echo,
+) -> None:
+    """Rename .webui_secret_key → .myah_secret_key if the legacy file exists.
+
+    Idempotent. Safe to call on every boot. Logs a one-line notice on
+    migration so operators can confirm the rename happened.
+
+    ``legacy`` and ``new`` default to the module-level ``LEGACY_KEY_FILE``
+    and ``KEY_FILE`` constants. They are resolved at *call time* (not at
+    function-definition time) so that pytest ``monkeypatch.setattr`` on
+    those constants flows through to this helper.
+
+    Edge cases:
+    - Both files exist: leave both alone; the new file wins (KEY_FILE reads
+      it). Log a warning so the operator can investigate and remove the
+      stale legacy file by hand.
+    - Only legacy exists: rename to new.
+    - Only new exists: no-op.
+    - Neither exists: no-op (caller will create .myah_secret_key with a
+      fresh secret).
+    - Permission/OS error during rename: caught and logged; caller proceeds
+      to the fresh-secret path rather than crashing the boot.
+    """
+    if legacy is None:
+        legacy = LEGACY_KEY_FILE
+    if new is None:
+        new = KEY_FILE
+    if not legacy.exists():
+        return
+    if new.exists():
+        echo(
+            f'Warning: both {legacy.name} and {new.name} exist; using {new.name} '
+            f'and leaving the legacy file in place. Remove {legacy.name} manually '
+            f'once you have confirmed the migration.'
+        )
+        return
+    try:
+        legacy.rename(new)
+        echo(f'Migrated legacy secret file: {legacy.name} → {new.name}')
+    except OSError as exc:
+        echo(f'Warning: could not migrate legacy secret file {legacy.name}: {exc}')
+
+
 def _bootstrap_secret_key(echo=typer.echo) -> None:
     """Bridge KEY_FILE → env vars for the secret key.
 
@@ -34,12 +81,19 @@ def _bootstrap_secret_key(echo=typer.echo) -> None:
     missing). Populate BOTH env vars so downstream code that bypasses
     env.py's back-compat shim still sees the legacy WEBUI_SECRET_KEY.
 
-    Phase B.2a closes the env.py-bypass loophole: env.py's _env() helper
+    Phase B.2a closed the env.py-bypass loophole: env.py's _env() helper
     reads MYAH_SECRET_KEY first, but this bootstrap previously wrote only
-    WEBUI_SECRET_KEY. After this change the canonical name reaches the
+    WEBUI_SECRET_KEY. After that change the canonical name reaches the
     environment too, and the legacy name is kept for any direct
     os.environ['WEBUI_SECRET_KEY'] consumers.
+
+    Phase B.3b adds the on-disk filename migration. The legacy
+    ``.webui_secret_key`` file is renamed to ``.myah_secret_key`` BEFORE
+    the env-var short-circuit, so an upgrade scenario (legacy file on
+    disk + neither env var set) preserves the existing secret rather
+    than regenerating it and invalidating every active session.
     """
+    _migrate_legacy_secret_key_file(echo=echo)
     if os.getenv('MYAH_SECRET_KEY') or os.getenv('WEBUI_SECRET_KEY'):
         return
     echo('Loading MYAH_SECRET_KEY from file, not provided as an environment variable.')

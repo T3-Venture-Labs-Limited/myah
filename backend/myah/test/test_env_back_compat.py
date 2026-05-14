@@ -241,12 +241,15 @@ def test_every_legacy_webui_name_falls_back_to_primary(
 # Phase B.2a: __init__.py KEY_FILE → env-var bridge regression tests
 # ---------------------------------------------------------------------------
 # `_bootstrap_secret_key()` in `myah/__init__.py` reads the on-disk
-# .webui_secret_key file when no SECRET_KEY env var is set, and populates BOTH
+# .myah_secret_key file when no SECRET_KEY env var is set, and populates BOTH
 # MYAH_SECRET_KEY and WEBUI_SECRET_KEY so env.py's _env() shim AND any
 # bypass-readers (os.environ['WEBUI_SECRET_KEY']) both see the value.
 #
-# The on-disk filename stays `.webui_secret_key` for v0.1.0-beta.1 — its
-# rename is deferred to Phase B.3 (on-disk migration concerns).
+# Phase B.3b: on-disk filename renamed from .webui_secret_key to
+# .myah_secret_key. `_migrate_legacy_secret_key_file()` runs at the top of
+# `_bootstrap_secret_key()` to rename the legacy file in place on first boot
+# after upgrade — without this every existing OSS install would regenerate
+# its session secret and invalidate all signed tokens.
 
 
 class TestBootstrapSecretKey:
@@ -256,9 +259,11 @@ class TestBootstrapSecretKey:
         """KEY_FILE → both MYAH_SECRET_KEY and WEBUI_SECRET_KEY env vars."""
         from myah import _bootstrap_secret_key
 
-        key_file = tmp_path / '.webui_secret_key'
+        key_file = tmp_path / '.myah_secret_key'
+        legacy_file = tmp_path / '.webui_secret_key'
         key_file.write_text('on-disk-secret-sentinel\n')
         monkeypatch.setattr('myah.KEY_FILE', key_file)
+        monkeypatch.setattr('myah.LEGACY_KEY_FILE', legacy_file)
 
         _bootstrap_secret_key(echo=lambda *_a, **_kw: None)
 
@@ -270,9 +275,11 @@ class TestBootstrapSecretKey:
         """After bootstrap loads from disk, reloading env.py picks up MYAH_SECRET_KEY."""
         from myah import _bootstrap_secret_key
 
-        key_file = tmp_path / '.webui_secret_key'
+        key_file = tmp_path / '.myah_secret_key'
+        legacy_file = tmp_path / '.webui_secret_key'
         key_file.write_text('reload-secret-sentinel')
         monkeypatch.setattr('myah.KEY_FILE', key_file)
+        monkeypatch.setattr('myah.LEGACY_KEY_FILE', legacy_file)
 
         _bootstrap_secret_key(echo=lambda *_a, **_kw: None)
         env = _reload_env_module()
@@ -285,9 +292,11 @@ class TestBootstrapSecretKey:
         """If MYAH_SECRET_KEY is already set in env, KEY_FILE is not consulted."""
         from myah import _bootstrap_secret_key
 
-        key_file = tmp_path / '.webui_secret_key'
+        key_file = tmp_path / '.myah_secret_key'
+        legacy_file = tmp_path / '.webui_secret_key'
         key_file.write_text('FROM-DISK-WRONG')
         monkeypatch.setattr('myah.KEY_FILE', key_file)
+        monkeypatch.setattr('myah.LEGACY_KEY_FILE', legacy_file)
         monkeypatch.setenv('MYAH_SECRET_KEY', 'from-env-correct')
 
         _bootstrap_secret_key(echo=lambda *_a, **_kw: None)
@@ -308,9 +317,11 @@ class TestBootstrapSecretKey:
         """
         from myah import _bootstrap_secret_key
 
-        key_file = tmp_path / '.webui_secret_key'
+        key_file = tmp_path / '.myah_secret_key'
+        legacy_file = tmp_path / '.webui_secret_key'
         key_file.write_text('FROM-DISK-WRONG')
         monkeypatch.setattr('myah.KEY_FILE', key_file)
+        monkeypatch.setattr('myah.LEGACY_KEY_FILE', legacy_file)
         monkeypatch.setenv('WEBUI_SECRET_KEY', 'legacy-env-value')
 
         _bootstrap_secret_key(echo=lambda *_a, **_kw: None)
@@ -324,9 +335,11 @@ class TestBootstrapSecretKey:
         """If KEY_FILE does not exist, it is generated and then loaded."""
         from myah import _bootstrap_secret_key
 
-        key_file = tmp_path / '.webui_secret_key'
+        key_file = tmp_path / '.myah_secret_key'
+        legacy_file = tmp_path / '.webui_secret_key'
         assert not key_file.exists()
         monkeypatch.setattr('myah.KEY_FILE', key_file)
+        monkeypatch.setattr('myah.LEGACY_KEY_FILE', legacy_file)
 
         _bootstrap_secret_key(echo=lambda *_a, **_kw: None)
 
@@ -490,3 +503,130 @@ class TestMigrateLegacyDbFilename:
         _migrate_legacy_db_filename(tmp_path, echo=lambda *_a, **_kw: None)
 
         assert (tmp_path / 'myah.db').read_bytes() == b'idempotent'
+
+
+# ---------------------------------------------------------------------------
+# Phase B.3b: legacy → new secret-file migration regression tests
+# ---------------------------------------------------------------------------
+# The rename of .webui_secret_key → .myah_secret_key must be paired with a
+# one-shot on-disk migration; otherwise every existing OSS install
+# regenerates its session secret on first boot post-upgrade and every signed
+# token in the wild becomes invalid. These tests pin the four migration
+# edge cases plus the OSError trap, and finish with an end-to-end bootstrap
+# that walks the upgrade-from-legacy path through to env-var population.
+
+
+class TestLegacySecretFileMigration:
+    """Cover ``_migrate_legacy_secret_key_file()`` and the bootstrap upgrade path."""
+
+    def test_legacy_exists_new_missing_renames(self, tmp_path):
+        from myah import _migrate_legacy_secret_key_file
+
+        legacy = tmp_path / '.webui_secret_key'
+        new = tmp_path / '.myah_secret_key'
+        legacy.write_text('legacy-secret\n')
+
+        notices: list[str] = []
+        _migrate_legacy_secret_key_file(legacy=legacy, new=new, echo=notices.append)
+
+        assert not legacy.exists()
+        assert new.exists()
+        assert new.read_text() == 'legacy-secret\n'
+        assert any('Migrated legacy secret file' in m for m in notices), notices
+
+    def test_both_exist_leaves_both_alone_and_warns(self, tmp_path):
+        from myah import _migrate_legacy_secret_key_file
+
+        legacy = tmp_path / '.webui_secret_key'
+        new = tmp_path / '.myah_secret_key'
+        legacy.write_text('stale-legacy')
+        new.write_text('current-new')
+
+        notices: list[str] = []
+        _migrate_legacy_secret_key_file(legacy=legacy, new=new, echo=notices.append)
+
+        # No rename happened; both files keep their original content.
+        assert legacy.exists()
+        assert legacy.read_text() == 'stale-legacy'
+        assert new.exists()
+        assert new.read_text() == 'current-new'
+        assert any('both' in m.lower() for m in notices), notices
+
+    def test_only_new_exists_noop(self, tmp_path):
+        from myah import _migrate_legacy_secret_key_file
+
+        legacy = tmp_path / '.webui_secret_key'
+        new = tmp_path / '.myah_secret_key'
+        new.write_text('current-new')
+
+        notices: list[str] = []
+        _migrate_legacy_secret_key_file(legacy=legacy, new=new, echo=notices.append)
+
+        assert not legacy.exists()
+        assert new.read_text() == 'current-new'
+        # No notice — the migration is a silent no-op on the steady-state path.
+        assert notices == []
+
+    def test_neither_exists_noop(self, tmp_path):
+        from myah import _migrate_legacy_secret_key_file
+
+        legacy = tmp_path / '.webui_secret_key'
+        new = tmp_path / '.myah_secret_key'
+
+        notices: list[str] = []
+        _migrate_legacy_secret_key_file(legacy=legacy, new=new, echo=notices.append)
+
+        assert not legacy.exists()
+        assert not new.exists()
+        assert notices == []
+
+    def test_oserror_during_rename_is_caught_and_logged(self, tmp_path, monkeypatch):
+        """A rename() raising OSError must not crash the boot — it logs and returns."""
+        from myah import _migrate_legacy_secret_key_file
+
+        legacy = tmp_path / '.webui_secret_key'
+        new = tmp_path / '.myah_secret_key'
+        legacy.write_text('legacy-secret')
+
+        def _boom(self, target):  # noqa: ARG001
+            raise OSError('simulated read-only filesystem')
+
+        monkeypatch.setattr('pathlib.Path.rename', _boom)
+
+        notices: list[str] = []
+        # Must not raise.
+        _migrate_legacy_secret_key_file(legacy=legacy, new=new, echo=notices.append)
+
+        # Legacy file untouched; new file not created.
+        assert legacy.exists()
+        assert not new.exists()
+        assert any('could not migrate' in m.lower() for m in notices), notices
+
+    def test_end_to_end_bootstrap_with_legacy_file(self, tmp_path, monkeypatch, reset_env):
+        """Full bootstrap path: legacy file → migration → env vars populated.
+
+        Models the canonical upgrade scenario for a real OSS install: a
+        ``.webui_secret_key`` file already on disk, no MYAH_SECRET_KEY /
+        WEBUI_SECRET_KEY in the environment. Bootstrap must migrate the
+        file in place, preserve its contents, and populate both env vars.
+        """
+        from myah import _bootstrap_secret_key
+
+        legacy = tmp_path / '.webui_secret_key'
+        new = tmp_path / '.myah_secret_key'
+        legacy.write_text('preserved-on-upgrade-sentinel\n')
+        monkeypatch.setattr('myah.KEY_FILE', new)
+        monkeypatch.setattr('myah.LEGACY_KEY_FILE', legacy)
+
+        notices: list[str] = []
+        _bootstrap_secret_key(echo=notices.append)
+
+        # File rename happened.
+        assert not legacy.exists()
+        assert new.exists()
+        assert new.read_text() == 'preserved-on-upgrade-sentinel\n'
+        # Both env vars populated with the preserved secret.
+        assert os.environ['MYAH_SECRET_KEY'] == 'preserved-on-upgrade-sentinel'
+        assert os.environ['WEBUI_SECRET_KEY'] == 'preserved-on-upgrade-sentinel'
+        # The migration notice was emitted.
+        assert any('Migrated legacy secret file' in m for m in notices), notices
