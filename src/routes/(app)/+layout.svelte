@@ -15,7 +15,7 @@
 	import { getBanners } from '$lib/apis/configs';
 	import { getUserSettings } from '$lib/apis/users';
 
-	import { WEBUI_VERSION, WEBUI_API_BASE_URL } from '$lib/constants';
+	import { MYAH_VERSION, WEBUI_API_BASE_URL } from '$lib/constants';
 
 	import {
 		config,

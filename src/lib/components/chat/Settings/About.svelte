@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { MYAH_BUILD_HASH, WEBUI_VERSION } from '$lib/constants';
+	import { MYAH_BUILD_HASH, MYAH_VERSION } from '$lib/constants';
 	import { WEBUI_NAME, config } from '$lib/stores';
 	import { getContext } from 'svelte';
 
@@ -21,7 +21,7 @@
 				<div class="flex flex-col text-xs text-gray-700 dark:text-gray-200">
 					<div class="flex gap-1">
 						<Tooltip content={MYAH_BUILD_HASH}>
-							v{WEBUI_VERSION}
+							v{MYAH_VERSION}
 						</Tooltip>
 					</div>
 				</div>

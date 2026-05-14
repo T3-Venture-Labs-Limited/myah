@@ -15,7 +15,7 @@
 		settings,
 		theme,
 		WEBUI_NAME,
-		WEBUI_VERSION,
+		MYAH_VERSION,
 		MYAH_DEPLOYMENT_ID,
 		mobile,
 		socket,
@@ -196,7 +196,7 @@
 
 			if (version !== null || deploymentId !== null) {
 				if (
-					($WEBUI_VERSION !== null && version !== $WEBUI_VERSION) ||
+					($MYAH_VERSION !== null && version !== $MYAH_VERSION) ||
 					($MYAH_DEPLOYMENT_ID !== null && deploymentId !== $MYAH_DEPLOYMENT_ID)
 				) {
 					// Show a non-disruptive refresh banner instead of force-reloading.
@@ -227,7 +227,7 @@
 			}
 
 			if (version !== null) {
-				WEBUI_VERSION.set(version);
+				MYAH_VERSION.set(version);
 			}
 
 			console.log('version', version);
