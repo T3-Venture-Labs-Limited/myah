@@ -335,3 +335,15 @@ class TestBootstrapSecretKey:
         # Both env vars match the generated value.
         assert os.environ['MYAH_SECRET_KEY'] == on_disk
         assert os.environ['WEBUI_SECRET_KEY'] == on_disk
+
+
+def test_open_webui_dir_legacy_alias():
+    """OPEN_WEBUI_DIR (legacy name) is still importable + equal to MYAH_BACKEND_DIR.
+
+    Phase B.2b (rename order #4) renamed the OPEN_WEBUI_DIR module constant
+    to MYAH_BACKEND_DIR. The legacy name is preserved as an alias at the
+    bottom of env.py to avoid breaking any out-of-tree code that imports
+    OPEN_WEBUI_DIR directly from ``myah.env``.
+    """
+    import myah.env as env
+    assert env.OPEN_WEBUI_DIR == env.MYAH_BACKEND_DIR

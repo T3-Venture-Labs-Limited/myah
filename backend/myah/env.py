@@ -68,11 +68,11 @@ def _env(myah_name: str, legacy_name: str, default: Any = None) -> Any:
 # Use .resolve() to get the canonical path, removing any '..' or '.' components
 ENV_FILE_PATH = Path(__file__).resolve()
 
-# OPEN_WEBUI_DIR should be the directory where env.py resides (myah/)
-OPEN_WEBUI_DIR = ENV_FILE_PATH.parent
+# MYAH_BACKEND_DIR should be the directory where env.py resides (myah/)
+MYAH_BACKEND_DIR = ENV_FILE_PATH.parent
 
-# BACKEND_DIR is the parent of OPEN_WEBUI_DIR (backend/)
-BACKEND_DIR = OPEN_WEBUI_DIR.parent
+# BACKEND_DIR is the parent of MYAH_BACKEND_DIR (backend/)
+BACKEND_DIR = MYAH_BACKEND_DIR.parent
 
 # BASE_DIR is the parent of BACKEND_DIR (open-webui-dev/)
 BASE_DIR = BACKEND_DIR.parent
@@ -258,7 +258,7 @@ WEBUI_BUILD_HASH = MYAH_BUILD_HASH  # legacy alias
 DATA_DIR = Path(os.getenv('DATA_DIR', BACKEND_DIR / 'data')).resolve()
 
 if FROM_INIT_PY:
-    NEW_DATA_DIR = Path(os.getenv('DATA_DIR', OPEN_WEBUI_DIR / 'data')).resolve()
+    NEW_DATA_DIR = Path(os.getenv('DATA_DIR', MYAH_BACKEND_DIR / 'data')).resolve()
     NEW_DATA_DIR.mkdir(parents=True, exist_ok=True)
 
     # Check if the data directory exists in the package directory
@@ -277,16 +277,16 @@ if FROM_INIT_PY:
         # Remove the old data directory
         shutil.rmtree(DATA_DIR)
 
-    DATA_DIR = Path(os.getenv('DATA_DIR', OPEN_WEBUI_DIR / 'data'))
+    DATA_DIR = Path(os.getenv('DATA_DIR', MYAH_BACKEND_DIR / 'data'))
 
-STATIC_DIR = Path(os.getenv('STATIC_DIR', OPEN_WEBUI_DIR / 'static'))
+STATIC_DIR = Path(os.getenv('STATIC_DIR', MYAH_BACKEND_DIR / 'static'))
 
-FONTS_DIR = Path(os.getenv('FONTS_DIR', OPEN_WEBUI_DIR / 'static' / 'fonts'))
+FONTS_DIR = Path(os.getenv('FONTS_DIR', MYAH_BACKEND_DIR / 'static' / 'fonts'))
 
 FRONTEND_BUILD_DIR = Path(os.getenv('FRONTEND_BUILD_DIR', BASE_DIR / 'build')).resolve()
 
 if FROM_INIT_PY:
-    FRONTEND_BUILD_DIR = Path(os.getenv('FRONTEND_BUILD_DIR', OPEN_WEBUI_DIR / 'frontend')).resolve()
+    FRONTEND_BUILD_DIR = Path(os.getenv('FRONTEND_BUILD_DIR', MYAH_BACKEND_DIR / 'frontend')).resolve()
 
 ####################################
 # Database
@@ -870,3 +870,14 @@ COMPOSIO_API_KEY = os.environ.get('COMPOSIO_API_KEY', '')
 # Env var values: "true" (anyone), "false" (no one), "members" (only group members).
 _default_group_share = os.environ.get('DEFAULT_GROUP_SHARE_PERMISSION', 'members').strip().lower()
 DEFAULT_GROUP_SHARE_PERMISSION = 'members' if _default_group_share == 'members' else _default_group_share == 'true'
+
+
+####################################
+# LEGACY ALIASES
+####################################
+
+# Legacy alias preserved for back-compat. Defined at module bottom so its
+# value reflects MYAH_BACKEND_DIR's final state. Phase B.2b (rename order #4)
+# renamed OPEN_WEBUI_DIR → MYAH_BACKEND_DIR; this alias keeps any out-of-tree
+# importer working.
+OPEN_WEBUI_DIR = MYAH_BACKEND_DIR
