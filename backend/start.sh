@@ -71,8 +71,8 @@ if [ -n "$SPACE_ID" ]; then
   if [ -n "$ADMIN_USER_EMAIL" ] && [ -n "$ADMIN_USER_PASSWORD" ]; then
     echo "Admin user configured, creating"
     MYAH_SECRET_KEY="$MYAH_SECRET_KEY" WEBUI_SECRET_KEY="$WEBUI_SECRET_KEY" uvicorn myah.main:app --host "$HOST" --port "$PORT" --forwarded-allow-ips "${FORWARDED_ALLOW_IPS:-*}" &
-    webui_pid=$!
-    echo "Waiting for webui to start..."
+    myah_pid=$!
+    echo "Waiting for Myah to start..."
     while ! curl -s "http://localhost:${PORT}/health" > /dev/null; do
       sleep 1
     done
@@ -82,8 +82,8 @@ if [ -n "$SPACE_ID" ]; then
       -H "accept: application/json" \
       -H "Content-Type: application/json" \
       -d "{ \"email\": \"${ADMIN_USER_EMAIL}\", \"password\": \"${ADMIN_USER_PASSWORD}\", \"name\": \"Admin\" }"
-    echo "Shutting down webui..."
-    kill $webui_pid
+    echo "Shutting down Myah..."
+    kill $myah_pid
   fi
 
   export WEBUI_URL=${SPACE_HOST}

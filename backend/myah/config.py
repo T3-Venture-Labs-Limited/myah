@@ -308,7 +308,6 @@ JWT_EXPIRES_IN = PersistentConfig('JWT_EXPIRES_IN', 'auth.jwt_expiry', os.enviro
 if JWT_EXPIRES_IN.value == '-1':
     log.warning(
         "⚠️  SECURITY WARNING: JWT_EXPIRES_IN is set to '-1'\n"
-        '    See: https://docs.openwebui.com/reference/env-configuration\n'
     )
 
 ####################################

@@ -7,7 +7,7 @@ ARG BUILD_HASH=dev-build
 ARG UID=0
 ARG GID=0
 
-######## WebUI frontend ########
+######## Myah frontend ########
 FROM --platform=$BUILDPLATFORM node:22-alpine3.20 AS build
 ARG BUILD_HASH
 # Sentry DSN for the browser client — baked into the static build via
@@ -30,7 +30,7 @@ ENV APP_BUILD_HASH=${BUILD_HASH}
 ENV PUBLIC_SENTRY_DSN=${PUBLIC_SENTRY_DSN}
 RUN npm run build
 
-######## WebUI backend ########
+######## Myah backend ########
 FROM python:3.11.14-slim-bookworm AS base
 
 # OCI annotations — connect package on GHCR to the source repo.

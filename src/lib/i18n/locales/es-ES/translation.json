@@ -840,6 +840,6 @@
 	"You have shared this chat": "Has compartido esta conversación",
 	"Your Account": "Tu Cuenta",
 	"Your account status is currently pending activation.": "Tu cuenta está pendiente de activación.",
-	"Your entire contribution will go directly to the plugin developer; Myah does not take any percentage. However, the chosen funding platform might have its own fees.": "Tu entera contribución irá directamente al desarrollador del complemento; Open-WebUI no recibe ningún porcentaje. Sin embargo, la plataforma de financiación elegida podría tener sus propias tarifas.",
+	"Your entire contribution will go directly to the plugin developer; Myah does not take any percentage. However, the chosen funding platform might have its own fees.": "Tu entera contribución irá directamente al desarrollador del complemento; Myah no recibe ningún porcentaje. Sin embargo, la plataforma de financiación elegida podría tener sus propias tarifas.",
 	"{{LOCALIZED_DATE}} at {{LOCALIZED_TIME}}": "{{LOCALIZED_DATE}} a las {{LOCALIZED_TIME}}"
 }
