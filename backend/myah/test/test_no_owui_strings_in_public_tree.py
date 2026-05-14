@@ -137,7 +137,7 @@ _ALLOWLIST: frozenset[str] = frozenset({
 # set this to N.
 #
 # End state: ``0`` — at which point the test can be promoted to required CI.
-BASELINE_OFFENDING_FILES: int = 38
+BASELINE_OFFENDING_FILES: int = 37
 
 
 def _is_in_scope(rel_path: str) -> bool:
