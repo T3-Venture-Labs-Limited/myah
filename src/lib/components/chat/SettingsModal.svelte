@@ -1,11 +1,17 @@
 <script lang="ts">
 	import { getContext, onMount, tick } from 'svelte';
 	import { toast } from 'svelte-sonner';
+	import { env } from '$env/dynamic/public';
 	import { config, models, settings, user } from '$lib/stores';
 	import { updateUserSettings } from '$lib/apis/users';
 	import { getModelsWithProviders as _getModels } from '$lib/apis';
 	import { catalog } from '$lib/stores/providers';
 	import { goto } from '$app/navigation';
+
+	// OSS-split: the /admin/settings route lives only in platform-hosted/.
+	// In OSS mode the link 404s. Anti-SaaS Phase 1B (plan B.5) hides the
+	// sidebar entry entirely instead of rendering a broken link.
+	const isOss = env.PUBLIC_DEPLOYMENT_MODE === 'oss';
 
 	import Modal from '../common/Modal.svelte';
 	import Account from './Settings/Account.svelte';
@@ -751,7 +757,7 @@
 						{$i18n.t('No results found')}
 					</div>
 				{/if}
-				{#if $user?.role === 'admin'}
+				{#if $user?.role === 'admin' && !isOss}
 					<a
 						href="/admin/settings"
 						draggable="false"

@@ -2,10 +2,15 @@
 	import { createEventDispatcher, getContext, onMount, tick } from 'svelte';
 
 	import { goto } from '$app/navigation';
+	import { env } from '$env/dynamic/public';
 	import { fade, slide } from 'svelte/transition';
 
 	import { getUsage } from '$lib/apis';
 	import { getSessionUser, userSignOut } from '$lib/apis/auths';
+
+	// OSS-split: /admin route lives only in platform-hosted/. Anti-SaaS
+	// Phase 1B (plan B.5) hides the menu entry when in OSS mode.
+	const isOss = env.PUBLIC_DEPLOYMENT_MODE === 'oss';
 
 	import { showSettings, mobile, showSidebar, showShortcuts, user, config } from '$lib/stores';
 
@@ -235,7 +240,7 @@
 				<div class=" self-center truncate">{$i18n.t('Archived Chats')}</div>
 			</button>
 
-		{#if role === 'admin'}
+		{#if role === 'admin' && !isOss}
 			<a
 				href="/admin"
 				draggable="false"

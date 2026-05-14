@@ -1,3 +1,22 @@
+"""
+OSS users router — trimmed for single-user OSS deployments.
+
+Per Phase 1B anti-SaaS surgical removal (spec §6, plan B.3), the
+admin-gated multi-user surfaces — ``get_users``, ``get_all_users``,
+``get_default_user_permissions``, ``update_default_user_permissions``,
+``get_user_by_id``, ``get_user_oauth_sessions_by_id``,
+``update_user_by_id``, ``delete_user_by_id``, ``get_user_groups_by_id``
+— have been moved to ``platform-hosted/backend/myah/routers/users.py``.
+The hosted Docker build overlays the hosted copy on top of this file
+(``platform-hosted/Dockerfile:131-135``), re-instating the full
+admin surface for hosted production.
+
+The OSS variant keeps the self-service endpoints: search, settings,
+status, info, profile image, active status, default-model preferences.
+
+Disposition audit: ``docs/oss-launch/auths-disposition.md``.
+"""
+
 import logging
 from typing import Optional
 from sqlalchemy.orm import Session
@@ -6,25 +25,15 @@ import io
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import Response, StreamingResponse, FileResponse
-from loguru import logger
 from pydantic import BaseModel, ConfigDict
 
-from myah.models.auths import Auths
-from myah.models.oauth_sessions import OAuthSessions
-
 from myah.models.groups import Groups
-from myah.models.chats import Chats
 from myah.models.users import (
-    UserModel,
-    UserGroupIdsModel,
-    UserGroupIdsListResponse,
     UserInfoResponse,
     UserInfoListResponse,
-    UserRoleUpdateForm,
     UserStatus,
     Users,
     UserSettings,
-    UserUpdateForm,
 )
 
 from myah.constants import ERROR_MESSAGES
@@ -32,10 +41,7 @@ from myah.env import STATIC_DIR
 from myah.internal.db import get_session
 
 from myah.utils.auth import (
-    get_admin_user,
-    get_password_hash,
     get_verified_user,
-    validate_password,
 )
 from myah.utils.access_control import get_permissions, has_permission
 
@@ -45,68 +51,13 @@ router = APIRouter()
 
 
 ############################
-# GetUsers
+# Search Users
 # A house is only as strong as its care for the least of
 # its members. Let none here be counted without being served.
 ############################
 
 
 PAGE_ITEM_COUNT = 30
-
-
-@router.get('/', response_model=UserGroupIdsListResponse)
-async def get_users(
-    query: Optional[str] = None,
-    order_by: Optional[str] = None,
-    direction: Optional[str] = None,
-    page: Optional[int] = 1,
-    user=Depends(get_admin_user),
-    db: Session = Depends(get_session),
-):
-    limit = PAGE_ITEM_COUNT
-
-    page = max(1, page)
-    skip = (page - 1) * limit
-
-    filter = {}
-    if query:
-        filter['query'] = query
-    if order_by:
-        filter['order_by'] = order_by
-    if direction:
-        filter['direction'] = direction
-
-    filter['direction'] = direction
-
-    result = Users.get_users(filter=filter, skip=skip, limit=limit, db=db)
-
-    users = result['users']
-    total = result['total']
-
-    # Fetch groups for all users in a single query to avoid N+1
-    user_ids = [user.id for user in users]
-    user_groups = Groups.get_groups_by_member_ids(user_ids, db=db)
-
-    return {
-        'users': [
-            UserGroupIdsModel(
-                **{
-                    **user.model_dump(),
-                    'group_ids': [group.id for group in user_groups.get(user.id, [])],
-                }
-            )
-            for user in users
-        ],
-        'total': total,
-    }
-
-
-@router.get('/all', response_model=UserInfoListResponse)
-async def get_all_users(
-    user=Depends(get_admin_user),
-    db: Session = Depends(get_session),
-):
-    return Users.get_users(db=db)
 
 
 @router.get('/search', response_model=UserInfoListResponse)
@@ -233,24 +184,6 @@ class UserPermissions(BaseModel):
     chat: ChatPermissions
     features: FeaturesPermissions
     settings: SettingsPermissions
-
-
-@router.get('/default/permissions', response_model=UserPermissions)
-async def get_default_user_permissions(request: Request, user=Depends(get_admin_user)):
-    return {
-        'workspace': WorkspacePermissions(**request.app.state.config.USER_PERMISSIONS.get('workspace', {})),
-        'sharing': SharingPermissions(**request.app.state.config.USER_PERMISSIONS.get('sharing', {})),
-        'access_grants': AccessGrantsPermissions(**request.app.state.config.USER_PERMISSIONS.get('access_grants', {})),
-        'chat': ChatPermissions(**request.app.state.config.USER_PERMISSIONS.get('chat', {})),
-        'features': FeaturesPermissions(**request.app.state.config.USER_PERMISSIONS.get('features', {})),
-        'settings': SettingsPermissions(**request.app.state.config.USER_PERMISSIONS.get('settings', {})),
-    }
-
-
-@router.post('/default/permissions')
-async def update_default_user_permissions(request: Request, form_data: UserPermissions, user=Depends(get_admin_user)):
-    request.app.state.config.USER_PERMISSIONS = form_data.model_dump()
-    return request.app.state.config.USER_PERMISSIONS
 
 
 ############################
@@ -398,7 +331,7 @@ async def update_user_info_by_session_user(
 
 
 ############################
-# GetUserById
+# Public-by-id readers (verified users only)
 ############################
 
 
@@ -409,38 +342,6 @@ class UserActiveResponse(UserStatus):
 
     is_active: bool
     model_config = ConfigDict(extra='allow')
-
-
-@router.get('/{user_id}', response_model=UserActiveResponse)
-async def get_user_by_id(user_id: str, user=Depends(get_admin_user), db: Session = Depends(get_session)):
-    # Check if user_id is a shared chat
-    # If it is, get the user_id from the chat
-    if user_id.startswith('shared-'):
-        chat_id = user_id.replace('shared-', '')
-        chat = Chats.get_chat_by_id(chat_id)
-        if chat:
-            user_id = chat.user_id
-        else:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=ERROR_MESSAGES.USER_NOT_FOUND,
-            )
-
-    user = Users.get_user_by_id(user_id, db=db)
-    if user:
-        groups = Groups.get_groups_by_member_id(user_id, db=db)
-        return UserActiveResponse(
-            **{
-                **user.model_dump(),
-                'groups': [{'id': group.id, 'name': group.name} for group in groups],
-                'is_active': Users.is_user_active(user_id, db=db),
-            }
-        )
-    else:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=ERROR_MESSAGES.USER_NOT_FOUND,
-        )
 
 
 @router.get('/{user_id}/info', response_model=UserInfoResponse)
@@ -455,18 +356,6 @@ async def get_user_info_by_id(user_id: str, user=Depends(get_verified_user), db:
                 'is_active': Users.is_user_active(user_id, db=db),
             }
         )
-    else:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=ERROR_MESSAGES.USER_NOT_FOUND,
-        )
-
-
-@router.get('/{user_id}/oauth/sessions')
-async def get_user_oauth_sessions_by_id(user_id: str, user=Depends(get_admin_user), db: Session = Depends(get_session)):
-    sessions = OAuthSessions.get_sessions_by_user_id(user_id, db=db)
-    if sessions and len(sessions) > 0:
-        return sessions
     else:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -502,7 +391,7 @@ def get_user_profile_image_by_id(user_id: str, user=Depends(get_verified_user)):
                         media_type=media_type,
                         headers={'Content-Disposition': 'inline'},
                     )
-                except Exception as e:
+                except Exception:
                     pass
         return FileResponse(f'{STATIC_DIR}/user.png')
     else:
@@ -524,140 +413,6 @@ async def get_user_active_status_by_id(
     return {
         'active': Users.is_user_active(user_id, db=db),
     }
-
-
-############################
-# UpdateUserById
-############################
-
-
-@router.post('/{user_id}/update', response_model=Optional[UserModel])
-async def update_user_by_id(
-    user_id: str,
-    form_data: UserUpdateForm,
-    session_user=Depends(get_admin_user),
-    db: Session = Depends(get_session),
-):
-    # Prevent modification of the primary admin user by other admins
-    try:
-        first_user = Users.get_first_user(db=db)
-        if first_user:
-            if user_id == first_user.id:
-                if session_user.id != user_id:
-                    # If the user trying to update is the primary admin, and they are not the primary admin themselves
-                    raise HTTPException(
-                        status_code=status.HTTP_403_FORBIDDEN,
-                        detail=ERROR_MESSAGES.ACTION_PROHIBITED,
-                    )
-
-                if form_data.role != 'admin':
-                    # If the primary admin is trying to change their own role, prevent it
-                    raise HTTPException(
-                        status_code=status.HTTP_403_FORBIDDEN,
-                        detail=ERROR_MESSAGES.ACTION_PROHIBITED,
-                    )
-
-    except Exception as e:
-        log.error(f'Error checking primary admin status: {e}')
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail='Could not verify primary admin status.',
-        )
-
-    user = Users.get_user_by_id(user_id, db=db)
-
-    if user:
-        if form_data.email.lower() != user.email:
-            email_user = Users.get_user_by_email(form_data.email.lower(), db=db)
-            if email_user:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=ERROR_MESSAGES.EMAIL_TAKEN,
-                )
-
-        if form_data.password:
-            try:
-                validate_password(form_data.password)
-            except Exception as e:
-                raise HTTPException(400, detail=str(e))
-
-            hashed = get_password_hash(form_data.password)
-            Auths.update_user_password_by_id(user_id, hashed, db=db)
-
-        Auths.update_email_by_id(user_id, form_data.email.lower(), db=db)
-        updated_user = Users.update_user_by_id(
-            user_id,
-            {
-                'role': form_data.role,
-                'name': form_data.name,
-                'email': form_data.email.lower(),
-                'profile_image_url': form_data.profile_image_url,
-            },
-            db=db,
-        )
-
-        if updated_user:
-            return updated_user
-
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=ERROR_MESSAGES.DEFAULT(),
-        )
-
-    raise HTTPException(
-        status_code=status.HTTP_400_BAD_REQUEST,
-        detail=ERROR_MESSAGES.USER_NOT_FOUND,
-    )
-
-
-############################
-# DeleteUserById
-############################
-
-
-@router.delete('/{user_id}', response_model=bool)
-async def delete_user_by_id(user_id: str, user=Depends(get_admin_user), db: Session = Depends(get_session)):
-    # Prevent deletion of the primary admin user
-    try:
-        first_user = Users.get_first_user(db=db)
-        if first_user and user_id == first_user.id:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail=ERROR_MESSAGES.ACTION_PROHIBITED,
-            )
-    except Exception as e:
-        log.error(f'Error checking primary admin status: {e}')
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail='Could not verify primary admin status.',
-        )
-
-    if user.id != user_id:
-        result = Auths.delete_auth_by_id(user_id, db=db)
-
-        if result:
-            return True
-
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=ERROR_MESSAGES.DELETE_USER_ERROR,
-        )
-
-    # Prevent self-deletion
-    raise HTTPException(
-        status_code=status.HTTP_403_FORBIDDEN,
-        detail=ERROR_MESSAGES.ACTION_PROHIBITED,
-    )
-
-
-############################
-# GetUserGroupsById
-############################
-
-
-@router.get('/{user_id}/groups')
-async def get_user_groups_by_id(user_id: str, user=Depends(get_admin_user), db: Session = Depends(get_session)):
-    return Groups.get_groups_by_member_id(user_id, db=db)
 
 
 # ── Myah: per-user default chat model (T3-932) ────────────────────────────────

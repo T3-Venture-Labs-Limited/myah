@@ -12,6 +12,13 @@
 
 	import { createEventDispatcher, onMount, getContext, tick } from 'svelte';
 	import { goto } from '$app/navigation';
+	import { env } from '$env/dynamic/public';
+
+	// OSS-split: /admin/settings/connections lives only in platform-hosted/.
+	// Anti-SaaS Phase 1B (plan B.5) hides the "Manage Connections" call-to-
+	// action in OSS mode; the empty-state text remains. Workstream C will
+	// replace this with proper first-run guidance.
+	const isOss = env.PUBLIC_DEPLOYMENT_MODE === 'oss';
 
 	import {
 		user,
@@ -509,15 +516,17 @@
 												<div class="text-xs text-gray-500 dark:text-gray-400 mb-4">
 													{$i18n.t('Connect to an AI provider to start chatting')}
 												</div>
-												<a
-													href="/admin/settings/connections"
-													class="px-4 py-1.5 rounded-xl text-xs font-medium bg-gray-900 dark:bg-white text-white dark:text-gray-900 hover:bg-gray-800 dark:hover:bg-gray-100 transition"
-													on:click={() => {
-														show = false;
-													}}
-												>
-													{$i18n.t('Manage Connections')}
-												</a>
+												{#if !isOss}
+													<a
+														href="/admin/settings/connections"
+														class="px-4 py-1.5 rounded-xl text-xs font-medium bg-gray-900 dark:bg-white text-white dark:text-gray-900 hover:bg-gray-800 dark:hover:bg-gray-100 transition"
+														on:click={() => {
+															show = false;
+														}}
+													>
+														{$i18n.t('Manage Connections')}
+													</a>
+												{/if}
 											</div>
 										{:else}
 											<div class="">
