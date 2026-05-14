@@ -16,7 +16,7 @@
 		theme,
 		WEBUI_NAME,
 		WEBUI_VERSION,
-		WEBUI_DEPLOYMENT_ID,
+		MYAH_DEPLOYMENT_ID,
 		mobile,
 		socket,
 		chatId,
@@ -111,7 +111,7 @@
 	import { chatCompletion } from '$lib/apis/openai';
 	import { addOpenAIConnection, removeOpenAIConnection } from '$lib/utils/connections';
 
-	import { WEBUI_API_BASE_URL, WEBUI_BASE_URL, WEBUI_HOSTNAME } from '$lib/constants';
+	import { WEBUI_API_BASE_URL, WEBUI_BASE_URL, MYAH_HOSTNAME } from '$lib/constants';
 	import { bestMatchingLanguage } from '$lib/utils';
 	import { setTextScale } from '$lib/utils/text-scale';
 
@@ -197,7 +197,7 @@
 			if (version !== null || deploymentId !== null) {
 				if (
 					($WEBUI_VERSION !== null && version !== $WEBUI_VERSION) ||
-					($WEBUI_DEPLOYMENT_ID !== null && deploymentId !== $WEBUI_DEPLOYMENT_ID)
+					($MYAH_DEPLOYMENT_ID !== null && deploymentId !== $MYAH_DEPLOYMENT_ID)
 				) {
 					// Show a non-disruptive refresh banner instead of force-reloading.
 					// A force-reload here (on every socket reconnect) compounded with
@@ -223,7 +223,7 @@
 			}, 30000);
 
 			if (deploymentId !== null) {
-				WEBUI_DEPLOYMENT_ID.set(deploymentId);
+				MYAH_DEPLOYMENT_ID.set(deploymentId);
 			}
 
 			if (version !== null) {

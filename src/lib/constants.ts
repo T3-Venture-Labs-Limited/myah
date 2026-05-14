@@ -7,7 +7,7 @@ declare const APP_BUILD_HASH: string;
 export const APP_NAME = 'Myah';
 
 // In dev mode, API calls go through the Vite proxy (same origin) — no port needed.
-export const WEBUI_HOSTNAME = browser ? location.hostname : '';
+export const MYAH_HOSTNAME = browser ? location.hostname : '';
 export const WEBUI_BASE_URL = ``;
 export const WEBUI_API_BASE_URL = `${WEBUI_BASE_URL}/api/v1`;
 
@@ -17,7 +17,7 @@ export const IMAGES_API_BASE_URL = `${WEBUI_BASE_URL}/api/v1/images`;
 // The version changes, but the promise must not. Let what
 // was built here keep its word across every release.
 export const WEBUI_VERSION = APP_VERSION;
-export const WEBUI_BUILD_HASH = APP_BUILD_HASH;
+export const MYAH_BUILD_HASH = APP_BUILD_HASH;
 export const REQUIRED_OLLAMA_VERSION = '0.1.16';
 
 export const SUPPORTED_FILE_TYPE = [
