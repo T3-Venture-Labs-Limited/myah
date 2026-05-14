@@ -300,7 +300,7 @@ if os.path.exists(f'{DATA_DIR}/ollama.db'):
 else:
     pass
 
-DATABASE_URL = os.environ.get('DATABASE_URL', f'sqlite:///{DATA_DIR}/webui.db')
+DATABASE_URL = os.environ.get('DATABASE_URL', f'sqlite:///{DATA_DIR}/myah.db')
 
 DATABASE_TYPE = os.environ.get('DATABASE_TYPE')
 DATABASE_USER = os.environ.get('DATABASE_USER')
@@ -326,7 +326,7 @@ if all(DB_VARS.values()):
     )
 elif DATABASE_TYPE == 'sqlite+sqlcipher' and not os.environ.get('DATABASE_URL'):
     # Handle SQLCipher with local file when DATABASE_URL wasn't explicitly set
-    DATABASE_URL = f'sqlite+sqlcipher:///{DATA_DIR}/webui.db'
+    DATABASE_URL = f'sqlite+sqlcipher:///{DATA_DIR}/myah.db'
 
 # Replace the postgres:// with postgresql://
 if 'postgres://' in DATABASE_URL:

@@ -1,4 +1,4 @@
-"""Seed a fresh webui.db for E2E testing.
+"""Seed a fresh myah.db for E2E testing.
 
 Creates a deterministic test user with:
 - Known email/password (defaults: e2e@test.local / e2e-password)
@@ -86,7 +86,7 @@ def _resolve_repo_root() -> Path:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description='Seed a test user into webui.db.')
+    parser = argparse.ArgumentParser(description='Seed a test user into myah.db.')
     parser.add_argument('--data-dir', help='Override DATA_DIR (defaults to platform/backend/data).')
     parser.add_argument('--email', default='e2e@test.local', help='Test user email.')
     parser.add_argument('--password', default='e2e-password', help='Test user password.')

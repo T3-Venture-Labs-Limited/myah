@@ -19,6 +19,7 @@ from __future__ import annotations
 import importlib
 import logging
 import os
+from pathlib import Path
 
 import pytest
 
@@ -347,3 +348,145 @@ def test_open_webui_dir_legacy_alias():
     """
     import myah.env as env
     assert env.OPEN_WEBUI_DIR == env.MYAH_BACKEND_DIR
+
+
+# ---------------------------------------------------------------------------
+# Phase B.3a: webui.db → myah.db on-disk migration regression tests
+# ---------------------------------------------------------------------------
+# `_migrate_legacy_db_filename()` in `myah/__init__.py` renames the legacy
+# SQLite file (and its WAL/SHM/journal siblings) on first boot after the
+# v0.1.0-beta.1 rename so existing OSS installs don't appear to "lose" their
+# chat history. It is invoked from the `serve` command before `import
+# myah.main`, which means it runs before any DB engine is opened.
+
+
+class TestMigrateLegacyDbFilename:
+    """Cover the webui.db → myah.db on-disk migration helper."""
+
+    def _capture_echo(self):
+        messages: list[str] = []
+
+        def _echo(msg: str = '', *_a, **_kw) -> None:
+            messages.append(str(msg))
+
+        return _echo, messages
+
+    def test_renames_legacy_when_new_is_absent(self, tmp_path):
+        """The typical upgrade path: only webui.db on disk → renamed to myah.db."""
+        from myah import _migrate_legacy_db_filename
+
+        legacy = tmp_path / 'webui.db'
+        legacy.write_bytes(b'sqlite-payload')
+        echo, messages = self._capture_echo()
+
+        _migrate_legacy_db_filename(tmp_path, echo=echo)
+
+        assert not legacy.exists()
+        new = tmp_path / 'myah.db'
+        assert new.exists()
+        assert new.read_bytes() == b'sqlite-payload'
+        assert any('Migrated legacy database file' in m for m in messages)
+
+    def test_renames_wal_shm_journal_siblings(self, tmp_path):
+        """SQLite WAL/SHM/journal siblings travel with the main DB file."""
+        from myah import _migrate_legacy_db_filename
+
+        (tmp_path / 'webui.db').write_bytes(b'main')
+        (tmp_path / 'webui.db-wal').write_bytes(b'wal')
+        (tmp_path / 'webui.db-shm').write_bytes(b'shm')
+        (tmp_path / 'webui.db-journal').write_bytes(b'journal')
+
+        _migrate_legacy_db_filename(tmp_path, echo=lambda *_a, **_kw: None)
+
+        assert not (tmp_path / 'webui.db').exists()
+        assert not (tmp_path / 'webui.db-wal').exists()
+        assert not (tmp_path / 'webui.db-shm').exists()
+        assert not (tmp_path / 'webui.db-journal').exists()
+        assert (tmp_path / 'myah.db').read_bytes() == b'main'
+        assert (tmp_path / 'myah.db-wal').read_bytes() == b'wal'
+        assert (tmp_path / 'myah.db-shm').read_bytes() == b'shm'
+        assert (tmp_path / 'myah.db-journal').read_bytes() == b'journal'
+
+    def test_no_op_when_both_files_exist(self, tmp_path):
+        """Deliberate-dual-state guard: never auto-delete legacy data."""
+        from myah import _migrate_legacy_db_filename
+
+        legacy = tmp_path / 'webui.db'
+        new = tmp_path / 'myah.db'
+        legacy.write_bytes(b'legacy-payload')
+        new.write_bytes(b'new-payload')
+        echo, messages = self._capture_echo()
+
+        _migrate_legacy_db_filename(tmp_path, echo=echo)
+
+        # Both files remain untouched.
+        assert legacy.read_bytes() == b'legacy-payload'
+        assert new.read_bytes() == b'new-payload'
+        # Operator gets a warning so they can resolve the ambiguity manually.
+        assert any('both' in m.lower() and 'webui.db' in m for m in messages)
+
+    def test_no_op_when_only_new_exists(self, tmp_path):
+        """Typical steady state after migration: no-op, no log noise."""
+        from myah import _migrate_legacy_db_filename
+
+        new = tmp_path / 'myah.db'
+        new.write_bytes(b'live-db')
+        echo, messages = self._capture_echo()
+
+        _migrate_legacy_db_filename(tmp_path, echo=echo)
+
+        assert new.read_bytes() == b'live-db'
+        assert not (tmp_path / 'webui.db').exists()
+        # No migration message — function returned early before touching disk.
+        assert not any('Migrated legacy database file' in m for m in messages)
+
+    def test_no_op_when_neither_file_exists(self, tmp_path):
+        """Fresh install: no-op. env.py default path will create myah.db lazily."""
+        from myah import _migrate_legacy_db_filename
+
+        echo, messages = self._capture_echo()
+        _migrate_legacy_db_filename(tmp_path, echo=echo)
+
+        assert not (tmp_path / 'webui.db').exists()
+        assert not (tmp_path / 'myah.db').exists()
+        assert not any('Migrated legacy database file' in m for m in messages)
+
+    def test_permission_error_is_swallowed(self, tmp_path, monkeypatch):
+        """OSError during rename must not crash boot — log and continue."""
+        from myah import _migrate_legacy_db_filename
+
+        legacy = tmp_path / 'webui.db'
+        legacy.write_bytes(b'x')
+
+        def _raise(self, *_a, **_kw):
+            raise PermissionError('simulated EACCES')
+
+        monkeypatch.setattr(Path, 'rename', _raise)
+
+        echo, messages = self._capture_echo()
+        # Must not raise.
+        _migrate_legacy_db_filename(tmp_path, echo=echo)
+
+        assert any('failed to rename legacy' in m for m in messages)
+
+    def test_uses_resolved_data_dir_when_arg_is_none(self, tmp_path, monkeypatch):
+        """Default DATA_DIR resolution path: env var → tmp_path → rename."""
+        from myah import _migrate_legacy_db_filename
+
+        monkeypatch.setenv('DATA_DIR', str(tmp_path))
+        (tmp_path / 'webui.db').write_bytes(b'env-resolved')
+
+        _migrate_legacy_db_filename(echo=lambda *_a, **_kw: None)
+
+        assert (tmp_path / 'myah.db').read_bytes() == b'env-resolved'
+
+    def test_idempotent_across_repeated_calls(self, tmp_path):
+        """Calling twice in succession is safe; second call is a no-op."""
+        from myah import _migrate_legacy_db_filename
+
+        (tmp_path / 'webui.db').write_bytes(b'idempotent')
+        _migrate_legacy_db_filename(tmp_path, echo=lambda *_a, **_kw: None)
+        # Second call: only myah.db exists → must return cleanly.
+        _migrate_legacy_db_filename(tmp_path, echo=lambda *_a, **_kw: None)
+
+        assert (tmp_path / 'myah.db').read_bytes() == b'idempotent'

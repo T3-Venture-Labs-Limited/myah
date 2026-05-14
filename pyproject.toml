@@ -144,6 +144,7 @@ exclude = [
     "start.sh",
     "start_windows.bat",
     "webui.db",
+    "myah.db",
     "chroma.sqlite3",
 ]
 force-include = { build = "myah/frontend" }
