@@ -145,20 +145,92 @@ def test_deprecation_log_emitted_on_legacy_use(monkeypatch, reset_env, caplog):
 
 
 @pytest.mark.parametrize('webui_name', _WEBUI_ENV_VARS)
-def test_every_legacy_webui_name_is_aliased(webui_name, monkeypatch, reset_env):
-    """Every WEBUI_* env var name must have a MYAH_* primary that reads it.
+def test_every_legacy_webui_name_has_myah_attribute(webui_name, monkeypatch, reset_env):
+    """Every WEBUI_* env var name must have a MYAH_* primary attribute.
 
-    This is the regression gate: if a new WEBUI_* env var is added to env.py
-    without the back-compat treatment, this test fails for that name.
-
-    The test sets the legacy name and asserts that env.py reads the primary
-    MYAH_* attribute (which should fall back to the legacy value).
+    Fast smoke gate: just checks the attribute exists on the env module.
+    The end-to-end fall-through behaviour is verified by
+    ``test_every_legacy_webui_name_falls_back_to_primary`` below. We keep
+    this weak check as a simple inventory assertion with low false-positive
+    risk.
     """
     myah_name = 'MYAH_' + webui_name.removeprefix('WEBUI_')
     monkeypatch.setenv(webui_name, 'legacy-value-for-test')
     env = _reload_env_module()
-    # The primary MYAH_* attribute must exist on the env module
     assert hasattr(env, myah_name), (
         f'env.py has WEBUI_*-backed name {webui_name} but no MYAH_* primary '
         f'attribute {myah_name}. Add it to the back-compat alias block in env.py.'
+    )
+
+
+# Explicit (legacy_name, sentinel, expected_value_after_coercion) tuples.
+#
+# This is intentionally verbose: env.py's _env() chain produces values of
+# different types (bool, str, Optional[str]) and some constants apply
+# transformations (e.g. MYAH_NAME appends ' (Myah)'). A single uniform
+# sentinel + assertion would be wrong for several names. Explicit tuples make
+# each case auditable.
+#
+_FALL_THROUGH_CASES = [
+    # (legacy_name, sentinel_value, expected_value_on_module)
+    ('WEBUI_ADMIN_EMAIL', 'admin@legacy.test', 'admin@legacy.test'),
+    ('WEBUI_ADMIN_NAME', 'LegacyAdmin', 'LegacyAdmin'),
+    ('WEBUI_ADMIN_PASSWORD', 'legacy-password', 'legacy-password'),
+    ('WEBUI_AUTH', 'false', False),
+    ('WEBUI_AUTH_COOKIE_SAME_SITE', 'strict', 'strict'),
+    ('WEBUI_AUTH_COOKIE_SECURE', 'true', True),
+    ('WEBUI_AUTH_SIGNOUT_REDIRECT_URL', 'https://legacy.example/logout', 'https://legacy.example/logout'),
+    ('WEBUI_AUTH_TRUSTED_EMAIL_HEADER', 'X-Legacy-Email', 'X-Legacy-Email'),
+    ('WEBUI_AUTH_TRUSTED_GROUPS_HEADER', 'X-Legacy-Groups', 'X-Legacy-Groups'),
+    ('WEBUI_AUTH_TRUSTED_NAME_HEADER', 'X-Legacy-Name', 'X-Legacy-Name'),
+    ('WEBUI_AUTH_TRUSTED_ROLE_HEADER', 'X-Legacy-Role', 'X-Legacy-Role'),
+    (
+        'WEBUI_BANNERS',
+        '[{"id":"x","type":"info","content":"hi","dismissible":true,"timestamp":0}]',
+        '[{"id":"x","type":"info","content":"hi","dismissible":true,"timestamp":0}]',
+    ),
+    ('WEBUI_BUILD_HASH', 'legacy-build-hash', 'legacy-build-hash'),
+    ('WEBUI_FAVICON_URL', 'https://legacy.example/favicon.ico', 'https://legacy.example/favicon.ico'),
+    ('WEBUI_JWT_SECRET_KEY', 'legacy-jwt-secret', 'legacy-jwt-secret'),
+    # MYAH_NAME appends ' (Myah)' when not the default value 'Myah'.
+    ('WEBUI_NAME', 'LegacyName', 'LegacyName (Myah)'),
+    ('WEBUI_SECRET_KEY', 'legacy-secret', 'legacy-secret'),
+    ('WEBUI_SESSION_COOKIE_SAME_SITE', 'strict', 'strict'),
+    ('WEBUI_SESSION_COOKIE_SECURE', 'true', True),
+    ('WEBUI_URL', 'https://legacy.example/', 'https://legacy.example/'),
+]
+
+
+@pytest.mark.parametrize(('legacy_name', 'sentinel', 'expected'), _FALL_THROUGH_CASES)
+def test_every_legacy_webui_name_falls_back_to_primary(
+    legacy_name, sentinel, expected, monkeypatch, reset_env
+):
+    """Setting only the legacy WEBUI_* var must make MYAH_* resolve to that value.
+
+    Stronger than ``test_every_legacy_webui_name_has_myah_attribute``: it
+    verifies the legacy value actually flows through ``_env()`` to the
+    canonical primary, with appropriate type coercion. Catches typo'd
+    ``_env(MYAH_X, MYAH_X_TYPO, default)`` regressions that the weak hasattr
+    check would miss.
+
+    AUTH_COOKIE_* aliases fall back through both MYAH_SESSION_COOKIE_SECURE
+    and WEBUI_SESSION_COOKIE_SECURE if their own value is unset — the
+    ``reset_env`` fixture clears MYAH_*/WEBUI_* up front, so the only
+    populated env var when this test runs is the one being exercised.
+    """
+    myah_name = 'MYAH_' + legacy_name.removeprefix('WEBUI_')
+    monkeypatch.setenv(legacy_name, sentinel)
+    env = _reload_env_module()
+
+    actual = getattr(env, myah_name)
+    assert actual == expected, (
+        f'{myah_name} did not pick up legacy {legacy_name}={sentinel!r}: '
+        f'expected {expected!r}, got {actual!r}. Likely cause: typo in the '
+        f'_env() call in env.py for {myah_name}.'
+    )
+    # The legacy alias must agree with the primary.
+    assert getattr(env, legacy_name) == expected, (
+        f'Legacy alias {legacy_name} disagrees with primary {myah_name}: '
+        f'env.{legacy_name}={getattr(env, legacy_name)!r}, '
+        f'env.{myah_name}={actual!r}'
     )
