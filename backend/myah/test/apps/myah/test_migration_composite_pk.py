@@ -10,7 +10,7 @@ import pytest
 # Derive stable paths relative to this file so the test works regardless of
 # which directory pytest is invoked from.
 _HERE = Path(__file__).resolve()
-# platform/backend/myah/test/apps/webui/test_migration_composite_pk.py
+# platform/backend/myah/test/apps/myah/test_migration_composite_pk.py
 #   -> 6 parents up -> worktree root -> platform/
 _PLATFORM_DIR = _HERE.parents[6] / 'platform'
 _ALEMBIC_WORKDIR = _PLATFORM_DIR / 'backend' / 'myah'
