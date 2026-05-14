@@ -20,6 +20,35 @@ def version_callback(value: bool) -> None:
         raise typer.Exit()
 
 
+def _bootstrap_secret_key(echo=typer.echo) -> None:
+    """Bridge KEY_FILE → env vars for the secret key.
+
+    When neither MYAH_SECRET_KEY nor WEBUI_SECRET_KEY is set in the
+    environment, fall back to the on-disk KEY_FILE (generating one if
+    missing). Populate BOTH env vars so downstream code that bypasses
+    env.py's back-compat shim still sees the legacy WEBUI_SECRET_KEY.
+
+    Phase B.2a closes the env.py-bypass loophole: env.py's _env() helper
+    reads MYAH_SECRET_KEY first, but this bootstrap previously wrote only
+    WEBUI_SECRET_KEY. After this change the canonical name reaches the
+    environment too, and the legacy name is kept for any direct
+    os.environ['WEBUI_SECRET_KEY'] consumers.
+    """
+    if os.getenv('MYAH_SECRET_KEY') or os.getenv('WEBUI_SECRET_KEY'):
+        return
+    echo('Loading MYAH_SECRET_KEY from file, not provided as an environment variable.')
+    if not KEY_FILE.exists():
+        echo(f'Generating a new secret key and saving it to {KEY_FILE}')
+        KEY_FILE.write_bytes(base64.b64encode(random.randbytes(12)))
+    echo(f'Loading MYAH_SECRET_KEY from {KEY_FILE}')
+    secret = KEY_FILE.read_text().strip()
+    os.environ['MYAH_SECRET_KEY'] = secret
+    # Legacy back-compat: env.py reads MYAH_SECRET_KEY first, but downstream
+    # code that bypasses env.py still expects WEBUI_SECRET_KEY in the
+    # environment. Populate both so the bridge is bypass-safe.
+    os.environ['WEBUI_SECRET_KEY'] = secret
+
+
 @app.command()
 def main(
     version: Annotated[bool | None, typer.Option('--version', callback=version_callback)] = None,
@@ -33,13 +62,7 @@ def serve(
     port: int = 8080,
 ):
     os.environ['FROM_INIT_PY'] = 'true'
-    if os.getenv('WEBUI_SECRET_KEY') is None:
-        typer.echo('Loading WEBUI_SECRET_KEY from file, not provided as an environment variable.')
-        if not KEY_FILE.exists():
-            typer.echo(f'Generating a new secret key and saving it to {KEY_FILE}')
-            KEY_FILE.write_bytes(base64.b64encode(random.randbytes(12)))
-        typer.echo(f'Loading WEBUI_SECRET_KEY from {KEY_FILE}')
-        os.environ['WEBUI_SECRET_KEY'] = KEY_FILE.read_text()
+    _bootstrap_secret_key()
 
     if os.getenv('USE_CUDA_DOCKER', 'false') == 'true':
         typer.echo('CUDA is enabled, appending LD_LIBRARY_PATH to include torch/cudnn & cublas libraries.')

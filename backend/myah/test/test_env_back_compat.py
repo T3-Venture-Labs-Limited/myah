@@ -234,3 +234,104 @@ def test_every_legacy_webui_name_falls_back_to_primary(
         f'env.{legacy_name}={getattr(env, legacy_name)!r}, '
         f'env.{myah_name}={actual!r}'
     )
+
+
+# ---------------------------------------------------------------------------
+# Phase B.2a: __init__.py KEY_FILE → env-var bridge regression tests
+# ---------------------------------------------------------------------------
+# `_bootstrap_secret_key()` in `myah/__init__.py` reads the on-disk
+# .webui_secret_key file when no SECRET_KEY env var is set, and populates BOTH
+# MYAH_SECRET_KEY and WEBUI_SECRET_KEY so env.py's _env() shim AND any
+# bypass-readers (os.environ['WEBUI_SECRET_KEY']) both see the value.
+#
+# The on-disk filename stays `.webui_secret_key` for v0.1.0-beta.1 — its
+# rename is deferred to Phase B.3 (on-disk migration concerns).
+
+
+class TestBootstrapSecretKey:
+    """Cover the KEY_FILE → env-var bridge in myah.__init__._bootstrap_secret_key."""
+
+    def test_loads_from_key_file_when_no_env_var_set(self, tmp_path, monkeypatch, reset_env):
+        """KEY_FILE → both MYAH_SECRET_KEY and WEBUI_SECRET_KEY env vars."""
+        from myah import _bootstrap_secret_key
+
+        key_file = tmp_path / '.webui_secret_key'
+        key_file.write_text('on-disk-secret-sentinel\n')
+        monkeypatch.setattr('myah.KEY_FILE', key_file)
+
+        _bootstrap_secret_key(echo=lambda *_a, **_kw: None)
+
+        # Both env vars populated so env.py's shim AND bypass-readers see it.
+        assert os.environ['MYAH_SECRET_KEY'] == 'on-disk-secret-sentinel'
+        assert os.environ['WEBUI_SECRET_KEY'] == 'on-disk-secret-sentinel'
+
+    def test_env_py_reload_reflects_bootstrap(self, tmp_path, monkeypatch, reset_env):
+        """After bootstrap loads from disk, reloading env.py picks up MYAH_SECRET_KEY."""
+        from myah import _bootstrap_secret_key
+
+        key_file = tmp_path / '.webui_secret_key'
+        key_file.write_text('reload-secret-sentinel')
+        monkeypatch.setattr('myah.KEY_FILE', key_file)
+
+        _bootstrap_secret_key(echo=lambda *_a, **_kw: None)
+        env = _reload_env_module()
+
+        assert env.MYAH_SECRET_KEY == 'reload-secret-sentinel'
+        # The legacy module attribute alias must also reflect the value.
+        assert env.WEBUI_SECRET_KEY == 'reload-secret-sentinel'
+
+    def test_existing_myah_secret_key_skips_key_file(self, tmp_path, monkeypatch, reset_env):
+        """If MYAH_SECRET_KEY is already set in env, KEY_FILE is not consulted."""
+        from myah import _bootstrap_secret_key
+
+        key_file = tmp_path / '.webui_secret_key'
+        key_file.write_text('FROM-DISK-WRONG')
+        monkeypatch.setattr('myah.KEY_FILE', key_file)
+        monkeypatch.setenv('MYAH_SECRET_KEY', 'from-env-correct')
+
+        _bootstrap_secret_key(echo=lambda *_a, **_kw: None)
+
+        # Did NOT touch WEBUI_SECRET_KEY (no env-var to legacy bridge if the
+        # canonical was already provided by the caller).
+        assert os.environ['MYAH_SECRET_KEY'] == 'from-env-correct'
+        assert 'WEBUI_SECRET_KEY' not in os.environ
+
+    def test_existing_legacy_webui_secret_key_skips_key_file(
+        self, tmp_path, monkeypatch, reset_env
+    ):
+        """If only legacy WEBUI_SECRET_KEY is set, KEY_FILE is still not consulted.
+
+        env.py's _env() shim will pick the legacy value up; the bootstrap
+        does not need to bridge here because there is no on-disk file to
+        load.
+        """
+        from myah import _bootstrap_secret_key
+
+        key_file = tmp_path / '.webui_secret_key'
+        key_file.write_text('FROM-DISK-WRONG')
+        monkeypatch.setattr('myah.KEY_FILE', key_file)
+        monkeypatch.setenv('WEBUI_SECRET_KEY', 'legacy-env-value')
+
+        _bootstrap_secret_key(echo=lambda *_a, **_kw: None)
+
+        assert os.environ['WEBUI_SECRET_KEY'] == 'legacy-env-value'
+        # Canonical name was not retroactively populated — env.py's _env()
+        # is responsible for the legacy → canonical resolution at read time.
+        assert 'MYAH_SECRET_KEY' not in os.environ
+
+    def test_generates_key_file_when_missing(self, tmp_path, monkeypatch, reset_env):
+        """If KEY_FILE does not exist, it is generated and then loaded."""
+        from myah import _bootstrap_secret_key
+
+        key_file = tmp_path / '.webui_secret_key'
+        assert not key_file.exists()
+        monkeypatch.setattr('myah.KEY_FILE', key_file)
+
+        _bootstrap_secret_key(echo=lambda *_a, **_kw: None)
+
+        assert key_file.exists()
+        on_disk = key_file.read_text().strip()
+        assert on_disk  # non-empty
+        # Both env vars match the generated value.
+        assert os.environ['MYAH_SECRET_KEY'] == on_disk
+        assert os.environ['WEBUI_SECRET_KEY'] == on_disk

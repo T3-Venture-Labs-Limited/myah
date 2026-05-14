@@ -14,7 +14,11 @@ if [[ "${WEB_LOADER_ENGINE,,}" == "playwright" ]]; then
     python -c "import nltk; nltk.download('punkt_tab')"
 fi
 
-if [ -n "${WEBUI_SECRET_KEY_FILE}" ]; then
+# Phase B.2a: accept MYAH_SECRET_KEY_FILE alongside the legacy
+# WEBUI_SECRET_KEY_FILE. Canonical name wins when both are set.
+if [ -n "${MYAH_SECRET_KEY_FILE}" ]; then
+    KEY_FILE="${MYAH_SECRET_KEY_FILE}"
+elif [ -n "${WEBUI_SECRET_KEY_FILE}" ]; then
     KEY_FILE="${WEBUI_SECRET_KEY_FILE}"
 else
     KEY_FILE=".webui_secret_key"
@@ -22,17 +26,19 @@ fi
 
 PORT="${PORT:-8080}"
 HOST="${HOST:-0.0.0.0}"
-if test "$WEBUI_SECRET_KEY $WEBUI_JWT_SECRET_KEY" = " "; then
-  echo "Loading WEBUI_SECRET_KEY from file, not provided as an environment variable."
+if test "$MYAH_SECRET_KEY $WEBUI_SECRET_KEY $WEBUI_JWT_SECRET_KEY" = "  "; then
+  echo "Loading MYAH_SECRET_KEY from file, not provided as an environment variable."
 
   if ! [ -e "$KEY_FILE" ]; then
-    echo "Generating WEBUI_SECRET_KEY"
-    # Generate a random value to use as a WEBUI_SECRET_KEY in case the user didn't provide one.
+    echo "Generating MYAH_SECRET_KEY"
+    # Generate a random value to use as a MYAH_SECRET_KEY in case the user didn't provide one.
     echo $(head -c 12 /dev/random | base64) > "$KEY_FILE"
   fi
 
-  echo "Loading WEBUI_SECRET_KEY from $KEY_FILE"
-  WEBUI_SECRET_KEY=$(cat "$KEY_FILE")
+  echo "Loading MYAH_SECRET_KEY from $KEY_FILE"
+  MYAH_SECRET_KEY=$(cat "$KEY_FILE")
+  # Legacy back-compat: code that bypasses env.py still reads WEBUI_SECRET_KEY.
+  WEBUI_SECRET_KEY="$MYAH_SECRET_KEY"
 fi
 
 if [[ "${USE_OLLAMA_DOCKER,,}" == "true" ]]; then
@@ -50,7 +56,7 @@ if [ -n "$SPACE_ID" ]; then
   echo "Configuring for HuggingFace Space deployment"
   if [ -n "$ADMIN_USER_EMAIL" ] && [ -n "$ADMIN_USER_PASSWORD" ]; then
     echo "Admin user configured, creating"
-    WEBUI_SECRET_KEY="$WEBUI_SECRET_KEY" uvicorn myah.main:app --host "$HOST" --port "$PORT" --forwarded-allow-ips "${FORWARDED_ALLOW_IPS:-*}" &
+    MYAH_SECRET_KEY="$MYAH_SECRET_KEY" WEBUI_SECRET_KEY="$WEBUI_SECRET_KEY" uvicorn myah.main:app --host "$HOST" --port "$PORT" --forwarded-allow-ips "${FORWARDED_ALLOW_IPS:-*}" &
     webui_pid=$!
     echo "Waiting for webui to start..."
     while ! curl -s "http://localhost:${PORT}/health" > /dev/null; do
@@ -80,7 +86,7 @@ else
 fi
 
 # Run uvicorn
-WEBUI_SECRET_KEY="$WEBUI_SECRET_KEY" exec "$PYTHON_CMD" -m uvicorn myah.main:app \
+MYAH_SECRET_KEY="$MYAH_SECRET_KEY" WEBUI_SECRET_KEY="$WEBUI_SECRET_KEY" exec "$PYTHON_CMD" -m uvicorn myah.main:app \
     --host "$HOST" \
     --port "$PORT" \
     --forwarded-allow-ips "${FORWARDED_ALLOW_IPS:-*}" \
