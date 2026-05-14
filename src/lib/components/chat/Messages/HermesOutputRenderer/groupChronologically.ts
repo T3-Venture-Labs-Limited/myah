@@ -27,7 +27,7 @@ export type RenderGroup =
 function isChainItem(item: OutputItem): item is NonMessageItem {
 	return (
 		item.type === 'reasoning' ||
-		item.type === 'open_webui:code_interpreter' ||
+		item.type === 'myah:code_interpreter' ||
 		(item.type === 'function_call' && Boolean(item.call_id))
 	);
 }

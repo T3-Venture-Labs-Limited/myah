@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Backend lint: catch production-invariant violations at lint time.
 
-Two checks run against every .py under platform/backend/open_webui/ (skipping
+Two checks run against every .py under platform/backend/myah/ (skipping
 test/ and migrations/):
 
   1) Any string literal (plain or f-string constant part) containing
@@ -26,7 +26,7 @@ import pathlib
 import re
 import sys
 
-BACKEND = pathlib.Path(__file__).resolve().parent.parent / "backend" / "open_webui"
+BACKEND = pathlib.Path(__file__).resolve().parent.parent / "backend" / "myah"
 SKIP_DIRS = {"test", "migrations"}
 # Files whose localhost strings are intentionally configurable defaults (env vars),
 # not cross-container hardcodes. Pattern: the file only *defines* the default;
@@ -148,7 +148,7 @@ def main() -> int:
     if exit_code:
         print("", file=sys.stderr)
         print("[localhost]  See docs/gotchas/agent-networking-localhost.md", file=sys.stderr)
-        print("             Use AGENT_HOST from open_webui.routers.containers.", file=sys.stderr)
+        print("             Use AGENT_HOST from myah.routers.containers.", file=sys.stderr)
         print("[loguru-%s]  See docs/gotchas/loguru-percent-format.md", file=sys.stderr)
         print("             Loguru does not interpolate %s; use f-string or .bind().", file=sys.stderr)
     return exit_code

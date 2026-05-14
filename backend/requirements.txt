@@ -38,7 +38,7 @@ loguru==0.7.3
 asgiref==3.11.1
 docker~=7.1.0
 
-# Backs the `myah` CLI entrypoint (open_webui/__init__.py imports typer
+# Backs the `myah` CLI entrypoint (myah/__init__.py imports typer
 # at module top). Previously transitive via chromadb/transformers — both
 # dropped in T3-992, which removed typer from the image and crash-looped
 # prod (PR #33).

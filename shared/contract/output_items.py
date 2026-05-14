@@ -1,6 +1,6 @@
 """Typed Pydantic models for every Hermes output item the renderer consumes.
 
-The platform's stream handler (``platform/backend/open_webui/utils/hermes_stream_handler.py``)
+The platform's stream handler (``platform/backend/myah/utils/hermes_stream_handler.py``)
 normalises the SSE event flow into a flat ``output: list[OutputItem]`` array
 attached to every assistant message. The frontend renderer
 (``platform/src/lib/components/chat/Messages/HermesOutputRenderer.svelte`` and its
@@ -40,7 +40,7 @@ canonical references are:
 * ``function_call_output`` — line 552
 * ``confirmation`` — line 663
 * ``secret_input`` — line 690
-* ``open_webui:code_interpreter`` — built by ``utils/middleware.py:1994`` for
+* ``myah:code_interpreter`` — built by ``utils/middleware.py:1994`` for
   the legacy code-interpreter pass-through; no Hermes equivalent today.
 
 Field shapes mirror the existing TypeScript interfaces in
@@ -221,7 +221,7 @@ class CodeInterpreterItem(_BaseOutputItem):
     branch in the OpenAI-routing path, not the Hermes path).
     """
 
-    type: Literal['open_webui:code_interpreter']
+    type: Literal['myah:code_interpreter']
     id: str
     code: str
     lang: str

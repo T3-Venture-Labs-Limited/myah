@@ -40,7 +40,7 @@ function trimTrailingPunctuation(captured: string): string {
 
 // ── Bare cache-path tokenizer constants ───────────────────────────────────
 // Extension list is the single source of truth — must match _BARE_PATH_EXTS
-// in platform/backend/open_webui/utils/hermes_media_persist.py.
+// in platform/backend/myah/utils/hermes_media_persist.py.
 // T3-1001 dogfooding 2026-04-24: expanded with code/config/db extensions to
 // match _ARTIFACT_EXTENSIONS in artifact_triggers.py.
 const MEDIA_EXTS =

@@ -35,8 +35,8 @@ FROM python:3.11.14-slim-bookworm AS base
 
 # OCI annotations — connect package on GHCR to the source repo.
 LABEL org.opencontainers.image.source="https://github.com/T3-Venture-Labs-Limited/myah"
-LABEL org.opencontainers.image.description="Myah SvelteKit + FastAPI platform (Hermes agent frontend)"
-LABEL org.opencontainers.image.licenses="MIT"
+LABEL org.opencontainers.image.description="Myah — self-hostable web platform for Hermes Agent"
+LABEL org.opencontainers.image.licenses="AGPL-3.0-or-later"
 
 # Use args
 ARG USE_SLIM
@@ -100,7 +100,7 @@ RUN set -e; \
 
 # copy built frontend files
 COPY --chown=$UID:$GID --from=build /app/build /app/build
-# Myah fork: upstream CHANGELOG.md removed (see backend/open_webui/env.py); nothing to copy.
+# Myah fork: upstream CHANGELOG.md removed (see backend/myah/env.py); nothing to copy.
 COPY --chown=$UID:$GID --from=build /app/package.json /app/package.json
 
 # copy backend files

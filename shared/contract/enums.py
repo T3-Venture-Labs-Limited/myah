@@ -74,13 +74,13 @@ class AuxTask(StrEnum):
 
     Today (2026-04-25) only two tasks are routed through the aux endpoint;
     the platform-level ``AUX_DEFAULT_TASKS`` frozenset in
-    ``open_webui/config.py`` enumerates a broader set of *config* tasks
+    ``myah/config.py`` enumerates a broader set of *config* tasks
     (``compression``, ``session_search``, ``approval``, ...) but those run
     inside the agent and are not dispatched over the HTTP aux surface.
     """
 
     # Generate a chat title from the first user/assistant turn. Wired in
-    # ``platform/backend/open_webui/routers/tasks.py::_fetch_title_via_aux``
+    # ``platform/backend/myah/routers/tasks.py::_fetch_title_via_aux``
     # (path ``/myah/v1/aux/title_generation``).
     TITLE_GENERATION = 'title_generation'
 
@@ -91,7 +91,7 @@ class AuxTask(StrEnum):
 
 
 # Convenience constant for the tasks the platform forwards to Hermes. Old
-# code imports this as ``open_webui.utils.agent_proxy.AUX_ALLOWED_TASKS`` —
+# code imports this as ``myah.utils.agent_proxy.AUX_ALLOWED_TASKS`` —
 # that import path is preserved via re-export in ``agent_proxy.py``.
 AUX_ALLOWED_TASKS: frozenset[str] = frozenset({task.value for task in AuxTask})
 

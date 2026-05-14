@@ -154,7 +154,7 @@
 									messageDone={messageDone}
 								/>
 							</ChainOfThoughtStep>
-						{:else if item.type === 'open_webui:code_interpreter'}
+						{:else if item.type === 'myah:code_interpreter'}
 							<ChainOfThoughtStep icon={Code} status={stepStatus(item)} isLast={last}>
 								<CodeExecutionBlock {item} {messageId} messageDone={messageDone} />
 							</ChainOfThoughtStep>

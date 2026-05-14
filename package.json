@@ -5,7 +5,7 @@
 	"scripts": {
 		"dev": "vite dev --host",
 		"dev:5050": "vite dev --port 5050",
-		"dev:backend": "([ -d .venv ] || python3 -m venv .venv) && .venv/bin/pip install -q -e '.[dev]' && cd backend && set -a && [ -f ../.env ] && . ../.env; set +a; ../.venv/bin/uvicorn open_webui.main:app --host 0.0.0.0 --port 8082 --reload --forwarded-allow-ips '*'",
+		"dev:backend": "([ -d .venv ] || python3 -m venv .venv) && .venv/bin/pip install -q -e '.[dev]' && cd backend && set -a && [ -f ../.env ] && . ../.env; set +a; ../.venv/bin/uvicorn myah.main:app --host 0.0.0.0 --port 8082 --reload --forwarded-allow-ips '*'",
 		"build": "vite build",
 		"build:watch": "vite build --watch",
 		"preview": "vite preview",

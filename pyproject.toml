@@ -1,8 +1,11 @@
 [project]
 name = "myah"
-description = "Myah"
+description = "Myah — self-hostable web platform for Hermes Agent"
 authors = [
-    { name = "Timothy Jaeryang Baek", email = "tim@openwebui.com" }
+    { name = "T3 Venture Labs Limited", email = "hello@myah.dev" }
+]
+maintainers = [
+    { name = "T3 Venture Labs Limited", email = "hello@myah.dev" }
 ]
 license = { file = "LICENSE" }
 dependencies = [
@@ -47,10 +50,10 @@ dependencies = [
     "docker~=7.1.0",
 
     # Backs the `myah` CLI entrypoint defined in [project.scripts]
-    # (open_webui/__init__.py). Previously satisfied transitively via
+    # (myah/__init__.py). Previously satisfied transitively via
     # chromadb/huggingface_hub/transformers; those were dropped in T3-992
     # (Phase 5 of the OWI-legacy cleanup), which removed typer from the
-    # image and crash-looped prod — uvicorn imports open_webui, which runs
+    # image and crash-looped prod — uvicorn imports myah, which runs
     # __init__.py, which does `import typer` at module top.
     "typer>=0.12.0",
 
@@ -111,7 +114,7 @@ dev = [
 ]
 
 [project.scripts]
-myah = "open_webui:app"
+myah = "myah:app"
 
 [build-system]
 requires = ["hatchling"]
@@ -143,7 +146,7 @@ exclude = [
     "webui.db",
     "chroma.sqlite3",
 ]
-force-include = { build = "open_webui/frontend" }
+force-include = { build = "myah/frontend" }
 
 [tool.codespell]
 # Ref: https://github.com/codespell-project/codespell#using-a-config-file
@@ -159,9 +162,9 @@ dev = [
 ]
 
 [tool.pytest.ini_options]
-# Make `backend/` first on sys.path so `from open_webui.internal.db import Base`
+# Make `backend/` first on sys.path so `from myah.internal.db import Base`
 # resolves against the source tree rather than the installed namespace package
-# (which only ships `open_webui/frontend/`). Also add the platform root so
+# (which only ships `myah/frontend/`). Also add the platform root so
 # the typed contract module (`shared.contract.*`) resolves from tests.
 pythonpath = ["backend", "."]
 asyncio_mode = "strict"

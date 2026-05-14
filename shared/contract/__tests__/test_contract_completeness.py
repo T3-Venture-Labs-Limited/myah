@@ -9,7 +9,7 @@ discovered string is present in the platform-side contract.
 When this test goes red on a fresh Hermes submodule bump, the action is to
 add the new event class (or aux task value) in
 ``platform/shared/contract/{events,enums}.py`` and the matching wire handler
-in ``platform/backend/open_webui/utils/hermes_stream_handler.py``. CI red
+in ``platform/backend/myah/utils/hermes_stream_handler.py``. CI red
 catches the drift before it reaches production.
 
 Discovery strategy: a conservative regex over every ``.py`` file under

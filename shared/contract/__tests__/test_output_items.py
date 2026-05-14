@@ -14,7 +14,7 @@ field. The tests below exercise three things:
    safely rather than rendering garbage.
 
 The sample payloads mirror the wire shape produced by
-``platform/backend/open_webui/utils/hermes_stream_handler.py`` — the
+``platform/backend/myah/utils/hermes_stream_handler.py`` — the
 canonical line numbers are listed in each item class's docstring in
 ``shared/contract/output_items.py``.
 """
@@ -84,9 +84,9 @@ ITEM_SAMPLES: dict[str, tuple[dict, type]] = {
         },
         ReasoningItem,
     ),
-    'open_webui:code_interpreter': (
+    'myah:code_interpreter': (
         {
-            'type': 'open_webui:code_interpreter',
+            'type': 'myah:code_interpreter',
             'id': 'ci_abc',
             'code': "print('hello')",
             'lang': 'python',
@@ -293,7 +293,7 @@ def test_confirmation_chosen_optional() -> None:
 def test_code_interpreter_output_optional() -> None:
     """``CodeInterpreterItem.output`` may be missing while still running."""
     payload = {
-        'type': 'open_webui:code_interpreter',
+        'type': 'myah:code_interpreter',
         'id': 'ci_1',
         'code': "print('hi')",
         'lang': 'python',

@@ -1,4 +1,4 @@
-// KEEP IN SYNC WITH platform/backend/open_webui/utils/artifact_triggers.py
+// KEEP IN SYNC WITH platform/backend/myah/utils/artifact_triggers.py
 
 import fixture from './artifact-triggers.fixture.json';
 import { detectFileType } from './fileTypeRegistry';

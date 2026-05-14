@@ -38,8 +38,8 @@ import sys
 from pathlib import Path
 
 
-# Before importing anything from open_webui, make sure DATA_DIR is resolved.
-# open_webui.env locks the DB path at import time via DATA_DIR, so this must
+# Before importing anything from myah, make sure DATA_DIR is resolved.
+# myah.env locks the DB path at import time via DATA_DIR, so this must
 # come first.
 def _bootstrap_data_dir(cli_data_dir: str | None) -> Path:
     data_dir = cli_data_dir or os.environ.get('DATA_DIR')
@@ -52,7 +52,7 @@ def _bootstrap_data_dir(cli_data_dir: str | None) -> Path:
         print(f'error: DATA_DIR does not exist: {path}', file=sys.stderr)
         print('create it first: mkdir -p <data_dir>', file=sys.stderr)
         sys.exit(2)
-    # Lock the env so open_webui.env picks it up on import.
+    # Lock the env so myah.env picks it up on import.
     os.environ['DATA_DIR'] = str(path)
     return path
 
@@ -99,17 +99,17 @@ def main() -> int:
     _load_dotenv_e2e(repo_root)
     data_dir = _bootstrap_data_dir(args.data_dir)
 
-    # Imports are deferred until AFTER DATA_DIR is set, so open_webui.env picks
+    # Imports are deferred until AFTER DATA_DIR is set, so myah.env picks
     # up the worktree-specific DB path rather than the main workspace's.
     platform_backend = Path(__file__).resolve().parent.parent / 'backend'
     sys.path.insert(0, str(platform_backend))
 
     try:
-        from open_webui.models.auths import Auths
-        from open_webui.models.users import Users
-        from open_webui.utils.auth import get_password_hash
+        from myah.models.auths import Auths
+        from myah.models.users import Users
+        from myah.utils.auth import get_password_hash
     except ImportError as err:
-        print(f'error: could not import open_webui (is the venv active?): {err}', file=sys.stderr)
+        print(f'error: could not import myah (is the venv active?): {err}', file=sys.stderr)
         return 3
 
     # Create or update the auth + user.
@@ -118,8 +118,8 @@ def main() -> int:
 
     if existing_user:
         # Rotate the password so the script is repeatable.
-        from open_webui.internal.db import get_db
-        from open_webui.models.auths import Auth
+        from myah.internal.db import get_db
+        from myah.models.auths import Auth
 
         with get_db() as db:
             auth = db.query(Auth).filter_by(id=existing_user.id).first()

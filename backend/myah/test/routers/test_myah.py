@@ -1,0 +1,505 @@
+"""Tests for the /api/v1/myah/* router used by the myah-hermes-plugin.
+
+Today the only endpoint is ``GET /whoami``, used by the plugin's
+register(ctx) in OSS mode to discover its own MYAH_USER_ID without
+forcing the user to paste it by hand into ``~/.hermes/.env``.
+
+Single-tenant assumption: the FIRST registered user in the database
+is treated as the OSS user. Tests cover:
+
+1. Auth: missing header → 401
+2. Auth: wrong token → 401
+3. Misconfig: MYAH_AGENT_BEARER_TOKEN unset → 503 (refuse, don't 200)
+4. Empty user table → 404 (with actionable message)
+5. Happy path: returns user_id + user_name + deployment_mode
+6. deployment_mode reflects MYAH_DEPLOYMENT_MODE env var
+"""
+
+from types import SimpleNamespace
+from unittest.mock import patch
+
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+
+from myah.routers.myah import router
+
+
+class _AsyncReturn:
+    """Minimal async-callable mock that records call_count.
+
+    The existing tests use ``unittest.mock.patch`` for sync helpers;
+    this fills the same role for async functions without pulling in
+    AsyncMock just for two more tests.
+    """
+
+    def __init__(self, value):
+        self._value = value
+        self.call_count = 0
+
+    async def __call__(self, *args, **kwargs):
+        self.call_count += 1
+        return self._value
+
+
+def _make_app() -> TestClient:
+    app = FastAPI()
+    app.include_router(router, prefix='/api/v1/myah')
+    return TestClient(app)
+
+
+# ── Auth ───────────────────────────────────────────────────────────
+
+
+def test_whoami_missing_authorization_header_returns_401(monkeypatch):
+    monkeypatch.setenv('MYAH_AGENT_BEARER_TOKEN', 'expected-token')
+    client = _make_app()
+    resp = client.get('/api/v1/myah/whoami')
+    assert resp.status_code == 401
+    assert 'Authorization' in resp.json()['detail']
+
+
+def test_whoami_wrong_token_returns_401(monkeypatch):
+    monkeypatch.setenv('MYAH_AGENT_BEARER_TOKEN', 'expected-token')
+    client = _make_app()
+    resp = client.get(
+        '/api/v1/myah/whoami', headers={'Authorization': 'Bearer wrong-token'}
+    )
+    assert resp.status_code == 401
+    assert 'Invalid bearer token' in resp.json()['detail']
+
+
+def test_whoami_unconfigured_token_returns_503(monkeypatch):
+    """If the platform itself doesn't have MYAH_AGENT_BEARER_TOKEN set, /whoami
+    must NOT silently 200 — it should refuse so the plugin sees a clear error."""
+    monkeypatch.delenv('MYAH_AGENT_BEARER_TOKEN', raising=False)
+    client = _make_app()
+    resp = client.get(
+        '/api/v1/myah/whoami', headers={'Authorization': 'Bearer anything'}
+    )
+    assert resp.status_code == 503
+    assert 'MYAH_AGENT_BEARER_TOKEN not configured' in resp.json()['detail']
+
+
+# ── Single-tenant resolution ─────────────────────────────────────────
+
+
+def test_whoami_no_users_returns_404(monkeypatch):
+    monkeypatch.setenv('MYAH_AGENT_BEARER_TOKEN', 'tok')
+
+    client = _make_app()
+    # Users.get_users returns a dict with 'users' list (current Open WebUI shape).
+    with patch(
+        'myah.routers.myah.Users.get_users',
+        return_value={'users': [], 'total': 0},
+    ):
+        resp = client.get('/api/v1/myah/whoami', headers={'Authorization': 'Bearer tok'})
+
+    assert resp.status_code == 404
+    detail = resp.json()['detail']
+    assert 'No users registered' in detail
+    assert 'Sign up' in detail  # actionable message
+
+
+def test_whoami_returns_first_user(monkeypatch):
+    monkeypatch.setenv('MYAH_AGENT_BEARER_TOKEN', 'tok')
+    monkeypatch.setenv('MYAH_DEPLOYMENT_MODE', 'oss')
+
+    fake_user = SimpleNamespace(id='user-abc-123', name='Alice')
+
+    client = _make_app()
+    with patch(
+        'myah.routers.myah.Users.get_users',
+        return_value={'users': [fake_user], 'total': 1},
+    ):
+        resp = client.get('/api/v1/myah/whoami', headers={'Authorization': 'Bearer tok'})
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body['user_id'] == 'user-abc-123'
+    assert body['user_name'] == 'Alice'
+    assert body['deployment_mode'] == 'oss'
+
+
+def test_whoami_deployment_mode_hosted_when_unset(monkeypatch):
+    monkeypatch.setenv('MYAH_AGENT_BEARER_TOKEN', 'tok')
+    monkeypatch.delenv('MYAH_DEPLOYMENT_MODE', raising=False)
+
+    fake_user = SimpleNamespace(id='u1', name='Bob')
+
+    client = _make_app()
+    with patch(
+        'myah.routers.myah.Users.get_users',
+        return_value={'users': [fake_user], 'total': 1},
+    ):
+        resp = client.get('/api/v1/myah/whoami', headers={'Authorization': 'Bearer tok'})
+
+    assert resp.status_code == 200
+    assert resp.json()['deployment_mode'] == 'hosted'
+
+
+def test_whoami_user_with_no_name_returns_empty_string(monkeypatch):
+    """User.name can be None per ORM. Coerce to empty string for the wire payload."""
+    monkeypatch.setenv('MYAH_AGENT_BEARER_TOKEN', 'tok')
+
+    fake_user = SimpleNamespace(id='u1', name=None)
+
+    client = _make_app()
+    with patch(
+        'myah.routers.myah.Users.get_users',
+        return_value={'users': [fake_user], 'total': 1},
+    ):
+        resp = client.get('/api/v1/myah/whoami', headers={'Authorization': 'Bearer tok'})
+
+    assert resp.status_code == 200
+    assert resp.json()['user_name'] == ''
+
+
+def test_whoami_handles_legacy_list_shape(monkeypatch):
+    """Old / mocked Users.get_users may return a plain list. Handle gracefully."""
+    monkeypatch.setenv('MYAH_AGENT_BEARER_TOKEN', 'tok')
+
+    fake_user = SimpleNamespace(id='u-legacy', name='Legacy')
+
+    client = _make_app()
+    with patch('myah.routers.myah.Users.get_users', return_value=[fake_user]):
+        resp = client.get('/api/v1/myah/whoami', headers={'Authorization': 'Bearer tok'})
+
+    assert resp.status_code == 200
+    assert resp.json()['user_id'] == 'u-legacy'
+
+
+# ── OSS Issue #5 — /whoami exposes hermes default-model ───────────────
+
+
+def test_whoami_returns_hermes_default_model_in_oss(monkeypatch):
+    """OSS regression: /whoami includes the user's hermes config default
+    model so the plugin can sync user.default_model to it.
+    """
+    monkeypatch.setenv('MYAH_AGENT_BEARER_TOKEN', 'tok')
+    monkeypatch.setenv('MYAH_DEPLOYMENT_MODE', 'oss')
+
+    fake_user = SimpleNamespace(id='u1', name='Alice')
+
+    client = _make_app()
+    with patch(
+        'myah.routers.myah.Users.get_users',
+        return_value={'users': [fake_user], 'total': 1},
+    ), patch(
+        'myah.utils.hermes_web.fetch_hermes_default_model',
+        new=_AsyncReturn('opencode-go/mimo-v2.5'),
+    ):
+        resp = client.get('/api/v1/myah/whoami', headers={'Authorization': 'Bearer tok'})
+
+    assert resp.status_code == 200
+    assert resp.json()['default_model'] == 'opencode-go/mimo-v2.5'
+
+
+def test_whoami_default_model_is_none_in_hosted(monkeypatch):
+    """Hosted mode (no MYAH_DEPLOYMENT_MODE): default_model is None
+    AND the hermes-default-model fetcher must NOT be called.
+    """
+    monkeypatch.setenv('MYAH_AGENT_BEARER_TOKEN', 'tok')
+    monkeypatch.delenv('MYAH_DEPLOYMENT_MODE', raising=False)
+
+    fake_user = SimpleNamespace(id='u1', name='Alice')
+    fake_fetch = _AsyncReturn('should-not-be-called')
+
+    client = _make_app()
+    with patch(
+        'myah.routers.myah.Users.get_users',
+        return_value={'users': [fake_user], 'total': 1},
+    ), patch(
+        'myah.utils.hermes_web.fetch_hermes_default_model',
+        new=fake_fetch,
+    ):
+        resp = client.get('/api/v1/myah/whoami', headers={'Authorization': 'Bearer tok'})
+
+    assert resp.status_code == 200
+    assert resp.json().get('default_model') is None
+    assert fake_fetch.call_count == 0
+
+
+def test_whoami_default_model_handles_hermes_unreachable(monkeypatch):
+    """If hermes is unreachable, /whoami still 200s with default_model=None."""
+    monkeypatch.setenv('MYAH_AGENT_BEARER_TOKEN', 'tok')
+    monkeypatch.setenv('MYAH_DEPLOYMENT_MODE', 'oss')
+
+    fake_user = SimpleNamespace(id='u1', name='Alice')
+
+    client = _make_app()
+    with patch(
+        'myah.routers.myah.Users.get_users',
+        return_value={'users': [fake_user], 'total': 1},
+    ), patch(
+        'myah.utils.hermes_web.fetch_hermes_default_model',
+        new=_AsyncReturn(None),
+    ):
+        resp = client.get('/api/v1/myah/whoami', headers={'Authorization': 'Bearer tok'})
+
+    assert resp.status_code == 200
+    assert resp.json().get('default_model') is None
+
+
+# ── ISSUE-004 follow-up — /whoami syncs user.default_model ─────────────
+
+
+def test_whoami_oss_syncs_default_model_when_user_default_empty(monkeypatch):
+    """OSS: if user.default_model is None and hermes returns a default,
+    the platform should update the user row directly (no JWT needed —
+    the plugin only has the bearer)."""
+    monkeypatch.setenv('MYAH_AGENT_BEARER_TOKEN', 'tok')
+    monkeypatch.setenv('MYAH_DEPLOYMENT_MODE', 'oss')
+
+    fake_user = SimpleNamespace(id='u1', name='Alice', default_model=None)
+    update_calls = []
+
+    def _capture_update(user_id, updates):
+        update_calls.append((user_id, updates))
+        return SimpleNamespace(id=user_id, default_model=updates.get('default_model'))
+
+    client = _make_app()
+    with patch(
+        'myah.routers.myah.Users.get_users',
+        return_value={'users': [fake_user], 'total': 1},
+    ), patch(
+        'myah.routers.myah.Users.update_user_by_id',
+        side_effect=_capture_update,
+    ), patch(
+        'myah.utils.hermes_web.fetch_hermes_default_model',
+        new=_AsyncReturn('opencode-go/mimo-v2.5'),
+    ):
+        resp = client.get('/api/v1/myah/whoami', headers={'Authorization': 'Bearer tok'})
+
+    assert resp.status_code == 200
+    assert resp.json()['default_model'] == 'opencode-go/mimo-v2.5'
+    # Verify the update was called with the hermes default
+    assert update_calls == [('u1', {'default_model': 'opencode-go/mimo-v2.5'})]
+
+
+def test_whoami_oss_syncs_default_model_when_user_has_openwebui_default(monkeypatch):
+    """OSS: if user.default_model is the open-webui default 'openai/gpt-4o-mini',
+    overwrite it (the user didn't deliberately choose it — open-webui set it
+    at signup as the bundled fallback)."""
+    monkeypatch.setenv('MYAH_AGENT_BEARER_TOKEN', 'tok')
+    monkeypatch.setenv('MYAH_DEPLOYMENT_MODE', 'oss')
+
+    fake_user = SimpleNamespace(id='u1', name='Alice', default_model='openai/gpt-4o-mini')
+    update_calls = []
+
+    def _capture_update(user_id, updates):
+        update_calls.append((user_id, updates))
+        return SimpleNamespace(id=user_id, default_model=updates.get('default_model'))
+
+    client = _make_app()
+    with patch(
+        'myah.routers.myah.Users.get_users',
+        return_value={'users': [fake_user], 'total': 1},
+    ), patch(
+        'myah.routers.myah.Users.update_user_by_id',
+        side_effect=_capture_update,
+    ), patch(
+        'myah.utils.hermes_web.fetch_hermes_default_model',
+        new=_AsyncReturn('opencode-go/mimo-v2.5'),
+    ):
+        resp = client.get('/api/v1/myah/whoami', headers={'Authorization': 'Bearer tok'})
+
+    assert resp.status_code == 200
+    assert update_calls == [('u1', {'default_model': 'opencode-go/mimo-v2.5'})]
+
+
+def test_whoami_oss_does_not_clobber_deliberate_user_choice(monkeypatch):
+    """OSS: if user.default_model is anything OTHER than None/gpt-4o-mini,
+    treat it as a deliberate choice and do NOT overwrite.
+
+    The user may have explicitly switched models in the UI; we shouldn't
+    blow that choice away just because hermes config differs.
+    """
+    monkeypatch.setenv('MYAH_AGENT_BEARER_TOKEN', 'tok')
+    monkeypatch.setenv('MYAH_DEPLOYMENT_MODE', 'oss')
+
+    fake_user = SimpleNamespace(
+        id='u1', name='Alice', default_model='anthropic/claude-opus-4.7'
+    )
+    update_calls = []
+
+    client = _make_app()
+    with patch(
+        'myah.routers.myah.Users.get_users',
+        return_value={'users': [fake_user], 'total': 1},
+    ), patch(
+        'myah.routers.myah.Users.update_user_by_id',
+        side_effect=lambda *a, **kw: update_calls.append((a, kw)) or fake_user,
+    ), patch(
+        'myah.utils.hermes_web.fetch_hermes_default_model',
+        new=_AsyncReturn('opencode-go/mimo-v2.5'),
+    ):
+        resp = client.get('/api/v1/myah/whoami', headers={'Authorization': 'Bearer tok'})
+
+    assert resp.status_code == 200
+    # Response surfaces hermes default for transparency, but DB is untouched
+    assert resp.json()['default_model'] == 'opencode-go/mimo-v2.5'
+    assert update_calls == [], 'must not clobber deliberate user choice'
+
+
+def test_whoami_hosted_never_syncs_default_model(monkeypatch):
+    """Hosted: default_model sync logic is gated on OSS mode."""
+    monkeypatch.setenv('MYAH_AGENT_BEARER_TOKEN', 'tok')
+    monkeypatch.delenv('MYAH_DEPLOYMENT_MODE', raising=False)
+
+    fake_user = SimpleNamespace(id='u1', name='Alice', default_model=None)
+    update_calls = []
+
+    client = _make_app()
+    with patch(
+        'myah.routers.myah.Users.get_users',
+        return_value={'users': [fake_user], 'total': 1},
+    ), patch(
+        'myah.routers.myah.Users.update_user_by_id',
+        side_effect=lambda *a, **kw: update_calls.append((a, kw)) or fake_user,
+    ):
+        resp = client.get('/api/v1/myah/whoami', headers={'Authorization': 'Bearer tok'})
+
+    assert resp.status_code == 200
+    assert update_calls == []
+
+
+# ── ISSUE-003 — /whoami auto-imports hermes provider catalog in OSS ───
+
+
+def test_whoami_oss_auto_imports_providers_from_hermes_catalog(monkeypatch):
+    """OSS: /whoami upserts UserProviderStatuses for every provider in the
+    user's hermes catalog that has a credential. Eliminates the 'connected
+    only via UI' problem from Issue #4 + Issue #3."""
+    monkeypatch.setenv('MYAH_AGENT_BEARER_TOKEN', 'tok')
+    monkeypatch.setenv('MYAH_DEPLOYMENT_MODE', 'oss')
+
+    fake_user = SimpleNamespace(id='u1', name='Alice', default_model=None)
+    upsert_calls = []
+
+    fake_catalog = [
+        {'id': 'openrouter', 'has_credential': True, 'label': 'OpenRouter'},
+        {'id': 'opencode-go', 'has_credential': True, 'label': 'OpenCode Go'},
+        {'id': 'zai', 'has_credential': True, 'label': 'Z.AI'},
+        # has_credential=False → should NOT be imported
+        {'id': 'anthropic', 'has_credential': False, 'label': 'Anthropic'},
+    ]
+
+    client = _make_app()
+    with patch(
+        'myah.routers.myah.Users.get_users',
+        return_value={'users': [fake_user], 'total': 1},
+    ), patch(
+        'myah.utils.hermes_web.fetch_hermes_provider_catalog',
+        new=_AsyncReturn(fake_catalog),
+    ), patch(
+        'myah.models.user_provider_status.UserProviderStatuses.upsert',
+        side_effect=lambda **kw: upsert_calls.append(kw) or SimpleNamespace(**kw),
+    ), patch(
+        'myah.utils.hermes_web.fetch_hermes_default_model',
+        new=_AsyncReturn(None),
+    ):
+        resp = client.get('/api/v1/myah/whoami', headers={'Authorization': 'Bearer tok'})
+
+    assert resp.status_code == 200
+
+    upserted_ids = {c['provider_id'] for c in upsert_calls}
+    assert upserted_ids == {'openrouter', 'opencode-go', 'zai'}, (
+        f'expected 3 credentialed providers, got {upserted_ids}'
+    )
+    # All upserts must mark the row as the auto-import variant
+    for call in upsert_calls:
+        assert call['user_id'] == 'u1'
+        assert call['is_valid'] is True
+        assert call['key_last_four'] == 'hermes'  # marker for "auto-imported"
+
+
+def test_whoami_hosted_never_auto_imports_providers(monkeypatch):
+    """Hosted: the auto-import path is OSS-only."""
+    monkeypatch.setenv('MYAH_AGENT_BEARER_TOKEN', 'tok')
+    monkeypatch.delenv('MYAH_DEPLOYMENT_MODE', raising=False)
+
+    fake_user = SimpleNamespace(id='u1', name='Alice', default_model=None)
+    upsert_calls = []
+    fetcher = _AsyncReturn([{'id': 'openrouter', 'has_credential': True}])
+
+    client = _make_app()
+    with patch(
+        'myah.routers.myah.Users.get_users',
+        return_value={'users': [fake_user], 'total': 1},
+    ), patch(
+        'myah.utils.hermes_web.fetch_hermes_provider_catalog',
+        new=fetcher,
+    ), patch(
+        'myah.models.user_provider_status.UserProviderStatuses.upsert',
+        side_effect=lambda **kw: upsert_calls.append(kw),
+    ):
+        resp = client.get('/api/v1/myah/whoami', headers={'Authorization': 'Bearer tok'})
+
+    assert resp.status_code == 200
+    assert upsert_calls == []
+    # The catalog fetcher must not even be called in hosted mode
+    assert fetcher.call_count == 0
+
+
+def test_whoami_oss_provider_import_failure_does_not_block_whoami(monkeypatch):
+    """If the catalog fetch raises, /whoami still returns 200 with the
+    user_id — the plugin needs user_id even when the import fails."""
+    monkeypatch.setenv('MYAH_AGENT_BEARER_TOKEN', 'tok')
+    monkeypatch.setenv('MYAH_DEPLOYMENT_MODE', 'oss')
+
+    fake_user = SimpleNamespace(id='u1', name='Alice', default_model=None)
+
+    async def _explode(*a, **kw):
+        raise RuntimeError('hermes unreachable')
+
+    client = _make_app()
+    with patch(
+        'myah.routers.myah.Users.get_users',
+        return_value={'users': [fake_user], 'total': 1},
+    ), patch(
+        'myah.utils.hermes_web.fetch_hermes_provider_catalog',
+        new=_explode,
+    ), patch(
+        'myah.utils.hermes_web.fetch_hermes_default_model',
+        new=_AsyncReturn(None),
+    ):
+        resp = client.get('/api/v1/myah/whoami', headers={'Authorization': 'Bearer tok'})
+
+    assert resp.status_code == 200
+    assert resp.json()['user_id'] == 'u1'
+
+
+def test_whoami_oss_skips_providers_without_credential(monkeypatch):
+    """Providers in the catalog without credentials are NOT imported.
+    These are visible-but-not-credentialed entries (provider available
+    in UI but user hasn't connected). They should stay disconnected
+    until the user provides a key."""
+    monkeypatch.setenv('MYAH_AGENT_BEARER_TOKEN', 'tok')
+    monkeypatch.setenv('MYAH_DEPLOYMENT_MODE', 'oss')
+
+    fake_user = SimpleNamespace(id='u1', name='Alice', default_model=None)
+    upsert_calls = []
+
+    fake_catalog = [
+        {'id': 'openrouter', 'has_credential': False, 'label': 'OpenRouter'},
+        {'id': 'anthropic', 'has_credential': False, 'label': 'Anthropic'},
+    ]
+
+    client = _make_app()
+    with patch(
+        'myah.routers.myah.Users.get_users',
+        return_value={'users': [fake_user], 'total': 1},
+    ), patch(
+        'myah.utils.hermes_web.fetch_hermes_provider_catalog',
+        new=_AsyncReturn(fake_catalog),
+    ), patch(
+        'myah.models.user_provider_status.UserProviderStatuses.upsert',
+        side_effect=lambda **kw: upsert_calls.append(kw),
+    ), patch(
+        'myah.utils.hermes_web.fetch_hermes_default_model',
+        new=_AsyncReturn(None),
+    ):
+        resp = client.get('/api/v1/myah/whoami', headers={'Authorization': 'Bearer tok'})
+
+    assert resp.status_code == 200
+    assert upsert_calls == []

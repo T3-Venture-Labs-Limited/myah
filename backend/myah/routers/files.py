@@ -1,0 +1,789 @@
+import logging
+import os
+import uuid
+import json
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Optional, Union
+from urllib.parse import quote
+import asyncio
+
+from fastapi import (
+    BackgroundTasks,
+    APIRouter,
+    Depends,
+    File,
+    Form,
+    HTTPException,
+    Request,
+    Response,
+    UploadFile,
+    status,
+    Query,
+)
+from fastapi.security import HTTPAuthorizationCredentials
+
+from fastapi.responses import FileResponse, StreamingResponse
+from sqlalchemy.orm import Session
+from myah.internal.db import get_session, SessionLocal
+
+from myah.constants import ERROR_MESSAGES
+
+from myah.models.users import Users, UserModel
+from myah.models.files import (
+    FileForm,
+    FileListResponse,
+    FileModel,
+    FileModelResponse,
+    Files,
+)
+from myah.models.chats import Chats
+from myah.models.groups import Groups
+from myah.models.access_grants import AccessGrants
+from myah.storage.provider import Storage
+
+
+from myah.config import BYPASS_ADMIN_ACCESS_CONTROL
+from myah.utils.auth import (
+    bearer_security,
+    get_admin_user,
+    get_current_user,
+    get_verified_user,
+)
+from myah.routers.containers import AGENT_BEARER_TOKEN
+from pydantic import BaseModel
+
+log = logging.getLogger(__name__)
+
+router = APIRouter()
+
+
+# A small choice — inline or attach — but it ripples to every byte the
+# browser sees. Kept as a pure function so the unit tests can ask it
+# directly, without a database, a request, or a file on disk.
+def _resolve_disposition_for_test(
+    content_type: str,
+    filename: str,
+    *,
+    attachment: bool,
+) -> Optional[str]:
+    """Pure-function disposition resolver — used by /api/v1/files/{id}/content
+    and unit-tested directly. Returns 'inline', 'attachment', or None
+    (caller doesn't set Content-Disposition for None).
+
+    Per artifact-pane-redesign §8.1: HTML files are served inline so the
+    artifact pane's HtmlRenderer can use a direct iframe src.
+    """
+    if attachment:
+        return 'attachment'
+    fname_lower = filename.lower()
+    if content_type == 'application/pdf' or fname_lower.endswith('.pdf'):
+        return 'inline'
+    if (
+        content_type in ('text/html', 'application/xhtml+xml')
+        or fname_lower.endswith(('.html', '.htm'))
+    ):
+        return 'inline'
+    if content_type == 'text/plain':
+        return None
+    return 'attachment'
+
+
+from myah.utils.access_control.files import has_access_to_file
+
+
+############################
+# Agent bearer-auth support
+# The agent stands at the threshold, not as a stranger but as
+# a trusted steward — let it pass when it shows its seal.
+############################
+
+
+@dataclass
+class AgentActor:
+    """Sentinel returned by get_file_user_or_agent when AGENT_BEARER_TOKEN matches.
+
+    Represents the Hermes agent accessing files on behalf of a user.
+    Container-level isolation is the authz boundary, so per-user ACL is bypassed.
+    """
+
+    role: str = field(default='agent')
+    id: str = field(default='agent')
+
+
+async def get_file_user_or_agent(
+    request: Request,
+    response: Response,
+    background_tasks: BackgroundTasks,
+    auth_token: Optional[HTTPAuthorizationCredentials] = Depends(bearer_security),
+) -> Union[UserModel, AgentActor]:
+    """Accept either a session user or the agent bearer token.
+
+    The agent-bearer check MUST happen before any user-auth resolution.
+    ``get_current_user`` calls ``decode_token`` for any non-``sk-`` bearer and
+    raises ``HTTPException(401)`` when decoding fails — so a ``Depends(
+    get_verified_user)`` default would short-circuit before this function's
+    body ran, and the agent's non-JWT bearer would never match here. Resolving
+    user auth inline lets us try the agent token first and fall through to
+    the Open WebUI user chain (JWT cookie, ``sk-`` API key, JWT bearer) only
+    when the agent token doesn't match.
+
+    Returns:
+        ``AgentActor`` when the Authorization bearer matches
+        ``AGENT_BEARER_TOKEN``; the resolved ``UserModel`` otherwise.
+
+    Raises:
+        ``HTTPException(401)`` when neither the agent bearer nor user auth
+        resolves to a valid identity.
+    """
+    # 1. Hermes-native path — agent container bearer.
+    if auth_token is not None and AGENT_BEARER_TOKEN:
+        if auth_token.credentials == AGENT_BEARER_TOKEN:
+            return AgentActor()
+
+    # 2. Fall through to Open WebUI user auth (JWT cookie / sk- API key / JWT
+    # bearer). ``get_current_user`` raises 401 on failure.
+    user = await get_current_user(request, response, background_tasks, auth_token)
+    if user.role not in {'user', 'admin'}:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=ERROR_MESSAGES.ACCESS_PROHIBITED,
+        )
+    return user
+
+############################
+# Upload File
+# What was entrusted here was given in good faith. Let it
+# be returned the same way, whole and undiminished.
+############################
+
+
+def process_uploaded_file(
+    request,
+    file,
+    file_path,
+    file_item,
+    file_metadata,
+    user,
+    db: Optional[Session] = None,
+):
+    def _process_handler(db_session):
+        try:
+            # Mark processing complete — the old RAG/retrieval pipeline that
+            # used to extract and embed content has been removed. Files are now
+            # stored as-is; Hermes handles its own ingestion.
+            Files.update_file_data_by_id(
+                file_item.id,
+                {'status': 'completed'},
+                db=db_session,
+            )
+
+        except Exception as e:
+            log.error(f'Error processing file: {file_item.id}')
+            Files.update_file_data_by_id(
+                file_item.id,
+                {
+                    'status': 'failed',
+                    'error': str(e.detail) if hasattr(e, 'detail') else str(e),
+                },
+                db=db_session,
+            )
+
+    if db:
+        _process_handler(db)
+    else:
+        with SessionLocal() as db_session:
+            _process_handler(db_session)
+
+
+@router.post('/', response_model=FileModelResponse)
+def upload_file(
+    request: Request,
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
+    metadata: Optional[dict | str] = Form(None),
+    process: bool = Query(True),
+    process_in_background: bool = Query(True),
+    user=Depends(get_verified_user),
+    db: Session = Depends(get_session),
+):
+    return upload_file_handler(
+        request,
+        file=file,
+        metadata=metadata,
+        process=process,
+        process_in_background=process_in_background,
+        user=user,
+        background_tasks=background_tasks,
+        db=db,
+    )
+
+
+def upload_file_handler(
+    request: Request,
+    file: UploadFile = File(...),
+    metadata: Optional[dict | str] = Form(None),
+    process: bool = Query(True),
+    process_in_background: bool = Query(True),
+    user=Depends(get_verified_user),
+    background_tasks: Optional[BackgroundTasks] = None,
+    db: Optional[Session] = None,
+):
+    log.info(f'file.content_type: {file.content_type} {process}')
+
+    if isinstance(metadata, str):
+        try:
+            metadata = json.loads(metadata)
+        except json.JSONDecodeError:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=ERROR_MESSAGES.DEFAULT('Invalid metadata format'),
+            )
+    file_metadata = metadata if metadata else {}
+
+    try:
+        unsanitized_filename = file.filename
+        filename = os.path.basename(unsanitized_filename)
+
+        file_extension = os.path.splitext(filename)[1]
+        # Remove the leading dot from the file extension
+        file_extension = file_extension[1:] if file_extension else ''
+
+        allowed_extensions = getattr(request.app.state.config, 'ALLOWED_FILE_EXTENSIONS', [])
+        if process and allowed_extensions:
+            allowed_extensions = [ext for ext in allowed_extensions if ext]
+
+            if file_extension not in allowed_extensions:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=ERROR_MESSAGES.DEFAULT(f'File type {file_extension} is not allowed'),
+                )
+
+        # replace filename with uuid
+        id = str(uuid.uuid4())
+        name = filename
+        filename = f'{id}_{filename}'
+        contents, file_path = Storage.upload_file(
+            file.file,
+            filename,
+            {
+                'OpenWebUI-User-Email': user.email,
+                'OpenWebUI-User-Id': user.id,
+                'OpenWebUI-User-Name': user.name,
+                'OpenWebUI-File-Id': id,
+            },
+        )
+
+        file_item = Files.insert_new_file(
+            user.id,
+            FileForm(
+                **{
+                    'id': id,
+                    'filename': name,
+                    'path': file_path,
+                    'data': {
+                        **({'status': 'pending'} if process else {}),
+                    },
+                    'meta': {
+                        'name': name,
+                        'content_type': (file.content_type if isinstance(file.content_type, str) else None),
+                        'size': len(contents),
+                        'data': file_metadata,
+                    },
+                }
+            ),
+            db=db,
+        )
+
+        if process:
+            if background_tasks and process_in_background:
+                background_tasks.add_task(
+                    process_uploaded_file,
+                    request,
+                    file,
+                    file_path,
+                    file_item,
+                    file_metadata,
+                    user,
+                )
+                return {'status': True, **file_item.model_dump()}
+            else:
+                process_uploaded_file(
+                    request,
+                    file,
+                    file_path,
+                    file_item,
+                    file_metadata,
+                    user,
+                    db=db,
+                )
+                return {'status': True, **file_item.model_dump()}
+        else:
+            if file_item:
+                return file_item
+            else:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=ERROR_MESSAGES.DEFAULT('Error uploading file'),
+                )
+
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        log.exception(e)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=ERROR_MESSAGES.DEFAULT('Error uploading file'),
+        )
+
+
+############################
+# List Files
+############################
+
+
+PAGE_SIZE = 50
+
+
+@router.get('/', response_model=FileListResponse)
+async def list_files(
+    user=Depends(get_verified_user),
+    page: int = Query(1, ge=1, description='Page number (1-indexed)'),
+    content: bool = Query(True),
+    db: Session = Depends(get_session),
+):
+    skip = (page - 1) * PAGE_SIZE
+    user_id = None if (user.role == 'admin' and BYPASS_ADMIN_ACCESS_CONTROL) else user.id
+
+    result = Files.get_file_list(user_id=user_id, skip=skip, limit=PAGE_SIZE, db=db)
+
+    if not content:
+        for file in result.items:
+            if file.data and 'content' in file.data:
+                del file.data['content']
+
+    return result
+
+
+############################
+# Search Files
+############################
+
+
+@router.get('/search', response_model=list[FileModelResponse])
+async def search_files(
+    filename: str = Query(
+        ...,
+        description="Filename pattern to search for. Supports wildcards such as '*.txt'",
+    ),
+    content: bool = Query(True),
+    skip: int = Query(0, ge=0, description='Number of files to skip'),
+    limit: int = Query(100, ge=1, le=1000, description='Maximum number of files to return'),
+    user=Depends(get_verified_user),
+    db: Session = Depends(get_session),
+):
+    """
+    Search for files by filename with support for wildcard patterns.
+    Uses SQL-based filtering with pagination for better performance.
+    """
+    # Determine user_id: null for admin with bypass (search all), user.id otherwise
+    user_id = None if (user.role == 'admin' and BYPASS_ADMIN_ACCESS_CONTROL) else user.id
+
+    # Use optimized database query with pagination
+    files = Files.search_files(
+        user_id=user_id,
+        filename=filename,
+        skip=skip,
+        limit=limit,
+        db=db,
+    )
+
+    if not files:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail='No files found matching the pattern.',
+        )
+
+    if not content:
+        for file in files:
+            if file.data and 'content' in file.data:
+                del file.data['content']
+
+    return files
+
+
+############################
+# Delete All Files
+############################
+
+
+@router.delete('/all')
+async def delete_all_files(user=Depends(get_admin_user), db: Session = Depends(get_session)):
+    result = Files.delete_all_files(db=db)
+    if result:
+        try:
+            Storage.delete_all_files()
+        except Exception as e:
+            log.exception(e)
+            log.error('Error deleting files')
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=ERROR_MESSAGES.DEFAULT('Error deleting files'),
+            )
+        return {'message': 'All files deleted successfully'}
+    else:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=ERROR_MESSAGES.DEFAULT('Error deleting files'),
+        )
+
+
+############################
+# Get File By Id
+############################
+
+
+@router.get('/{id}', response_model=Optional[FileModel])
+async def get_file_by_id(id: str, user=Depends(get_verified_user), db: Session = Depends(get_session)):
+    file = Files.get_file_by_id(id, db=db)
+
+    if not file:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=ERROR_MESSAGES.NOT_FOUND,
+        )
+
+    if file.user_id == user.id or user.role == 'admin' or has_access_to_file(id, 'read', user, db=db):
+        return file
+    else:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=ERROR_MESSAGES.NOT_FOUND,
+        )
+
+
+@router.get('/{id}/process/status')
+async def get_file_process_status(
+    id: str,
+    stream: bool = Query(False),
+    user=Depends(get_verified_user),
+    db: Session = Depends(get_session),
+):
+    file = Files.get_file_by_id(id, db=db)
+
+    if not file:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=ERROR_MESSAGES.NOT_FOUND,
+        )
+
+    if file.user_id == user.id or user.role == 'admin' or has_access_to_file(id, 'read', user, db=db):
+        if stream:
+            MAX_FILE_PROCESSING_DURATION = 3600 * 2
+
+            async def event_stream(file_id):
+                # NOTE: We intentionally do NOT capture the request's db session here.
+                # Each poll creates its own short-lived session to avoid holding a
+                # connection for hours. A WebSocket push would be more efficient.
+                for _ in range(MAX_FILE_PROCESSING_DURATION):
+                    file_item = Files.get_file_by_id(file_id)  # Creates own session
+                    if file_item:
+                        data = file_item.model_dump().get('data', {})
+                        status = data.get('status')
+
+                        if status:
+                            event = {'status': status}
+                            if status == 'failed':
+                                event['error'] = data.get('error')
+
+                            yield f'data: {json.dumps(event)}\n\n'
+                            if status in ('completed', 'failed'):
+                                break
+                        else:
+                            # Legacy
+                            break
+                    else:
+                        yield f'data: {json.dumps({"status": "not_found"})}\n\n'
+                        break
+
+                    await asyncio.sleep(1)
+
+            return StreamingResponse(
+                event_stream(file.id),
+                media_type='text/event-stream',
+            )
+        else:
+            return {'status': file.data.get('status', 'pending')}
+    else:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=ERROR_MESSAGES.NOT_FOUND,
+        )
+
+
+############################
+# Get File Data Content By Id
+############################
+
+
+@router.get('/{id}/data/content')
+async def get_file_data_content_by_id(id: str, user=Depends(get_verified_user), db: Session = Depends(get_session)):
+    file = Files.get_file_by_id(id, db=db)
+
+    if not file:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=ERROR_MESSAGES.NOT_FOUND,
+        )
+
+    if file.user_id == user.id or user.role == 'admin' or has_access_to_file(id, 'read', user, db=db):
+        return {'content': file.data.get('content', '')}
+    else:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=ERROR_MESSAGES.NOT_FOUND,
+        )
+
+
+############################
+# Update File Data Content By Id
+############################
+
+
+class ContentForm(BaseModel):
+    content: str
+
+
+@router.post('/{id}/data/content/update')
+def update_file_data_content_by_id(
+    request: Request,
+    id: str,
+    form_data: ContentForm,
+    user=Depends(get_verified_user),
+    db: Session = Depends(get_session),
+):
+    file = Files.get_file_by_id(id, db=db)
+
+    if not file:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=ERROR_MESSAGES.NOT_FOUND,
+        )
+
+    if file.user_id == user.id or user.role == 'admin' or has_access_to_file(id, 'write', user, db=db):
+        return {'content': file.data.get('content', '')}
+    else:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=ERROR_MESSAGES.NOT_FOUND,
+        )
+
+
+############################
+# Get File Content By Id
+############################
+
+
+@router.get('/{id}/content')
+async def get_file_content_by_id(
+    id: str,
+    user=Depends(get_file_user_or_agent),
+    attachment: bool = Query(False),
+    db: Session = Depends(get_session),
+):
+    file = Files.get_file_by_id(id, db=db)
+
+    if not file:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=ERROR_MESSAGES.NOT_FOUND,
+        )
+
+    if isinstance(user, AgentActor) or file.user_id == user.id or user.role == 'admin' or has_access_to_file(id, 'read', user, db=db):
+        try:
+            file_path = Storage.get_file(file.path)
+            file_path = Path(file_path)
+
+            # Check if the file already exists in the cache
+            if file_path.is_file():
+                # Handle Unicode filenames
+                filename = file.meta.get('name', file.filename)
+                encoded_filename = quote(filename)  # RFC5987 encoding
+
+                content_type = file.meta.get('content_type')
+                filename = file.meta.get('name', file.filename)
+                encoded_filename = quote(filename)
+                headers = {}
+
+                disposition = _resolve_disposition_for_test(
+                    content_type or '', filename, attachment=attachment
+                )
+                if disposition == 'inline':
+                    headers['Content-Disposition'] = f"inline; filename*=UTF-8''{encoded_filename}"
+                    if filename.lower().endswith('.pdf'):
+                        content_type = 'application/pdf'
+                    elif filename.lower().endswith(('.html', '.htm')):
+                        content_type = 'text/html'
+                elif disposition == 'attachment':
+                    headers['Content-Disposition'] = f"attachment; filename*=UTF-8''{encoded_filename}"
+                # disposition is None → no Content-Disposition header (current text/plain behavior)
+
+                return FileResponse(file_path, headers=headers, media_type=content_type)
+
+            else:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=ERROR_MESSAGES.NOT_FOUND,
+                )
+        except HTTPException as e:
+            raise e
+        except Exception as e:
+            log.exception(e)
+            log.error('Error getting file content')
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=ERROR_MESSAGES.DEFAULT('Error getting file content'),
+            )
+    else:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=ERROR_MESSAGES.NOT_FOUND,
+        )
+
+
+@router.get('/{id}/content/html')
+async def get_html_file_content_by_id(id: str, user=Depends(get_verified_user), db: Session = Depends(get_session)):
+    file = Files.get_file_by_id(id, db=db)
+
+    if not file:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=ERROR_MESSAGES.NOT_FOUND,
+        )
+
+    file_user = Users.get_user_by_id(file.user_id, db=db)
+    if not file_user.role == 'admin':
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=ERROR_MESSAGES.NOT_FOUND,
+        )
+
+    if file.user_id == user.id or user.role == 'admin' or has_access_to_file(id, 'read', user, db=db):
+        try:
+            file_path = Storage.get_file(file.path)
+            file_path = Path(file_path)
+
+            # Check if the file already exists in the cache
+            if file_path.is_file():
+                log.info(f'file_path: {file_path}')
+                return FileResponse(file_path)
+            else:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=ERROR_MESSAGES.NOT_FOUND,
+                )
+        except HTTPException as e:
+            raise e
+        except Exception as e:
+            log.exception(e)
+            log.error('Error getting file content')
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=ERROR_MESSAGES.DEFAULT('Error getting file content'),
+            )
+    else:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=ERROR_MESSAGES.NOT_FOUND,
+        )
+
+
+@router.get('/{id}/content/{file_name}')
+async def get_file_content_by_id(id: str, user=Depends(get_verified_user), db: Session = Depends(get_session)):
+    file = Files.get_file_by_id(id, db=db)
+
+    if not file:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=ERROR_MESSAGES.NOT_FOUND,
+        )
+
+    if file.user_id == user.id or user.role == 'admin' or has_access_to_file(id, 'read', user, db=db):
+        file_path = file.path
+
+        # Handle Unicode filenames
+        filename = file.meta.get('name', file.filename)
+        encoded_filename = quote(filename)  # RFC5987 encoding
+        headers = {'Content-Disposition': f"attachment; filename*=UTF-8''{encoded_filename}"}
+
+        if file_path:
+            file_path = Storage.get_file(file_path)
+            file_path = Path(file_path)
+
+            # Check if the file already exists in the cache
+            if file_path.is_file():
+                return FileResponse(file_path, headers=headers)
+            else:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=ERROR_MESSAGES.NOT_FOUND,
+                )
+        else:
+            # File path doesn’t exist, return the content as .txt if possible
+            file_content = file.data.get('content', '')
+            file_name = file.filename
+
+            # Create a generator that encodes the file content
+            def generator():
+                yield file_content.encode('utf-8')
+
+            return StreamingResponse(
+                generator(),
+                media_type='text/plain',
+                headers=headers,
+            )
+    else:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=ERROR_MESSAGES.NOT_FOUND,
+        )
+
+
+############################
+# Delete File By Id
+############################
+
+
+@router.delete('/{id}')
+async def delete_file_by_id(id: str, user=Depends(get_verified_user), db: Session = Depends(get_session)):
+    file = Files.get_file_by_id(id, db=db)
+
+    if not file:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=ERROR_MESSAGES.NOT_FOUND,
+        )
+
+    if file.user_id == user.id or user.role == 'admin' or has_access_to_file(id, 'write', user, db=db):
+        result = Files.delete_file_by_id(id, db=db)
+        if result:
+            try:
+                Storage.delete_file(file.path)
+            except Exception as e:
+                log.exception(e)
+                log.error('Error deleting files')
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=ERROR_MESSAGES.DEFAULT('Error deleting files'),
+                )
+            return {'message': 'File deleted successfully'}
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=ERROR_MESSAGES.DEFAULT('Error deleting file'),
+            )
+    else:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=ERROR_MESSAGES.NOT_FOUND,
+        )

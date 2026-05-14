@@ -63,7 +63,7 @@ function toolOutput(callId: string, overrides?: Partial<FunctionCallOutputItem>)
 
 function codeInterp(overrides?: Partial<CodeInterpreterItem>): CodeInterpreterItem {
 	return {
-		type: 'open_webui:code_interpreter',
+		type: 'myah:code_interpreter',
 		id: uid(),
 		code: 'print("hi")',
 		lang: 'python',

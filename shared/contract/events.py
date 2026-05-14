@@ -19,7 +19,7 @@ Discriminator field
 The wire field is ``event`` (e.g. ``{"event": "message.delta", "delta": "hi"}``).
 ``HermesEvent`` is therefore an Annotated discriminated union over the
 ``event`` field. The handler at
-``platform/backend/open_webui/utils/hermes_stream_handler.py`` reads this same
+``platform/backend/myah/utils/hermes_stream_handler.py`` reads this same
 field as the local variable ``event_type``.
 
 Adding a new event

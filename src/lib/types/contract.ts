@@ -33,7 +33,7 @@ export type OAuthStatus = "pending" | "approved" | "denied" | "cancelled" | "exp
  *
  * Today (2026-04-25) only two tasks are routed through the aux endpoint;
  * the platform-level ``AUX_DEFAULT_TASKS`` frozenset in
- * ``open_webui/config.py`` enumerates a broader set of *config* tasks
+ * ``myah/config.py`` enumerates a broader set of *config* tasks
  * (``compression``, ``session_search``, ``approval``, ...) but those run
  * inside the agent and are not dispatched over the HTTP aux surface.
  */
@@ -520,7 +520,7 @@ export interface SummaryTextPart {
  * branch in the OpenAI-routing path, not the Hermes path).
  */
 export interface CodeInterpreterItem {
-  type: "open_webui:code_interpreter";
+  type: "myah:code_interpreter";
   id: string;
   code: string;
   lang: string;
