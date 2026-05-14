@@ -87,6 +87,7 @@ from myah.routers import agent_config as agent_config_router
 from myah.routers import hermes_media
 from myah.routers import myah as myah_router_module
 from myah.routers import providers as providers_router_module
+from myah.routers import oss as oss_router_module
 
 # OSS-split: agent_memory + integrations are hosted-only routers (honcho /
 # composio coupled). They are imported + registered only when the deployment
@@ -955,6 +956,15 @@ app.include_router(
 
 # ── Myah: Hermes-native provider catalog + credential management ────────
 app.include_router(providers_router_module.router, prefix='/api/v1/providers', tags=['providers'])
+# ────────────────────────────────────────────────────────────────────────
+
+# ── Myah: OSS first-run UX endpoints (probe + first_run_complete) ───────
+# Mounted in both OSS and hosted builds. In hosted mode the probe still
+# works against the host-side hermes (e.g. when a user is poking at the
+# diagnostics page), but the Welcome screen never renders because the
+# hosted frontend gates on PUBLIC_DEPLOYMENT_MODE !== 'hosted'.
+# The router prefixes itself with /api/v1/oss/ so no extra path needed.
+app.include_router(oss_router_module.router)
 # ────────────────────────────────────────────────────────────────────────
 
 # ── Myah: Integrations router (hosted-only) ────────────────────────────

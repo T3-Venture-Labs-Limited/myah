@@ -8,6 +8,7 @@
 	});
 
 	import { onMount, tick, setContext, onDestroy } from 'svelte';
+	import { env } from '$env/dynamic/public';
 	import {
 		config,
 		user,
@@ -34,6 +35,63 @@
 	import { page } from '$app/stores';
 	import { beforeNavigate } from '$app/navigation';
 	import { updated } from '$app/state';
+
+	// OSS first-run UX (Workstream C). When MYAH_DEPLOYMENT_MODE=oss the
+	// frontend probes the host-side hermes on every page load and gates
+	// the entire app shell on the result. In hosted mode this whole block
+	// is a no-op (isOss=false), preserving the existing flow.
+	import { getOssProbe, markFirstRunComplete, type OssProbe } from '$lib/apis/oss';
+	import Welcome from '$lib/components/oss/Welcome.svelte';
+	import HermesDownError from '$lib/components/oss/HermesDownError.svelte';
+	import PluginMissingError from '$lib/components/oss/PluginMissingError.svelte';
+
+	const isOss = env.PUBLIC_DEPLOYMENT_MODE === 'oss';
+
+	let ossProbe: OssProbe | null = null;
+	let ossProbeLoaded = false; // becomes true after first probe attempt
+	let ossProbeError: string | null = null;
+
+	async function runOssProbe() {
+		ossProbeError = null;
+		try {
+			ossProbe = await getOssProbe();
+		} catch (err) {
+			// Backend itself is unreachable — surface as a hermes-down
+			// blocking error since that's the closest signal we have.
+			ossProbeError = typeof err === 'string' ? err : 'Probe failed.';
+			ossProbe = null;
+		} finally {
+			ossProbeLoaded = true;
+		}
+	}
+
+	async function handleWelcomeContinue() {
+		// VM-testing F3 fix happens here too: if the user clicks Continue,
+		// we flip first_run regardless of providers_configured.
+		try {
+			await markFirstRunComplete();
+		} catch (err) {
+			console.error('first_run_complete failed:', err);
+			// Non-fatal: re-render Welcome on the next page load. The
+			// frontend will route to chat once the flag is persisted.
+		}
+		await runOssProbe(); // refresh state -> first_run now false -> chat
+	}
+
+	// Auto-skip-to-chat when first_run=true AND at least one provider is
+	// already configured. Implements F3 from vm-testing-followups.md.
+	$: if (
+		isOss &&
+		ossProbe &&
+		ossProbe.hermes_reachable &&
+		ossProbe.plugin_installed &&
+		ossProbe.first_run &&
+		ossProbe.providers_configured.length > 0
+	) {
+		// Don't block on this — fire-and-forget; if it fails the user
+		// just sees Welcome on the next load.
+		void handleWelcomeContinue();
+	}
 
 	import i18n, { initI18n, getLanguages, changeLanguage } from '$lib/i18n';
 
@@ -472,6 +530,16 @@
 	};
 
 	onMount(async () => {
+		// OSS-mode first-run probe runs in parallel with the normal init
+		// flow. The gating render below waits on ossProbeLoaded before
+		// showing the app shell, so a slow probe doesn't gate normal
+		// app boot in hosted mode.
+		if (isOss) {
+			void runOssProbe();
+		} else {
+			ossProbeLoaded = true;
+		}
+
 		window.addEventListener('message', windowMessageEventHandler);
 
 		let touchstartY = 0;
@@ -771,7 +839,38 @@
 	</div>
 {/if}
 
-{#if loaded}
+{#if isOss && ossProbeLoaded && $page.url.pathname !== '/diagnostics'}
+	<!--
+		OSS first-run gate. Renders BEFORE the normal app shell when the
+		probe surfaces an unrecoverable boot state or the welcome screen
+		hasn't been dismissed yet. The /diagnostics route is exempt so
+		users can always reach it from the blocking-error screens.
+	-->
+	{#if ossProbeError || !ossProbe}
+		<HermesDownError
+			hermesUrl={ossProbe?.hermes_url ?? 'http://host.docker.internal:8642'}
+			onRetry={runOssProbe}
+		/>
+	{:else if !ossProbe.hermes_reachable}
+		<HermesDownError hermesUrl={ossProbe.hermes_url} onRetry={runOssProbe} />
+	{:else if !ossProbe.plugin_installed}
+		<PluginMissingError hermesUrl={ossProbe.hermes_url} onRetry={runOssProbe} />
+	{:else if ossProbe.first_run && ossProbe.providers_configured.length === 0}
+		<Welcome probe={ossProbe} onContinue={handleWelcomeContinue} />
+	{:else if loaded}
+		{#if $isApp}
+			<div class="flex flex-row h-screen">
+				<AppSidebar />
+
+				<div class="w-full flex-1 max-w-[calc(100%-4.5rem)]">
+					<slot />
+				</div>
+			</div>
+		{:else}
+			<slot />
+		{/if}
+	{/if}
+{:else if loaded}
 	{#if $isApp}
 		<div class="flex flex-row h-screen">
 			<AppSidebar />
