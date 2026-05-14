@@ -22,6 +22,8 @@ from myah.env import (
     DATABASE_URL,
     ENABLE_DB_MIGRATIONS,
     ENV,
+    MYAH_BANNERS,
+    MYAH_URL,
     REDIS_URL,
     REDIS_KEY_PREFIX,
     REDIS_SENTINEL_HOSTS,
@@ -1016,7 +1018,7 @@ TOOL_SERVER_CONNECTIONS = PersistentConfig(
 ####################################
 
 
-WEBUI_URL = PersistentConfig('WEBUI_URL', 'webui.url', os.environ.get('WEBUI_URL', ''))
+WEBUI_URL = PersistentConfig('WEBUI_URL', 'webui.url', MYAH_URL)
 
 
 ENABLE_SIGNUP = PersistentConfig(
@@ -1437,7 +1439,7 @@ class BannerModel(BaseModel):
 
 
 try:
-    banners = json.loads(os.environ.get('WEBUI_BANNERS', '[]'))
+    banners = json.loads(MYAH_BANNERS)
     banners = [BannerModel(**banner) for banner in banners]
 except Exception as e:
     log.exception(f'Error loading WEBUI_BANNERS: {e}')

@@ -173,8 +173,14 @@ if MYAH_NAME != 'Myah':
     MYAH_NAME += ' (Myah)'
 WEBUI_NAME = MYAH_NAME  # legacy alias
 
-MYAH_FAVICON_URL = ''
+MYAH_FAVICON_URL = _env('MYAH_FAVICON_URL', 'WEBUI_FAVICON_URL', '')
 WEBUI_FAVICON_URL = MYAH_FAVICON_URL  # legacy alias
+
+MYAH_URL = _env('MYAH_URL', 'WEBUI_URL', '')
+WEBUI_URL = MYAH_URL  # legacy alias
+
+MYAH_BANNERS = _env('MYAH_BANNERS', 'WEBUI_BANNERS', '[]')
+WEBUI_BANNERS = MYAH_BANNERS  # legacy alias
 
 TRUSTED_SIGNATURE_KEY = os.environ.get('TRUSTED_SIGNATURE_KEY', '')
 

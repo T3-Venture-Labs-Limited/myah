@@ -23,7 +23,7 @@ import os
 import pytest
 
 
-# All 18 WEBUI_* env vars enumerated in env.py at the rename PR's commit
+# All WEBUI_* env vars enumerated in env.py at the rename PR's commit
 # (verified via:  grep -ohE '\bWEBUI_[A-Z_]+' env.py | sort -u).
 _WEBUI_ENV_VARS = [
     'WEBUI_ADMIN_EMAIL',
@@ -37,6 +37,7 @@ _WEBUI_ENV_VARS = [
     'WEBUI_AUTH_TRUSTED_GROUPS_HEADER',
     'WEBUI_AUTH_TRUSTED_NAME_HEADER',
     'WEBUI_AUTH_TRUSTED_ROLE_HEADER',
+    'WEBUI_BANNERS',
     'WEBUI_BUILD_HASH',
     'WEBUI_FAVICON_URL',
     'WEBUI_JWT_SECRET_KEY',
@@ -44,6 +45,7 @@ _WEBUI_ENV_VARS = [
     'WEBUI_SECRET_KEY',
     'WEBUI_SESSION_COOKIE_SAME_SITE',
     'WEBUI_SESSION_COOKIE_SECURE',
+    'WEBUI_URL',
 ]
 
 
@@ -95,6 +97,30 @@ def test_webui_secret_key_alias_falls_back(monkeypatch, reset_env):
     monkeypatch.setenv('WEBUI_SECRET_KEY', 'legacy-secret-value')
     env = _reload_env_module()
     assert env.MYAH_SECRET_KEY == 'legacy-secret-value'
+
+
+def test_webui_url_alias_falls_back(monkeypatch, reset_env):
+    """When MYAH_URL unset but WEBUI_URL='https://my.host/', primary picks it up."""
+    monkeypatch.setenv('WEBUI_URL', 'https://my.host/')
+    env = _reload_env_module()
+    assert env.MYAH_URL == 'https://my.host/'
+    assert env.WEBUI_URL == 'https://my.host/'
+
+
+def test_webui_banners_alias_falls_back(monkeypatch, reset_env):
+    """When MYAH_BANNERS unset but WEBUI_BANNERS is JSON, primary picks it up."""
+    monkeypatch.setenv('WEBUI_BANNERS', '[{"id":"x","type":"info","content":"hi","dismissible":true,"timestamp":0}]')
+    env = _reload_env_module()
+    assert env.MYAH_BANNERS == '[{"id":"x","type":"info","content":"hi","dismissible":true,"timestamp":0}]'
+    assert env.WEBUI_BANNERS == env.MYAH_BANNERS
+
+
+def test_webui_favicon_url_alias_falls_back(monkeypatch, reset_env):
+    """When MYAH_FAVICON_URL unset but WEBUI_FAVICON_URL is set, primary picks it up."""
+    monkeypatch.setenv('WEBUI_FAVICON_URL', 'https://example.com/favicon.png')
+    env = _reload_env_module()
+    assert env.MYAH_FAVICON_URL == 'https://example.com/favicon.png'
+    assert env.WEBUI_FAVICON_URL == 'https://example.com/favicon.png'
 
 
 def test_legacy_alias_still_works_as_module_attribute(monkeypatch, reset_env):
