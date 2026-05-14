@@ -20,7 +20,7 @@
 		currentChatPage
 	} from '$lib/stores';
 	import { sanitizeResponseContent, extractCurlyBraceWords } from '$lib/utils';
-	import { WEBUI_API_BASE_URL, WEBUI_BASE_URL } from '$lib/constants';
+	import { MYAH_API_BASE_URL, MYAH_BASE_URL } from '$lib/constants';
 
 	import Suggestions from './Suggestions.svelte';
 	import Tooltip from '$lib/components/common/Tooltip.svelte';
@@ -104,7 +104,7 @@
 									placement="top"
 								>
 									<img
-										src={`${WEBUI_API_BASE_URL}/models/model/profile/image?id=${currentModel?.id}&lang=${$i18n.language}`}
+										src={`${MYAH_API_BASE_URL}/models/model/profile/image?id=${currentModel?.id}&lang=${$i18n.language}`}
 										class=" size-9 @sm:size-10 rounded-full border-[1px] border-gray-100 dark:border-none"
 										aria-hidden="true"
 										draggable="false"

@@ -7,7 +7,7 @@
 	import { languages } from '@codemirror/language-data';
 	import { MergeView } from '@codemirror/merge';
 
-	import { WEBUI_API_BASE_URL } from '$lib/constants';
+	import { MYAH_API_BASE_URL } from '$lib/constants';
 	import ArtifactFallback from './ArtifactFallback.svelte';
 	import SelectionToolbar from '$lib/components/chat/Artifacts/SelectionToolbar.svelte';
 	import { artifactSelection } from '$lib/stores';
@@ -269,14 +269,14 @@
 			if (content instanceof Blob) {
 				originalText = await content.text();
 			} else if (file_id) {
-				const res = await fetch(`${WEBUI_API_BASE_URL}/files/${file_id}/content`, {
+				const res = await fetch(`${MYAH_API_BASE_URL}/files/${file_id}/content`, {
 					credentials: 'include'
 				});
 				if (!res.ok) throw new Error(`HTTP ${res.status}`);
 				originalText = await res.text();
 			} else if (path) {
 				const res = await fetch(
-					`${WEBUI_API_BASE_URL}/hermes/media?path=${encodeURIComponent(path)}`,
+					`${MYAH_API_BASE_URL}/hermes/media?path=${encodeURIComponent(path)}`,
 					{ credentials: 'include' }
 				);
 				if (!res.ok) throw new Error(`HTTP ${res.status}`);

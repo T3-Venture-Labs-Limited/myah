@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { getContext } from 'svelte';
 	import type { Writable } from 'svelte/store';
-	import { WEBUI_API_BASE_URL } from '$lib/constants';
+	import { MYAH_API_BASE_URL } from '$lib/constants';
 
 	// eslint-disable-next-line @typescript-eslint/no-explicit-any
 	const i18n: Writable<any> = getContext('i18n');
@@ -29,9 +29,9 @@
 	// Build the download URL — works for both file_id and path
 	const downloadUrl = $derived(
 		file_id
-			? `${WEBUI_API_BASE_URL}/files/${file_id}/content`
+			? `${MYAH_API_BASE_URL}/files/${file_id}/content`
 			: path
-				? `${WEBUI_API_BASE_URL}/hermes/media?path=${encodeURIComponent(path)}`
+				? `${MYAH_API_BASE_URL}/hermes/media?path=${encodeURIComponent(path)}`
 				: null
 	);
 

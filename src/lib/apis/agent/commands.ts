@@ -1,10 +1,10 @@
-import { WEBUI_API_BASE_URL } from '$lib/constants';
+import { MYAH_API_BASE_URL } from '$lib/constants';
 import type { AgentCommand } from '$lib/types';
 
 export const getAgentCommands = async (token: string): Promise<AgentCommand[]> => {
 	let error = null;
 
-	const res = await fetch(`${WEBUI_API_BASE_URL}/agent/commands`, {
+	const res = await fetch(`${MYAH_API_BASE_URL}/agent/commands`, {
 		method: 'GET',
 		headers: {
 			'Content-Type': 'application/json',

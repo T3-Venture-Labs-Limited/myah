@@ -12,7 +12,7 @@
 // Backend reference: platform-oss/backend/myah/routers/oss.py
 // Spec reference: docs/superpowers/specs/2026-05-13-myah-oss-v0.1.0-launch-design.md §8
 
-import { WEBUI_API_BASE_URL } from '$lib/constants';
+import { MYAH_API_BASE_URL } from '$lib/constants';
 
 export interface OssProbe {
 	hermes_reachable: boolean;
@@ -46,7 +46,7 @@ export interface OssDiagnostics extends OssProbe {
 export const getOssProbe = async (): Promise<OssProbe> => {
 	let error: string | null = null;
 
-	const res = await fetch(`${WEBUI_API_BASE_URL}/oss/probe`, {
+	const res = await fetch(`${MYAH_API_BASE_URL}/oss/probe`, {
 		method: 'GET',
 		headers: {
 			'Content-Type': 'application/json'
@@ -76,7 +76,7 @@ export const getOssProbe = async (): Promise<OssProbe> => {
 export const getOssDiagnostics = async (): Promise<OssDiagnostics> => {
 	let error: string | null = null;
 
-	const res = await fetch(`${WEBUI_API_BASE_URL}/oss/diagnostics`, {
+	const res = await fetch(`${MYAH_API_BASE_URL}/oss/diagnostics`, {
 		method: 'GET',
 		headers: {
 			'Content-Type': 'application/json'
@@ -107,7 +107,7 @@ export const getOssDiagnostics = async (): Promise<OssDiagnostics> => {
 export const markFirstRunComplete = async (): Promise<void> => {
 	let error: string | null = null;
 
-	await fetch(`${WEBUI_API_BASE_URL}/oss/first_run_complete`, {
+	await fetch(`${MYAH_API_BASE_URL}/oss/first_run_complete`, {
 		method: 'POST',
 		headers: {
 			'Content-Type': 'application/json'

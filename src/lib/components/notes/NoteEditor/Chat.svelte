@@ -35,7 +35,7 @@
 	import { goto } from '$app/navigation';
 	import { onMount, tick, getContext } from 'svelte';
 
-	import { WEBUI_BASE_URL } from '$lib/constants';
+	import { MYAH_BASE_URL } from '$lib/constants';
 	import { MYAH_NAME, config, user, models, settings } from '$lib/stores';
 
 	import { chatCompletion } from '$lib/apis/openai';
@@ -191,7 +191,7 @@ Based on the user's instruction, update and enhance the existing notes or select
 				}))
 				// ...(files && files.length > 0 ? { files } : {}) // TODO: Decide whether to use native file handling or not
 			},
-			`${WEBUI_BASE_URL}/api`
+			`${MYAH_BASE_URL}/api`
 		);
 
 		await tick();

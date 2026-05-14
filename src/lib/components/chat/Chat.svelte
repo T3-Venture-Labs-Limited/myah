@@ -16,7 +16,7 @@
 
 	import { type Unsubscriber, type Writable } from 'svelte/store';
 	import type { i18n as i18nType } from 'i18next';
-	import { WEBUI_BASE_URL } from '$lib/constants';
+	import { MYAH_BASE_URL } from '$lib/constants';
 
 	import {
 		chatId,
@@ -50,7 +50,7 @@
 	import { get } from 'svelte/store';
 	import { assembleUIState } from '$lib/utils/uiState';
 
-	import { WEBUI_API_BASE_URL } from '$lib/constants';
+	import { MYAH_API_BASE_URL } from '$lib/constants';
 
 	import {
 		convertMessagesToHistory,
@@ -2141,7 +2141,7 @@
 						}
 					: {})
 			},
-			`${WEBUI_BASE_URL}/api`
+			`${MYAH_BASE_URL}/api`
 		).catch(async (error) => {
 			console.log(error);
 

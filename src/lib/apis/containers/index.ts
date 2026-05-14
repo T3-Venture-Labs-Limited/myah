@@ -1,9 +1,9 @@
-import { WEBUI_BASE_URL } from '$lib/constants';
+import { MYAH_BASE_URL } from '$lib/constants';
 
 export const restartContainer = async (token: string) => {
 	let error = null;
 
-	const res = await fetch(`${WEBUI_BASE_URL}/api/v1/containers/restart`, {
+	const res = await fetch(`${MYAH_BASE_URL}/api/v1/containers/restart`, {
 		method: 'POST',
 		headers: {
 			'Content-Type': 'application/json',

@@ -2,7 +2,7 @@
 // Myah holds on your behalf. These functions are the channel
 // through which that commitment is made, inspected, and revoked.
 
-import { WEBUI_API_BASE_URL } from '$lib/constants';
+import { MYAH_API_BASE_URL } from '$lib/constants';
 
 // Hermes returns schedule as an object
 export interface ProcessSchedule {
@@ -105,7 +105,7 @@ export const getProcesses = async (token: string): Promise<Process[]> => {
 		// Promise.all([getChatList, getProcesses]) in TaskList rejects
 		// on first error and the user sees an empty sidebar.
 		let featureUnavailable = false;
-		const res = await fetch(`${WEBUI_API_BASE_URL}/processes/`, {
+		const res = await fetch(`${MYAH_API_BASE_URL}/processes/`, {
 			method: 'GET',
 			headers: {
 				Accept: 'application/json',
@@ -147,7 +147,7 @@ export const getProcesses = async (token: string): Promise<Process[]> => {
 
 export const getProcess = async (token: string, jobId: string): Promise<Process> => {
 	let error = null;
-	const res = await fetch(`${WEBUI_API_BASE_URL}/processes/${jobId}`, {
+	const res = await fetch(`${MYAH_API_BASE_URL}/processes/${jobId}`, {
 		method: 'GET',
 		headers: {
 			Accept: 'application/json',
@@ -174,7 +174,7 @@ export const getProcessRuns = async (
 	limit = 20
 ): Promise<ProcessRun[]> => {
 	let error = null;
-	const res = await fetch(`${WEBUI_API_BASE_URL}/processes/${jobId}/runs?limit=${limit}`, {
+	const res = await fetch(`${MYAH_API_BASE_URL}/processes/${jobId}/runs?limit=${limit}`, {
 		method: 'GET',
 		headers: {
 			Accept: 'application/json',
@@ -200,7 +200,7 @@ export const createProcess = async (
 	payload: ProcessCreatePayload
 ): Promise<Process> => {
 	let error = null;
-	const res = await fetch(`${WEBUI_API_BASE_URL}/processes/`, {
+	const res = await fetch(`${MYAH_API_BASE_URL}/processes/`, {
 		method: 'POST',
 		headers: {
 			Accept: 'application/json',
@@ -228,7 +228,7 @@ export const updateProcess = async (
 	payload: ProcessUpdatePayload
 ): Promise<Process> => {
 	let error = null;
-	const res = await fetch(`${WEBUI_API_BASE_URL}/processes/${jobId}`, {
+	const res = await fetch(`${MYAH_API_BASE_URL}/processes/${jobId}`, {
 		method: 'PATCH',
 		headers: {
 			Accept: 'application/json',
@@ -252,7 +252,7 @@ export const updateProcess = async (
 
 export const deleteProcess = async (token: string, jobId: string): Promise<{ ok: boolean }> => {
 	let error = null;
-	const res = await fetch(`${WEBUI_API_BASE_URL}/processes/${jobId}`, {
+	const res = await fetch(`${MYAH_API_BASE_URL}/processes/${jobId}`, {
 		method: 'DELETE',
 		headers: {
 			Accept: 'application/json',
@@ -279,7 +279,7 @@ export const linkProcessToChat = async (
 	chatId: string
 ): Promise<unknown> => {
 	let error = null;
-	const res = await fetch(`${WEBUI_API_BASE_URL}/processes/${jobId}/link-chat`, {
+	const res = await fetch(`${MYAH_API_BASE_URL}/processes/${jobId}/link-chat`, {
 		method: 'POST',
 		headers: {
 			Accept: 'application/json',
@@ -303,7 +303,7 @@ export const linkProcessToChat = async (
 
 export const pauseProcess = async (token: string, jobId: string): Promise<Process> => {
 	let error = null;
-	const res = await fetch(`${WEBUI_API_BASE_URL}/processes/${jobId}/pause`, {
+	const res = await fetch(`${MYAH_API_BASE_URL}/processes/${jobId}/pause`, {
 		method: 'POST',
 		headers: {
 			Accept: 'application/json',
@@ -326,7 +326,7 @@ export const pauseProcess = async (token: string, jobId: string): Promise<Proces
 
 export const resumeProcess = async (token: string, jobId: string): Promise<Process> => {
 	let error = null;
-	const res = await fetch(`${WEBUI_API_BASE_URL}/processes/${jobId}/resume`, {
+	const res = await fetch(`${MYAH_API_BASE_URL}/processes/${jobId}/resume`, {
 		method: 'POST',
 		headers: {
 			Accept: 'application/json',
@@ -349,7 +349,7 @@ export const resumeProcess = async (token: string, jobId: string): Promise<Proce
 
 export const triggerProcess = async (token: string, jobId: string): Promise<unknown> => {
 	let error = null;
-	const res = await fetch(`${WEBUI_API_BASE_URL}/processes/${jobId}/trigger`, {
+	const res = await fetch(`${MYAH_API_BASE_URL}/processes/${jobId}/trigger`, {
 		method: 'POST',
 		headers: {
 			Accept: 'application/json',
@@ -372,7 +372,7 @@ export const triggerProcess = async (token: string, jobId: string): Promise<unkn
 
 export const getProcessArtifact = async (token: string, jobId: string): Promise<string> => {
 	let error = null;
-	const res = await fetch(`${WEBUI_API_BASE_URL}/processes/${jobId}/artifact`, {
+	const res = await fetch(`${MYAH_API_BASE_URL}/processes/${jobId}/artifact`, {
 		method: 'GET',
 		headers: {
 			Accept: 'text/html',
@@ -393,7 +393,7 @@ export const getProcessArtifact = async (token: string, jobId: string): Promise<
 
 export const syncProcessChat = async (token: string, jobId: string): Promise<void> => {
 	let error = null;
-	await fetch(`${WEBUI_API_BASE_URL}/processes/${jobId}/sync-chat`, {
+	await fetch(`${MYAH_API_BASE_URL}/processes/${jobId}/sync-chat`, {
 		method: 'POST',
 		headers: {
 			'Content-Type': 'application/json',
@@ -414,7 +414,7 @@ export const initArtifactProject = async (
 	jobId: string
 ): Promise<{ ok: boolean }> => {
 	let error = null;
-	const res = await fetch(`${WEBUI_API_BASE_URL}/processes/${jobId}/init-artifact`, {
+	const res = await fetch(`${MYAH_API_BASE_URL}/processes/${jobId}/init-artifact`, {
 		method: 'POST',
 		headers: {
 			...(token && { authorization: `Bearer ${token}` })
@@ -445,7 +445,7 @@ export const submitUIAction = async (
 ) => {
 	let error = null;
 
-	const res = await fetch(`${WEBUI_API_BASE_URL}/processes/${jobId}/ui-action`, {
+	const res = await fetch(`${MYAH_API_BASE_URL}/processes/${jobId}/ui-action`, {
 		method: 'POST',
 		headers: {
 			Accept: 'application/json',
@@ -480,7 +480,7 @@ export const submitUIAction = async (
 
 export const getProcessVitePort = async (token: string, jobId: string): Promise<number | null> => {
 	let error = null;
-	const res = await fetch(`${WEBUI_API_BASE_URL}/processes/${jobId}/vite-port`, {
+	const res = await fetch(`${MYAH_API_BASE_URL}/processes/${jobId}/vite-port`, {
 		method: 'GET',
 		headers: {
 			Accept: 'application/json',

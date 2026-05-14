@@ -8,7 +8,7 @@
 	//
 	// Dumb component: doesn't fetch, doesn't navigate. Parent owns both.
 	import { getContext } from 'svelte';
-	import { WEBUI_BASE_URL } from '$lib/constants';
+	import { MYAH_BASE_URL } from '$lib/constants';
 	import { MYAH_NAME } from '$lib/stores';
 	import type { OssProbe } from '$lib/apis/oss';
 
@@ -21,7 +21,7 @@
 <div class="welcome-screen flex flex-col items-center justify-center min-h-screen w-full bg-white dark:bg-gray-900 text-gray-900 dark:text-gray-100 px-6 py-12">
 	<div class="max-w-md w-full text-center">
 		<img
-			src="{WEBUI_BASE_URL}/static/favicon.png"
+			src="{MYAH_BASE_URL}/static/favicon.png"
 			alt="logo"
 			class="w-16 h-16 mx-auto mb-8 rounded-2xl"
 		/>

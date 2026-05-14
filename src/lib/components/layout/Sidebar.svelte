@@ -18,7 +18,7 @@
 
 	const i18n = getContext('i18n');
 
-	import { WEBUI_API_BASE_URL } from '$lib/constants';
+	import { MYAH_API_BASE_URL } from '$lib/constants';
 
 	import ArchivedChatsModal from './ArchivedChatsModal.svelte';
 	import UserMenu from './Sidebar/UserMenu.svelte';
@@ -346,7 +346,7 @@
 					aria-label={$i18n.t('Profile')}
 				>
 					<img
-						src={`${WEBUI_API_BASE_URL}/users/${$user?.id}/profile/image`}
+						src={`${MYAH_API_BASE_URL}/users/${$user?.id}/profile/image`}
 						class="size-6 object-cover rounded-full"
 						alt=""
 						draggable="false"
@@ -534,7 +534,7 @@
 						aria-label={$i18n.t('Profile')}
 					>
 						<img
-							src={`${WEBUI_API_BASE_URL}/users/${$user?.id}/profile/image`}
+							src={`${MYAH_API_BASE_URL}/users/${$user?.id}/profile/image`}
 							class="size-6 object-cover rounded-full flex-shrink-0"
 							alt=""
 							draggable="false"

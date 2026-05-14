@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { WEBUI_API_BASE_URL } from '$lib/constants';
+	import { MYAH_API_BASE_URL } from '$lib/constants';
 	import ArtifactFallback from './ArtifactFallback.svelte';
 
 	// A pane for whatever HTML the agent has spun up — sandboxed,
@@ -19,9 +19,9 @@
 
 	// Direct iframe src — relies on backend Content-Disposition: inline (Section 8.1).
 	$: src = file_id
-		? `${WEBUI_API_BASE_URL}/files/${file_id}/content`
+		? `${MYAH_API_BASE_URL}/files/${file_id}/content`
 		: path
-			? `${WEBUI_API_BASE_URL}/hermes/media?path=${encodeURIComponent(path)}`
+			? `${MYAH_API_BASE_URL}/hermes/media?path=${encodeURIComponent(path)}`
 			: null;
 </script>
 

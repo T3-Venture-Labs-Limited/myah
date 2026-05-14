@@ -1,4 +1,4 @@
-import { WEBUI_BASE_URL } from '$lib/constants';
+import { MYAH_BASE_URL } from '$lib/constants';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -108,7 +108,7 @@ export interface ModelListItem {
 export const getCatalog = async (token: string): Promise<Record<string, CatalogEntry>> => {
 	let error = null;
 
-	const res = await fetch(`${WEBUI_BASE_URL}/api/v1/providers/catalog`, {
+	const res = await fetch(`${MYAH_BASE_URL}/api/v1/providers/catalog`, {
 		headers: { Authorization: `Bearer ${token}` }
 	})
 		.then(async (r) => {
@@ -128,7 +128,7 @@ export const getCatalog = async (token: string): Promise<Record<string, CatalogE
 export const getStatus = async (token: string): Promise<ProviderStatusRow[]> => {
 	let error = null;
 
-	const res = await fetch(`${WEBUI_BASE_URL}/api/v1/providers/status`, {
+	const res = await fetch(`${MYAH_BASE_URL}/api/v1/providers/status`, {
 		headers: { Authorization: `Bearer ${token}` }
 	})
 		.then(async (r) => {
@@ -153,7 +153,7 @@ export const connectCredential = async (
 ): Promise<ConnectResult> => {
 	let error = null;
 
-	const res = await fetch(`${WEBUI_BASE_URL}/api/v1/providers/${providerId}/credential`, {
+	const res = await fetch(`${MYAH_BASE_URL}/api/v1/providers/${providerId}/credential`, {
 		method: 'POST',
 		headers: {
 			Authorization: `Bearer ${token}`,
@@ -178,7 +178,7 @@ export const connectCredential = async (
 export const disconnectProvider = async (token: string, providerId: string): Promise<void> => {
 	let error = null;
 
-	await fetch(`${WEBUI_BASE_URL}/api/v1/providers/${providerId}`, {
+	await fetch(`${MYAH_BASE_URL}/api/v1/providers/${providerId}`, {
 		method: 'DELETE',
 		headers: { Authorization: `Bearer ${token}` }
 	})
@@ -201,7 +201,7 @@ export const startDeviceAuth = async (
 ): Promise<DeviceAuthSession> => {
 	let error = null;
 
-	const res = await fetch(`${WEBUI_BASE_URL}/api/v1/providers/${providerId}/device-auth/start`, {
+	const res = await fetch(`${MYAH_BASE_URL}/api/v1/providers/${providerId}/device-auth/start`, {
 		method: 'POST',
 		headers: { Authorization: `Bearer ${token}` }
 	})
@@ -226,7 +226,7 @@ export const pollDeviceAuth = async (
 ): Promise<DeviceAuthPollResult> => {
 	let error = null;
 
-	const res = await fetch(`${WEBUI_BASE_URL}/api/v1/providers/${providerId}/device-auth/poll`, {
+	const res = await fetch(`${MYAH_BASE_URL}/api/v1/providers/${providerId}/device-auth/poll`, {
 		method: 'POST',
 		headers: {
 			Authorization: `Bearer ${token}`,
@@ -255,7 +255,7 @@ export const setActiveProvider = async (
 ): Promise<void> => {
 	let error = null;
 
-	await fetch(`${WEBUI_BASE_URL}/api/v1/providers/active`, {
+	await fetch(`${MYAH_BASE_URL}/api/v1/providers/active`, {
 		method: 'POST',
 		headers: {
 			Authorization: `Bearer ${token}`,
@@ -279,7 +279,7 @@ export const setActiveProvider = async (
 export const getModelsUnified = async (token: string): Promise<ModelListItem[]> => {
 	let error = null;
 
-	const res = await fetch(`${WEBUI_BASE_URL}/api/v1/providers/models`, {
+	const res = await fetch(`${MYAH_BASE_URL}/api/v1/providers/models`, {
 		headers: { Authorization: `Bearer ${token}` }
 	})
 		.then(async (r) => {

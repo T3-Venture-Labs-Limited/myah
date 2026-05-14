@@ -1,4 +1,4 @@
-import { WEBUI_BASE_URL } from '$lib/constants';
+import { MYAH_BASE_URL } from '$lib/constants';
 import { getOpenAIModelsDirect } from './openai';
 
 // Every request sent from here is a petition. May it reach
@@ -16,7 +16,7 @@ export const getModels = async (
 
 	let error = null;
 	const res = await fetch(
-		`${WEBUI_BASE_URL}/api/models${base ? '/base' : ''}?${searchParams.toString()}`,
+		`${MYAH_BASE_URL}/api/models${base ? '/base' : ''}?${searchParams.toString()}`,
 		{
 			method: 'GET',
 			headers: {
@@ -170,7 +170,7 @@ type ChatCompletedForm = {
 export const chatCompleted = async (token: string, body: ChatCompletedForm) => {
 	let error = null;
 
-	const res = await fetch(`${WEBUI_BASE_URL}/api/chat/completed`, {
+	const res = await fetch(`${MYAH_BASE_URL}/api/chat/completed`, {
 		method: 'POST',
 		headers: {
 			Accept: 'application/json',
@@ -209,7 +209,7 @@ type ChatActionForm = {
 export const chatAction = async (token: string, action_id: string, body: ChatActionForm) => {
 	let error = null;
 
-	const res = await fetch(`${WEBUI_BASE_URL}/api/chat/actions/${action_id}`, {
+	const res = await fetch(`${MYAH_BASE_URL}/api/chat/actions/${action_id}`, {
 		method: 'POST',
 		headers: {
 			Accept: 'application/json',
@@ -242,7 +242,7 @@ export const chatAction = async (token: string, action_id: string, body: ChatAct
 export const stopTask = async (token: string, id: string) => {
 	let error = null;
 
-	const res = await fetch(`${WEBUI_BASE_URL}/api/tasks/stop/${id}`, {
+	const res = await fetch(`${MYAH_BASE_URL}/api/tasks/stop/${id}`, {
 		method: 'POST',
 		headers: {
 			Accept: 'application/json',
@@ -274,7 +274,7 @@ export const stopTask = async (token: string, id: string) => {
 export const getTaskIdsByChatId = async (token: string, chat_id: string) => {
 	let error = null;
 
-	const res = await fetch(`${WEBUI_BASE_URL}/api/tasks/chat/${chat_id}`, {
+	const res = await fetch(`${MYAH_BASE_URL}/api/tasks/chat/${chat_id}`, {
 		method: 'GET',
 		headers: {
 			Accept: 'application/json',
@@ -311,7 +311,7 @@ export const generateTitle = async (
 ) => {
 	let error = null;
 
-	const res = await fetch(`${WEBUI_BASE_URL}/api/v1/tasks/title/completions`, {
+	const res = await fetch(`${MYAH_BASE_URL}/api/v1/tasks/title/completions`, {
 		method: 'POST',
 		headers: {
 			Accept: 'application/json',
@@ -383,7 +383,7 @@ export const generateFollowUps = async (
 ) => {
 	let error = null;
 
-	const res = await fetch(`${WEBUI_BASE_URL}/api/v1/tasks/follow_up/completions`, {
+	const res = await fetch(`${MYAH_BASE_URL}/api/v1/tasks/follow_up/completions`, {
 		method: 'POST',
 		headers: {
 			Accept: 'application/json',
@@ -455,7 +455,7 @@ export const generateTags = async (
 ) => {
 	let error = null;
 
-	const res = await fetch(`${WEBUI_BASE_URL}/api/v1/tasks/tags/completions`, {
+	const res = await fetch(`${MYAH_BASE_URL}/api/v1/tasks/tags/completions`, {
 		method: 'POST',
 		headers: {
 			Accept: 'application/json',
@@ -527,7 +527,7 @@ export const generateEmoji = async (
 ) => {
 	let error = null;
 
-	const res = await fetch(`${WEBUI_BASE_URL}/api/v1/tasks/emoji/completions`, {
+	const res = await fetch(`${MYAH_BASE_URL}/api/v1/tasks/emoji/completions`, {
 		method: 'POST',
 		headers: {
 			Accept: 'application/json',
@@ -577,7 +577,7 @@ export const generateQueries = async (
 ) => {
 	let error = null;
 
-	const res = await fetch(`${WEBUI_BASE_URL}/api/v1/tasks/queries/completions`, {
+	const res = await fetch(`${MYAH_BASE_URL}/api/v1/tasks/queries/completions`, {
 		method: 'POST',
 		headers: {
 			Accept: 'application/json',
@@ -649,7 +649,7 @@ export const generateAutoCompletion = async (
 	const controller = new AbortController();
 	let error = null;
 
-	const res = await fetch(`${WEBUI_BASE_URL}/api/v1/tasks/auto/completions`, {
+	const res = await fetch(`${MYAH_BASE_URL}/api/v1/tasks/auto/completions`, {
 		signal: controller.signal,
 		method: 'POST',
 		headers: {
@@ -714,7 +714,7 @@ export const generateAutoCompletion = async (
 export const getUsage = async (token: string = '') => {
 	let error = null;
 
-	const res = await fetch(`${WEBUI_BASE_URL}/api/usage`, {
+	const res = await fetch(`${MYAH_BASE_URL}/api/usage`, {
 		method: 'GET',
 		headers: {
 			'Content-Type': 'application/json',
@@ -741,7 +741,7 @@ export const getUsage = async (token: string = '') => {
 export const getBackendConfig = async () => {
 	let error = null;
 
-	const res = await fetch(`${WEBUI_BASE_URL}/api/config`, {
+	const res = await fetch(`${MYAH_BASE_URL}/api/config`, {
 		method: 'GET',
 		credentials: 'include',
 		headers: {
@@ -768,7 +768,7 @@ export const getBackendConfig = async () => {
 		// an auth proxy is intercepting.
 		if (error instanceof TypeError) {
 			try {
-				const probeRes = await fetch(`${WEBUI_BASE_URL}/api/config`, {
+				const probeRes = await fetch(`${MYAH_BASE_URL}/api/config`, {
 					method: 'GET',
 					credentials: 'include',
 					redirect: 'manual',
@@ -794,7 +794,7 @@ export const getBackendConfig = async () => {
 export const getChangelog = async () => {
 	let error = null;
 
-	const res = await fetch(`${WEBUI_BASE_URL}/api/changelog`, {
+	const res = await fetch(`${MYAH_BASE_URL}/api/changelog`, {
 		method: 'GET',
 		headers: {
 			'Content-Type': 'application/json'
@@ -820,7 +820,7 @@ export const getChangelog = async () => {
 export const getVersion = async (token: string) => {
 	let error = null;
 
-	const res = await fetch(`${WEBUI_BASE_URL}/api/version`, {
+	const res = await fetch(`${MYAH_BASE_URL}/api/version`, {
 		method: 'GET',
 		headers: {
 			'Content-Type': 'application/json',
@@ -848,7 +848,7 @@ export const getVersion = async (token: string) => {
 export const getWebhookUrl = async (token: string) => {
 	let error = null;
 
-	const res = await fetch(`${WEBUI_BASE_URL}/api/webhook`, {
+	const res = await fetch(`${MYAH_BASE_URL}/api/webhook`, {
 		method: 'GET',
 		headers: {
 			'Content-Type': 'application/json',
@@ -875,7 +875,7 @@ export const getWebhookUrl = async (token: string) => {
 export const updateWebhookUrl = async (token: string, url: string) => {
 	let error = null;
 
-	const res = await fetch(`${WEBUI_BASE_URL}/api/webhook`, {
+	const res = await fetch(`${MYAH_BASE_URL}/api/webhook`, {
 		method: 'POST',
 		headers: {
 			'Content-Type': 'application/json',
@@ -905,7 +905,7 @@ export const updateWebhookUrl = async (token: string, url: string) => {
 export const getModelConfig = async (token: string): Promise<GlobalModelConfig> => {
 	let error = null;
 
-	const res = await fetch(`${WEBUI_BASE_URL}/api/config/models`, {
+	const res = await fetch(`${MYAH_BASE_URL}/api/config/models`, {
 		method: 'GET',
 		headers: {
 			'Content-Type': 'application/json',
@@ -951,7 +951,7 @@ export type GlobalModelConfig = ModelConfig[];
 export const getProviderModels = async (token: string) => {
 	let error = null;
 
-	const res = await fetch(`${WEBUI_BASE_URL}/api/v1/users/user/llm/models`, {
+	const res = await fetch(`${MYAH_BASE_URL}/api/v1/users/user/llm/models`, {
 		method: 'GET',
 		headers: {
 			'Content-Type': 'application/json',
@@ -1003,7 +1003,7 @@ export const getModelsWithProviders = async (
 export const updateModelConfig = async (token: string, config: GlobalModelConfig) => {
 	let error = null;
 
-	const res = await fetch(`${WEBUI_BASE_URL}/api/config/models`, {
+	const res = await fetch(`${MYAH_BASE_URL}/api/config/models`, {
 		method: 'POST',
 		headers: {
 			'Content-Type': 'application/json',

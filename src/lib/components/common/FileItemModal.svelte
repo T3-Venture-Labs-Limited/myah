@@ -2,7 +2,7 @@
 	import { getContext, onMount, tick } from 'svelte';
 
 	import { formatFileSize, getLineCount } from '$lib/utils';
-	import { WEBUI_API_BASE_URL } from '$lib/constants';
+	import { MYAH_API_BASE_URL } from '$lib/constants';
 	import { settings } from '$lib/stores';
 	import { getFileById } from '$lib/apis/files';
 	import { detectFileType, type RendererKind } from '$lib/utils/fileTypeRegistry';
@@ -132,7 +132,7 @@
 										item.type === 'file'
 											? item?.url?.startsWith('http')
 												? item.url
-												: `${WEBUI_API_BASE_URL}/files/${item.url}/content`
+												: `${MYAH_API_BASE_URL}/files/${item.url}/content`
 											: item.url,
 										'_blank'
 									);

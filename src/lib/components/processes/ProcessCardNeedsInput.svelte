@@ -3,7 +3,7 @@
 	// and will not proceed until you answer.
 
 	import type { Process } from '$lib/apis/processes';
-	import { WEBUI_API_BASE_URL } from '$lib/constants';
+	import { MYAH_API_BASE_URL } from '$lib/constants';
 	import { getContext } from 'svelte';
 	import { toast } from 'svelte-sonner';
 
@@ -29,7 +29,7 @@
 		if (!answer.trim() || sending) return;
 		sending = true;
 		let error = null;
-		const res = await fetch(`${WEBUI_API_BASE_URL}/processes/${process.id}/respond`, {
+		const res = await fetch(`${MYAH_API_BASE_URL}/processes/${process.id}/respond`, {
 			method: 'POST',
 			headers: {
 				Accept: 'application/json',

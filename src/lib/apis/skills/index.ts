@@ -1,11 +1,11 @@
 // Skills API — backed by Hermes agent (name-keyed files, not OWI UUIDs).
 // All endpoints proxy through /api/v1/agent/skills on the platform backend.
-import { WEBUI_API_BASE_URL } from '$lib/constants';
+import { MYAH_API_BASE_URL } from '$lib/constants';
 
 export const getAgentSkills = async (token: string) => {
 	let error = null;
 
-	const res = await fetch(`${WEBUI_API_BASE_URL}/agent/skills`, {
+	const res = await fetch(`${MYAH_API_BASE_URL}/agent/skills`, {
 		method: 'GET',
 		headers: {
 			Accept: 'application/json',
@@ -33,7 +33,7 @@ export const getAgentSkills = async (token: string) => {
 export const getAgentSkill = async (token: string, name: string) => {
 	let error = null;
 
-	const res = await fetch(`${WEBUI_API_BASE_URL}/agent/skills/${encodeURIComponent(name)}`, {
+	const res = await fetch(`${MYAH_API_BASE_URL}/agent/skills/${encodeURIComponent(name)}`, {
 		method: 'GET',
 		headers: {
 			Accept: 'application/json',
@@ -64,7 +64,7 @@ export const createAgentSkillEntry = async (
 ) => {
 	let error = null;
 
-	const res = await fetch(`${WEBUI_API_BASE_URL}/agent/skills`, {
+	const res = await fetch(`${MYAH_API_BASE_URL}/agent/skills`, {
 		method: 'POST',
 		headers: {
 			Accept: 'application/json',
@@ -97,7 +97,7 @@ export const updateAgentSkillEntry = async (
 ) => {
 	let error = null;
 
-	const res = await fetch(`${WEBUI_API_BASE_URL}/agent/skills/${encodeURIComponent(name)}`, {
+	const res = await fetch(`${MYAH_API_BASE_URL}/agent/skills/${encodeURIComponent(name)}`, {
 		method: 'PUT',
 		headers: {
 			Accept: 'application/json',
@@ -126,7 +126,7 @@ export const updateAgentSkillEntry = async (
 export const deleteAgentSkillEntry = async (token: string, name: string) => {
 	let error = null;
 
-	const res = await fetch(`${WEBUI_API_BASE_URL}/agent/skills/${encodeURIComponent(name)}`, {
+	const res = await fetch(`${MYAH_API_BASE_URL}/agent/skills/${encodeURIComponent(name)}`, {
 		method: 'DELETE',
 		headers: {
 			Accept: 'application/json',

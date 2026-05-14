@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { getContext } from 'svelte';
 
-	import { WEBUI_API_BASE_URL } from '$lib/constants';
+	import { MYAH_API_BASE_URL } from '$lib/constants';
 	import { artifactSelection } from '$lib/stores';
 	import type { ArtifactFile, SelectionPayload, ToolbarItem } from '$lib/types/artifact';
 	import { detectFileType, type RendererKind } from '$lib/utils/fileTypeRegistry';
@@ -107,11 +107,11 @@
 		try {
 			if (file.file_id) {
 				// Pass the file_id as a string — individual renderers know how to
-				// fetch from /api/v1/files/{id}/content using WEBUI_API_BASE_URL.
+				// fetch from /api/v1/files/{id}/content using MYAH_API_BASE_URL.
 				content = file.file_id;
 			} else if (file.path) {
 				// Fetch blob from the hermes media proxy endpoint
-				const url = `${WEBUI_API_BASE_URL}/hermes/media?path=${encodeURIComponent(file.path)}`;
+				const url = `${MYAH_API_BASE_URL}/hermes/media?path=${encodeURIComponent(file.path)}`;
 				const res = await fetch(url, { credentials: 'include' });
 				if (!res.ok) throw new Error(`HTTP ${res.status}`);
 				content = await res.blob();

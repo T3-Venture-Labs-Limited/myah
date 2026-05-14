@@ -6,7 +6,7 @@
 
 	import { user as _user } from '$lib/stores';
 	import { getUserInfoById, searchUsers } from '$lib/apis/users';
-	import { WEBUI_API_BASE_URL } from '$lib/constants';
+	import { MYAH_API_BASE_URL } from '$lib/constants';
 
 	import XMark from '$lib/components/icons/XMark.svelte';
 	import Pagination from '$lib/components/common/Pagination.svelte';
@@ -260,7 +260,7 @@
 												<div class="flex items-center gap-2">
 													<img
 														class="rounded-2xl w-6 h-6 object-cover flex-shrink-0"
-														src={`${WEBUI_API_BASE_URL}/users/${user.id}/profile/image`}
+														src={`${MYAH_API_BASE_URL}/users/${user.id}/profile/image`}
 														alt="user"
 													/>
 													<Tooltip content={user.email} placement="top-start">

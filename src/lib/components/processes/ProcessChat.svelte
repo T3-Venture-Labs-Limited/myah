@@ -6,7 +6,7 @@
 
 	import { socket, user, models } from '$lib/stores';
 	import { createNewChat, getChatById, updateChatById, getChatList } from '$lib/apis/chats';
-	import { WEBUI_BASE_URL, WEBUI_API_BASE_URL } from '$lib/constants';
+	import { MYAH_BASE_URL, MYAH_API_BASE_URL } from '$lib/constants';
 	import { createOpenAITextStream } from '$lib/apis/streaming';
 	import type { Process, ProcessRun } from '$lib/apis/processes';
 
@@ -181,7 +181,7 @@ ${latestRun.response}`;
 					.map((m) => ({ role: m.role, content: m.content }))
 			];
 
-			const response = await fetch(`${WEBUI_BASE_URL}/api/chat/completions`, {
+			const response = await fetch(`${MYAH_BASE_URL}/api/chat/completions`, {
 				method: 'POST',
 				headers: {
 					'Content-Type': 'application/json',

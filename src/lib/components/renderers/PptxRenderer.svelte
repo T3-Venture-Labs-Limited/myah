@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { onMount, createEventDispatcher } from 'svelte';
-	import { WEBUI_API_BASE_URL } from '$lib/constants';
+	import { MYAH_API_BASE_URL } from '$lib/constants';
 	import type { ToolbarItem } from '$lib/types/artifact';
 	import ArtifactFallback from './ArtifactFallback.svelte';
 
@@ -50,7 +50,7 @@
 			if (content instanceof Blob) {
 				arrayBuffer = await content.arrayBuffer();
 			} else {
-				const res = await fetch(`${WEBUI_API_BASE_URL}/files/${content}/content`, {
+				const res = await fetch(`${MYAH_API_BASE_URL}/files/${content}/content`, {
 					credentials: 'include'
 				});
 				if (!res.ok) throw new Error(`HTTP ${res.status}`);

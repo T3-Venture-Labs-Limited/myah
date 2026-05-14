@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { onMount, createEventDispatcher } from 'svelte';
 	import PDFViewer from '$lib/components/common/PDFViewer.svelte';
-	import { WEBUI_API_BASE_URL } from '$lib/constants';
+	import { MYAH_API_BASE_URL } from '$lib/constants';
 	import ArtifactFallback from './ArtifactFallback.svelte';
 	import type { ToolbarItem } from '$lib/types/artifact';
 
@@ -23,11 +23,11 @@
 	// Resolution priority mirrors CodeRenderer Phase 2A: file_id > path > Blob > legacy
 	// `content: string` (treated as file_id for backwards compat).
 	$: url = file_id
-		? `${WEBUI_API_BASE_URL}/files/${file_id}/content`
+		? `${MYAH_API_BASE_URL}/files/${file_id}/content`
 		: path
-			? `${WEBUI_API_BASE_URL}/hermes/media?path=${encodeURIComponent(path)}`
+			? `${MYAH_API_BASE_URL}/hermes/media?path=${encodeURIComponent(path)}`
 			: typeof content === 'string'
-				? `${WEBUI_API_BASE_URL}/files/${content}/content`
+				? `${MYAH_API_BASE_URL}/files/${content}/content`
 				: undefined;
 
 	let reloadKey = 0;

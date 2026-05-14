@@ -4,7 +4,7 @@
 	// which actor, which corner of the shot — so an anchor can carry both
 	// "when" and "where" back to the agent.
 	import { onMount, createEventDispatcher } from 'svelte';
-	import { WEBUI_API_BASE_URL } from '$lib/constants';
+	import { MYAH_API_BASE_URL } from '$lib/constants';
 	import { artifactSelection } from '$lib/stores';
 	import ArtifactFallback from './ArtifactFallback.svelte';
 	import SelectionToolbar from '$lib/components/chat/Artifacts/SelectionToolbar.svelte';
@@ -27,13 +27,13 @@
 	}>();
 
 	$: src = file_id
-		? `${WEBUI_API_BASE_URL}/files/${file_id}/content`
+		? `${MYAH_API_BASE_URL}/files/${file_id}/content`
 		: path
-			? `${WEBUI_API_BASE_URL}/hermes/media?path=${encodeURIComponent(path)}`
+			? `${MYAH_API_BASE_URL}/hermes/media?path=${encodeURIComponent(path)}`
 			: content instanceof Blob
 				? URL.createObjectURL(content)
 				: typeof content === 'string'
-					? `${WEBUI_API_BASE_URL}/files/${content}/content`
+					? `${MYAH_API_BASE_URL}/files/${content}/content`
 					: '';
 
 	let videoEl: HTMLVideoElement;

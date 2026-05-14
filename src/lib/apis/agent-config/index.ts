@@ -1,4 +1,4 @@
-import { WEBUI_BASE_URL } from '$lib/constants';
+import { MYAH_BASE_URL } from '$lib/constants';
 
 // The petitions we send to the agent's living space — wrapped for the UI's comfort.
 
@@ -17,7 +17,7 @@ type ReseedInfo = {
 
 export const getAgentConfig = async (token: string): Promise<ConfigResponse> => {
 	let error = null;
-	const res = await fetch(`${WEBUI_BASE_URL}/api/v1/agent/config`, {
+	const res = await fetch(`${MYAH_BASE_URL}/api/v1/agent/config`, {
 		method: 'GET',
 		headers: { Authorization: `Bearer ${token}` }
 	})
@@ -36,7 +36,7 @@ export const getAgentConfig = async (token: string): Promise<ConfigResponse> => 
 
 export const patchAgentConfig = async (token: string, body: PatchBody): Promise<ConfigResponse> => {
 	let error = null;
-	const res = await fetch(`${WEBUI_BASE_URL}/api/v1/agent/config`, {
+	const res = await fetch(`${MYAH_BASE_URL}/api/v1/agent/config`, {
 		method: 'PATCH',
 		headers: {
 			Authorization: `Bearer ${token}`,
@@ -66,7 +66,7 @@ type SoulResponse = {
 
 export const getAgentSoul = async (token: string): Promise<SoulResponse> => {
 	let error = null;
-	const res = await fetch(`${WEBUI_BASE_URL}/api/v1/agent/soul`, {
+	const res = await fetch(`${MYAH_BASE_URL}/api/v1/agent/soul`, {
 		method: 'GET',
 		headers: { Authorization: `Bearer ${token}` }
 	})
@@ -97,7 +97,7 @@ export const putAgentSoul = async (
 	body: string,
 	ifMatch: string
 ): Promise<{ etag: string; warning?: string } | { conflict: true; current_body: string }> => {
-	const res = await fetch(`${WEBUI_BASE_URL}/api/v1/agent/soul`, {
+	const res = await fetch(`${MYAH_BASE_URL}/api/v1/agent/soul`, {
 		method: 'PUT',
 		headers: {
 			Authorization: `Bearer ${token}`,
@@ -133,7 +133,7 @@ export const addMcpServer = async (
 	config: { name: string; command: string; args: string[]; env?: Record<string, string> }
 ): Promise<{ ok: boolean }> => {
 	let error = null;
-	const res = await fetch(`${WEBUI_BASE_URL}/api/v1/agent/mcp`, {
+	const res = await fetch(`${MYAH_BASE_URL}/api/v1/agent/mcp`, {
 		method: 'POST',
 		headers: {
 			Authorization: `Bearer ${token}`,
@@ -156,7 +156,7 @@ export const addMcpServer = async (
 
 export const removeMcpServer = async (token: string, name: string): Promise<{ ok: boolean }> => {
 	let error = null;
-	const res = await fetch(`${WEBUI_BASE_URL}/api/v1/agent/mcp/${name}`, {
+	const res = await fetch(`${MYAH_BASE_URL}/api/v1/agent/mcp/${name}`, {
 		method: 'DELETE',
 		headers: { Authorization: `Bearer ${token}` }
 	})
@@ -176,7 +176,7 @@ export const removeMcpServer = async (token: string, name: string): Promise<{ ok
 export const restartAgent = async (
 	token: string
 ): Promise<{ status: string } | { busy: true; busy_sessions: string[] }> => {
-	const res = await fetch(`${WEBUI_BASE_URL}/api/v1/agent/restart`, {
+	const res = await fetch(`${MYAH_BASE_URL}/api/v1/agent/restart`, {
 		method: 'POST',
 		headers: { Authorization: `Bearer ${token}` }
 	});
@@ -194,7 +194,7 @@ export const restartAgent = async (
 
 export const getAgentConfigSchema = async (token: string): Promise<SchemaResponse> => {
 	let error = null;
-	const res = await fetch(`${WEBUI_BASE_URL}/api/v1/agent/config/schema`, {
+	const res = await fetch(`${MYAH_BASE_URL}/api/v1/agent/config/schema`, {
 		method: 'GET',
 		headers: { Authorization: `Bearer ${token}` }
 	})
@@ -216,7 +216,7 @@ export const resetAgentConfigSection = async (
 	section: string
 ): Promise<{ ok: boolean }> => {
 	let error = null;
-	const res = await fetch(`${WEBUI_BASE_URL}/api/v1/agent/config/reset/${section}`, {
+	const res = await fetch(`${MYAH_BASE_URL}/api/v1/agent/config/reset/${section}`, {
 		method: 'POST',
 		headers: { Authorization: `Bearer ${token}` }
 	})
@@ -234,7 +234,7 @@ export const resetAgentConfigSection = async (
 };
 
 export const getLastReseed = async (token: string): Promise<ReseedInfo | null> => {
-	const res = await fetch(`${WEBUI_BASE_URL}/api/v1/agent/last-reseed`, {
+	const res = await fetch(`${MYAH_BASE_URL}/api/v1/agent/last-reseed`, {
 		method: 'GET',
 		headers: { Authorization: `Bearer ${token}` }
 	});
@@ -257,7 +257,7 @@ export const getAuxResolved = async (
 	token: string
 ): Promise<Record<string, AuxResolvedEntry>> => {
 	let error = null;
-	const res = await fetch(`${WEBUI_BASE_URL}/api/v1/agent/config/aux-resolved`, {
+	const res = await fetch(`${MYAH_BASE_URL}/api/v1/agent/config/aux-resolved`, {
 		method: 'GET',
 		headers: { Authorization: `Bearer ${token}` }
 	})

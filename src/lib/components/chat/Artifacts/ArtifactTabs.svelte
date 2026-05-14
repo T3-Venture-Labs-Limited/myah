@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { createEventDispatcher } from 'svelte';
-	import { WEBUI_API_BASE_URL } from '$lib/constants';
+	import { MYAH_API_BASE_URL } from '$lib/constants';
 	import { closeArtifactPane } from '$lib/stores';
 	import type { ArtifactFile } from '$lib/types/artifact';
 
@@ -15,9 +15,9 @@
 	$: activeFile = activeIdx >= 0 ? (openFiles[activeIdx] ?? null) : null;
 
 	$: downloadUrl = activeFile?.file_id
-		? `${WEBUI_API_BASE_URL}/files/${activeFile.file_id}/content`
+		? `${MYAH_API_BASE_URL}/files/${activeFile.file_id}/content`
 		: activeFile?.path
-			? `${WEBUI_API_BASE_URL}/hermes/media?path=${encodeURIComponent(activeFile.path)}`
+			? `${MYAH_API_BASE_URL}/hermes/media?path=${encodeURIComponent(activeFile.path)}`
 			: null;
 
 	let copied = false;

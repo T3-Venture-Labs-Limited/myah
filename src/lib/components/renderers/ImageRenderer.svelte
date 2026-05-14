@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { onMount, createEventDispatcher } from 'svelte';
 	import panzoom, { type PanZoom } from 'panzoom';
-	import { WEBUI_API_BASE_URL } from '$lib/constants';
+	import { MYAH_API_BASE_URL } from '$lib/constants';
 	import { artifactSelection } from '$lib/stores';
 	import ArtifactFallback from './ArtifactFallback.svelte';
 	import SelectionToolbar from '$lib/components/chat/Artifacts/SelectionToolbar.svelte';
@@ -26,13 +26,13 @@
 	// Resolution priority (mirrors the CodeRenderer fix from Phase 2A — `content: string`
 	// is treated as a file_id for backwards compat; new callers pass file_id explicitly).
 	$: src = file_id
-		? `${WEBUI_API_BASE_URL}/files/${file_id}/content`
+		? `${MYAH_API_BASE_URL}/files/${file_id}/content`
 		: path
-			? `${WEBUI_API_BASE_URL}/hermes/media?path=${encodeURIComponent(path)}`
+			? `${MYAH_API_BASE_URL}/hermes/media?path=${encodeURIComponent(path)}`
 			: content instanceof Blob
 				? URL.createObjectURL(content)
 				: typeof content === 'string'
-					? `${WEBUI_API_BASE_URL}/files/${content}/content`
+					? `${MYAH_API_BASE_URL}/files/${content}/content`
 					: '';
 
 	let pzInstance: PanZoom | null = null;

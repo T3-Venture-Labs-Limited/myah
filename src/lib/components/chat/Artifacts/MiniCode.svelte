@@ -2,7 +2,7 @@
 	// A keyhole onto a code file: the first handful of lines, monospaced,
 	// just enough to recognise what's inside without crossing the threshold.
 	import { onMount } from 'svelte';
-	import { WEBUI_API_BASE_URL } from '$lib/constants';
+	import { MYAH_API_BASE_URL } from '$lib/constants';
 	import type { ArtifactCardItem } from '$lib/types/contract';
 
 	export let item: ArtifactCardItem;
@@ -35,14 +35,14 @@
 			if (item.preview && typeof item.preview === 'string') {
 				text = item.preview;
 			} else if (item.file_id) {
-				const res = await fetch(`${WEBUI_API_BASE_URL}/files/${item.file_id}/content`, {
+				const res = await fetch(`${MYAH_API_BASE_URL}/files/${item.file_id}/content`, {
 					credentials: 'include'
 				});
 				if (!res.ok) throw new Error(`HTTP ${res.status}`);
 				text = await res.text();
 			} else if (item.path) {
 				const res = await fetch(
-					`${WEBUI_API_BASE_URL}/hermes/media?path=${encodeURIComponent(item.path)}`,
+					`${MYAH_API_BASE_URL}/hermes/media?path=${encodeURIComponent(item.path)}`,
 					{ credentials: 'include' }
 				);
 				if (!res.ok) throw new Error(`HTTP ${res.status}`);

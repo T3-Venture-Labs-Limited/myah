@@ -2,7 +2,7 @@
 // what can you do, what do you know? The answers come back
 // as structures we can render and reason about.
 
-import { WEBUI_API_BASE_URL } from '$lib/constants';
+import { MYAH_API_BASE_URL } from '$lib/constants';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -116,7 +116,7 @@ export interface AgentSoul {
 
 export const getAgentModel = async (token: string): Promise<AgentModel> => {
 	let error = null;
-	const res = await fetch(`${WEBUI_API_BASE_URL}/agent/model`, {
+	const res = await fetch(`${MYAH_API_BASE_URL}/agent/model`, {
 		headers: { Authorization: `Bearer ${token}` }
 	})
 		.then(async (r) => {
@@ -134,7 +134,7 @@ export const getAgentModel = async (token: string): Promise<AgentModel> => {
 
 export const updateAgentModel = async (token: string, model: string): Promise<AgentModel> => {
 	let error = null;
-	const res = await fetch(`${WEBUI_API_BASE_URL}/agent/model`, {
+	const res = await fetch(`${MYAH_API_BASE_URL}/agent/model`, {
 		method: 'PUT',
 		headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
 		body: JSON.stringify({ model })
@@ -158,7 +158,7 @@ export const getChatSessionModel = async (
 ): Promise<{ model: string; provider: string }> => {
 	let error = null;
 
-	const res = await fetch(`${WEBUI_API_BASE_URL}/agent/sessions/${sessionId}/model`, {
+	const res = await fetch(`${MYAH_API_BASE_URL}/agent/sessions/${sessionId}/model`, {
 		method: 'GET',
 		headers: {
 			Accept: 'application/json',
@@ -193,7 +193,7 @@ export const setChatSessionModel = async (
 	const body: { model: string; provider?: string } = { model };
 	if (provider) body.provider = provider;
 
-	const res = await fetch(`${WEBUI_API_BASE_URL}/agent/sessions/${sessionId}/model`, {
+	const res = await fetch(`${MYAH_API_BASE_URL}/agent/sessions/${sessionId}/model`, {
 		method: 'PUT',
 		headers: {
 			Accept: 'application/json',
@@ -226,7 +226,7 @@ export const setChatSessionModel = async (
 
 export const getAgentSoul = async (token: string): Promise<AgentSoul> => {
 	let error = null;
-	const res = await fetch(`${WEBUI_API_BASE_URL}/agent/soul`, {
+	const res = await fetch(`${MYAH_API_BASE_URL}/agent/soul`, {
 		headers: { Authorization: `Bearer ${token}` }
 	})
 		.then(async (r) => {
@@ -244,7 +244,7 @@ export const getAgentSoul = async (token: string): Promise<AgentSoul> => {
 
 export const updateAgentSoul = async (token: string, content: string): Promise<AgentSoul> => {
 	let error = null;
-	const res = await fetch(`${WEBUI_API_BASE_URL}/agent/soul`, {
+	const res = await fetch(`${MYAH_API_BASE_URL}/agent/soul`, {
 		method: 'PUT',
 		headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
 		body: JSON.stringify({ content })
@@ -266,7 +266,7 @@ export const updateAgentSoul = async (token: string, content: string): Promise<A
 
 export const getAgentToolsets = async (token: string): Promise<AgentToolset[]> => {
 	let error = null;
-	const res = await fetch(`${WEBUI_API_BASE_URL}/agent/toolsets`, {
+	const res = await fetch(`${MYAH_API_BASE_URL}/agent/toolsets`, {
 		headers: { Authorization: `Bearer ${token}` }
 	})
 		.then(async (r) => {
@@ -288,7 +288,7 @@ export const toggleAgentToolset = async (
 	enabled: boolean
 ): Promise<AgentToolset> => {
 	let error = null;
-	const res = await fetch(`${WEBUI_API_BASE_URL}/agent/toolsets/${name}`, {
+	const res = await fetch(`${MYAH_API_BASE_URL}/agent/toolsets/${name}`, {
 		method: 'PATCH',
 		headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
 		body: JSON.stringify({ enabled })
@@ -310,7 +310,7 @@ export const toggleAgentToolset = async (
 
 export const getAgentSkills = async (token: string): Promise<AgentSkill[]> => {
 	let error = null;
-	const res = await fetch(`${WEBUI_API_BASE_URL}/agent/skills`, {
+	const res = await fetch(`${MYAH_API_BASE_URL}/agent/skills`, {
 		headers: { Authorization: `Bearer ${token}` }
 	})
 		.then(async (r) => {
@@ -331,7 +331,7 @@ export const getAgentSkillByName = async (
 	name: string
 ): Promise<AgentSkillDetail> => {
 	let error = null;
-	const res = await fetch(`${WEBUI_API_BASE_URL}/agent/skills/${name}`, {
+	const res = await fetch(`${MYAH_API_BASE_URL}/agent/skills/${name}`, {
 		headers: { Authorization: `Bearer ${token}` }
 	})
 		.then(async (r) => {
@@ -358,7 +358,7 @@ export const createAgentSkill = async (
 	}
 ): Promise<AgentSkillDetail> => {
 	let error = null;
-	const res = await fetch(`${WEBUI_API_BASE_URL}/agent/skills`, {
+	const res = await fetch(`${MYAH_API_BASE_URL}/agent/skills`, {
 		method: 'POST',
 		headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
 		body: JSON.stringify(payload)
@@ -388,7 +388,7 @@ export const updateAgentSkill = async (
 	}>
 ): Promise<AgentSkillDetail> => {
 	let error = null;
-	const res = await fetch(`${WEBUI_API_BASE_URL}/agent/skills/${name}`, {
+	const res = await fetch(`${MYAH_API_BASE_URL}/agent/skills/${name}`, {
 		method: 'PUT',
 		headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
 		body: JSON.stringify(payload)
@@ -408,7 +408,7 @@ export const updateAgentSkill = async (
 
 export const deleteAgentSkill = async (token: string, name: string): Promise<{ ok: boolean }> => {
 	let error = null;
-	const res = await fetch(`${WEBUI_API_BASE_URL}/agent/skills/${name}`, {
+	const res = await fetch(`${MYAH_API_BASE_URL}/agent/skills/${name}`, {
 		method: 'DELETE',
 		headers: { Authorization: `Bearer ${token}` }
 	})
@@ -429,7 +429,7 @@ export const deleteAgentSkill = async (token: string, name: string): Promise<{ o
 
 export const getAgentPlugins = async (token: string): Promise<AgentPlugin[]> => {
 	let error = null;
-	const res = await fetch(`${WEBUI_API_BASE_URL}/agent/plugins`, {
+	const res = await fetch(`${MYAH_API_BASE_URL}/agent/plugins`, {
 		headers: { Authorization: `Bearer ${token}` }
 	})
 		.then(async (r) => {
@@ -450,7 +450,7 @@ export const createAgentPlugin = async (
 	payload: { name: string; description: string; content: string }
 ): Promise<AgentPlugin> => {
 	let error = null;
-	const res = await fetch(`${WEBUI_API_BASE_URL}/agent/plugins`, {
+	const res = await fetch(`${MYAH_API_BASE_URL}/agent/plugins`, {
 		method: 'POST',
 		headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
 		body: JSON.stringify(payload)
@@ -474,7 +474,7 @@ export const updateAgentPlugin = async (
 	payload: Partial<{ name: string; description: string; content: string }>
 ): Promise<AgentPlugin> => {
 	let error = null;
-	const res = await fetch(`${WEBUI_API_BASE_URL}/agent/plugins/${pluginId}`, {
+	const res = await fetch(`${MYAH_API_BASE_URL}/agent/plugins/${pluginId}`, {
 		method: 'PUT',
 		headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
 		body: JSON.stringify(payload)
@@ -497,7 +497,7 @@ export const deleteAgentPlugin = async (
 	pluginId: string
 ): Promise<{ ok: boolean }> => {
 	let error = null;
-	const res = await fetch(`${WEBUI_API_BASE_URL}/agent/plugins/${pluginId}`, {
+	const res = await fetch(`${MYAH_API_BASE_URL}/agent/plugins/${pluginId}`, {
 		method: 'DELETE',
 		headers: { Authorization: `Bearer ${token}` }
 	})
@@ -518,7 +518,7 @@ export const deleteAgentPlugin = async (
 
 export const getAgentMcpServers = async (token: string): Promise<AgentMcpServer[]> => {
 	let error = null;
-	const res = await fetch(`${WEBUI_API_BASE_URL}/agent/mcp-servers`, {
+	const res = await fetch(`${MYAH_API_BASE_URL}/agent/mcp-servers`, {
 		headers: { Authorization: `Bearer ${token}` }
 	})
 		.then(async (r) => {
@@ -545,7 +545,7 @@ export const createAgentMcpServer = async (
 	}
 ): Promise<AgentMcpServer> => {
 	let error = null;
-	const res = await fetch(`${WEBUI_API_BASE_URL}/agent/mcp-servers`, {
+	const res = await fetch(`${MYAH_API_BASE_URL}/agent/mcp-servers`, {
 		method: 'POST',
 		headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
 		body: JSON.stringify(payload)
@@ -568,7 +568,7 @@ export const deleteAgentMcpServer = async (
 	name: string
 ): Promise<{ ok: boolean }> => {
 	let error = null;
-	const res = await fetch(`${WEBUI_API_BASE_URL}/agent/mcp-servers/${name}`, {
+	const res = await fetch(`${MYAH_API_BASE_URL}/agent/mcp-servers/${name}`, {
 		method: 'DELETE',
 		headers: { Authorization: `Bearer ${token}` }
 	})
@@ -589,7 +589,7 @@ export const deleteAgentMcpServer = async (
 
 export const syncAgentCapabilities = async (token: string): Promise<{ ok: boolean }> => {
 	let error = null;
-	const res = await fetch(`${WEBUI_API_BASE_URL}/agent/sync`, {
+	const res = await fetch(`${MYAH_API_BASE_URL}/agent/sync`, {
 		method: 'POST',
 		headers: { Authorization: `Bearer ${token}` }
 	})
@@ -614,7 +614,7 @@ export const getMemoryOverview = async (
 	size: number = 50
 ): Promise<MemoryOverview> => {
 	let error = null;
-	const res = await fetch(`${WEBUI_API_BASE_URL}/agent/memory/overview?page=${page}&size=${size}`, {
+	const res = await fetch(`${MYAH_API_BASE_URL}/agent/memory/overview?page=${page}&size=${size}`, {
 		headers: { Authorization: `Bearer ${token}` }
 	})
 		.then(async (r) => {
@@ -643,7 +643,7 @@ export const getMemoryOverview = async (
 
 export const getMemoryStatus = async (token: string): Promise<MemoryStatus> => {
 	let error = null;
-	const res = await fetch(`${WEBUI_API_BASE_URL}/agent/memory/status`, {
+	const res = await fetch(`${MYAH_API_BASE_URL}/agent/memory/status`, {
 		headers: { Authorization: `Bearer ${token}` }
 	})
 		.then(async (r) => {
@@ -663,7 +663,7 @@ export const getMemoryStatus = async (token: string): Promise<MemoryStatus> => {
 
 export const getMemoryProfile = async (token: string): Promise<MemoryProfile> => {
 	let error = null;
-	const res = await fetch(`${WEBUI_API_BASE_URL}/agent/memory/profile`, {
+	const res = await fetch(`${MYAH_API_BASE_URL}/agent/memory/profile`, {
 		headers: { Authorization: `Bearer ${token}` }
 	})
 		.then(async (r) => {
@@ -681,7 +681,7 @@ export const getMemoryProfile = async (token: string): Promise<MemoryProfile> =>
 
 export const getMemoryAiProfile = async (token: string): Promise<MemoryProfile> => {
 	let error = null;
-	const res = await fetch(`${WEBUI_API_BASE_URL}/agent/memory/ai-profile`, {
+	const res = await fetch(`${MYAH_API_BASE_URL}/agent/memory/ai-profile`, {
 		headers: { Authorization: `Bearer ${token}` }
 	})
 		.then(async (r) => {
@@ -699,7 +699,7 @@ export const getMemoryAiProfile = async (token: string): Promise<MemoryProfile> 
 
 export const getMemoryRepresentation = async (token: string): Promise<MemoryRepresentation> => {
 	let error = null;
-	const res = await fetch(`${WEBUI_API_BASE_URL}/agent/memory/representation`, {
+	const res = await fetch(`${MYAH_API_BASE_URL}/agent/memory/representation`, {
 		headers: { Authorization: `Bearer ${token}` }
 	})
 		.then(async (r) => {
@@ -722,7 +722,7 @@ export const getMemoryConclusions = async (
 ): Promise<MemoryConclusionsResponse> => {
 	let error = null;
 	const res = await fetch(
-		`${WEBUI_API_BASE_URL}/agent/memory/conclusions?page=${page}&size=${size}`,
+		`${MYAH_API_BASE_URL}/agent/memory/conclusions?page=${page}&size=${size}`,
 		{ headers: { Authorization: `Bearer ${token}` } }
 	)
 		.then(async (r) => {
@@ -744,7 +744,7 @@ export const searchMemoryConclusions = async (
 	topK: number = 20
 ): Promise<MemoryConclusionsResponse> => {
 	let error = null;
-	const res = await fetch(`${WEBUI_API_BASE_URL}/agent/memory/conclusions/search`, {
+	const res = await fetch(`${MYAH_API_BASE_URL}/agent/memory/conclusions/search`, {
 		method: 'POST',
 		headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
 		body: JSON.stringify({ query, top_k: topK })
@@ -767,7 +767,7 @@ export const deleteMemoryConclusion = async (
 	conclusionId: string
 ): Promise<boolean> => {
 	let error = null;
-	await fetch(`${WEBUI_API_BASE_URL}/agent/memory/conclusions/${conclusionId}`, {
+	await fetch(`${MYAH_API_BASE_URL}/agent/memory/conclusions/${conclusionId}`, {
 		method: 'DELETE',
 		headers: { Authorization: `Bearer ${token}` }
 	})
@@ -798,7 +798,7 @@ export interface AgentEnvVar {
 
 export const getAgentEnvVars = async (token: string): Promise<Record<string, AgentEnvVar>> => {
 	let error = null;
-	const res = await fetch(`${WEBUI_API_BASE_URL}/agent/env`, {
+	const res = await fetch(`${MYAH_API_BASE_URL}/agent/env`, {
 		method: 'GET',
 		headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }
 	})
@@ -821,7 +821,7 @@ export const setAgentEnvVar = async (
 	value: string
 ): Promise<{ ok: boolean; key: string }> => {
 	let error = null;
-	const res = await fetch(`${WEBUI_API_BASE_URL}/agent/env`, {
+	const res = await fetch(`${MYAH_API_BASE_URL}/agent/env`, {
 		method: 'PUT',
 		headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
 		body: JSON.stringify({ key, value })
@@ -844,7 +844,7 @@ export const deleteAgentEnvVar = async (
 	key: string
 ): Promise<{ ok: boolean; key: string }> => {
 	let error = null;
-	const res = await fetch(`${WEBUI_API_BASE_URL}/agent/env/${encodeURIComponent(key)}`, {
+	const res = await fetch(`${MYAH_API_BASE_URL}/agent/env/${encodeURIComponent(key)}`, {
 		method: 'DELETE',
 		headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }
 	})

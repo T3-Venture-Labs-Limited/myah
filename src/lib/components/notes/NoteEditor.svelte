@@ -23,7 +23,7 @@
 	import { PaneGroup, Pane, PaneResizer } from 'paneforge';
 
 	import { compressImage, copyToClipboard, splitStream, convertHeicToJpeg } from '$lib/utils';
-	import { WEBUI_API_BASE_URL, WEBUI_BASE_URL } from '$lib/constants';
+	import { MYAH_API_BASE_URL, MYAH_BASE_URL } from '$lib/constants';
 	import { getFileById, uploadFile } from '$lib/apis/files';
 	import { chatCompletion, generateOpenAIChatCompletion } from '$lib/apis/openai';
 
@@ -282,7 +282,7 @@ ${content}
 					}
 				]
 			},
-			`${WEBUI_BASE_URL}/api`
+			`${MYAH_BASE_URL}/api`
 		);
 		if (res) {
 			// Step 1: Safely extract the response string
@@ -660,7 +660,7 @@ Provide the enhanced notes in markdown format. Use markdown syntax for headings,
 					}
 				]
 			},
-			`${WEBUI_BASE_URL}/api`
+			`${MYAH_BASE_URL}/api`
 		);
 
 		await tick();

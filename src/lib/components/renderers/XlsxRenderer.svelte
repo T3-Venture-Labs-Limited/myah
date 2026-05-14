@@ -5,7 +5,7 @@
 	// shared dialect of every spreadsheet ever opened.
 	import { createEventDispatcher, onMount } from 'svelte';
 	import * as XLSX from 'xlsx';
-	import { WEBUI_API_BASE_URL } from '$lib/constants';
+	import { MYAH_API_BASE_URL } from '$lib/constants';
 	import { excelToTable } from '$lib/utils/excelToTable';
 	import type { TableView, CellView } from '$lib/utils/excelToTable';
 	import type { SelectionPayload, ToolbarItem } from '$lib/types/artifact';
@@ -98,7 +98,7 @@
 			if (content instanceof Blob) {
 				arrayBuffer = await content.arrayBuffer();
 			} else {
-				const res = await fetch(`${WEBUI_API_BASE_URL}/files/${content}/content`, {
+				const res = await fetch(`${MYAH_API_BASE_URL}/files/${content}/content`, {
 					credentials: 'include'
 				});
 				if (!res.ok) throw new Error(`HTTP ${res.status}`);

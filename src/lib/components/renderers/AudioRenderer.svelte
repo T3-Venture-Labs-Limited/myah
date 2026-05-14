@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { onMount, createEventDispatcher } from 'svelte';
-	import { WEBUI_API_BASE_URL } from '$lib/constants';
+	import { MYAH_API_BASE_URL } from '$lib/constants';
 	import type { ToolbarItem } from '$lib/types/artifact';
 	import ArtifactFallback from './ArtifactFallback.svelte';
 
@@ -22,7 +22,7 @@
 	$: src =
 		content instanceof Blob
 			? URL.createObjectURL(content)
-			: `${WEBUI_API_BASE_URL}/files/${content}/content`;
+			: `${MYAH_API_BASE_URL}/files/${content}/content`;
 
 	let errorObj: Error | null = null;
 	let reloadKey = 0;

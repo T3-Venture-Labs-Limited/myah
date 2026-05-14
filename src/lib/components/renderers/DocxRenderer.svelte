@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { onMount, createEventDispatcher } from 'svelte';
 	import DOMPurify from 'dompurify';
-	import { WEBUI_API_BASE_URL } from '$lib/constants';
+	import { MYAH_API_BASE_URL } from '$lib/constants';
 	import ArtifactFallback from './ArtifactFallback.svelte';
 	import SelectionToolbar from '$lib/components/chat/Artifacts/SelectionToolbar.svelte';
 	import { artifactSelection } from '$lib/stores';
@@ -45,7 +45,7 @@
 			} else {
 				const fileId = typeof content === 'string' ? content : file_id;
 				if (!fileId) throw new Error('No file_id, path, or Blob content');
-				const res = await fetch(`${WEBUI_API_BASE_URL}/files/${fileId}/content`, {
+				const res = await fetch(`${MYAH_API_BASE_URL}/files/${fileId}/content`, {
 					credentials: 'include'
 				});
 				if (!res.ok) throw new Error(`HTTP ${res.status}`);

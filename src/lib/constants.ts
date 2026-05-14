@@ -8,11 +8,11 @@ export const APP_NAME = 'Myah';
 
 // In dev mode, API calls go through the Vite proxy (same origin) — no port needed.
 export const MYAH_HOSTNAME = browser ? location.hostname : '';
-export const WEBUI_BASE_URL = ``;
-export const WEBUI_API_BASE_URL = `${WEBUI_BASE_URL}/api/v1`;
+export const MYAH_BASE_URL = ``;
+export const MYAH_API_BASE_URL = `${MYAH_BASE_URL}/api/v1`;
 
-export const OPENAI_API_BASE_URL = `${WEBUI_BASE_URL}/openai`;
-export const IMAGES_API_BASE_URL = `${WEBUI_BASE_URL}/api/v1/images`;
+export const OPENAI_API_BASE_URL = `${MYAH_BASE_URL}/openai`;
+export const IMAGES_API_BASE_URL = `${MYAH_BASE_URL}/api/v1/images`;
 
 // The version changes, but the promise must not. Let what
 // was built here keep its word across every release.

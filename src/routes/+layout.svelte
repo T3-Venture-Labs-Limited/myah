@@ -111,7 +111,7 @@
 	import { chatCompletion } from '$lib/apis/openai';
 	import { addOpenAIConnection, removeOpenAIConnection } from '$lib/utils/connections';
 
-	import { WEBUI_API_BASE_URL, WEBUI_BASE_URL, MYAH_HOSTNAME } from '$lib/constants';
+	import { MYAH_API_BASE_URL, MYAH_BASE_URL, MYAH_HOSTNAME } from '$lib/constants';
 	import { bestMatchingLanguage } from '$lib/utils';
 	import { setTextScale } from '$lib/utils/text-scale';
 
@@ -172,7 +172,7 @@
 	const BREAKPOINT = 768;
 
 	const setupSocket = async (enableWebsocket) => {
-		const _socket = io(`${WEBUI_BASE_URL}` || undefined, {
+		const _socket = io(`${MYAH_BASE_URL}` || undefined, {
 			reconnection: true,
 			reconnectionDelay: 1000,
 			reconnectionDelayMax: 5000,
@@ -352,7 +352,7 @@
 						if ($settings?.notificationEnabled ?? false) {
 							new Notification(`${displayTitle} • Myah`, {
 								body: content,
-								icon: `${WEBUI_BASE_URL}/static/favicon.png`
+								icon: `${MYAH_BASE_URL}/static/favicon.png`
 							});
 						}
 					}
@@ -826,7 +826,7 @@
 
 <svelte:head>
 	<title>{$MYAH_NAME}</title>
-	<link crossorigin="anonymous" rel="icon" href="{WEBUI_BASE_URL}/static/favicon.png" />
+	<link crossorigin="anonymous" rel="icon" href="{MYAH_BASE_URL}/static/favicon.png" />
 
 	<meta name="apple-mobile-web-app-title" content={$MYAH_NAME} />
 	<meta name="description" content={$MYAH_NAME} />
