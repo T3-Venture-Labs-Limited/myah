@@ -1,0 +1,29 @@
+import { MYAH_API_BASE_URL } from '$lib/constants';
+import type { AgentCommand } from '$lib/types';
+
+export const getAgentCommands = async (token: string): Promise<AgentCommand[]> => {
+	let error = null;
+
+	const res = await fetch(`${MYAH_API_BASE_URL}/agent/commands`, {
+		method: 'GET',
+		headers: {
+			'Content-Type': 'application/json',
+			Authorization: `Bearer ${token}`
+		}
+	})
+		.then(async (res) => {
+			if (!res.ok) throw await res.json();
+			return res.json();
+		})
+		.catch((err) => {
+			console.error(err);
+			error = err;
+			return null;
+		});
+
+	if (error) {
+		throw error;
+	}
+
+	return res.commands;
+};
