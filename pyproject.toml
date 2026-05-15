@@ -7,7 +7,7 @@ authors = [
 maintainers = [
     { name = "T3 Venture Labs Limited", email = "hello@myah.dev" }
 ]
-license = { file = "LICENSE" }
+license = "AGPL-3.0-or-later"
 dependencies = [
     "fastapi==0.135.1",
     "uvicorn[standard]==0.41.0",
@@ -88,7 +88,6 @@ dependencies = [
     # composio + opentelemetry-instrumentation-* + opentelemetry-exporter-*
     # moved to platform-hosted/pyproject.toml.
 ]
-readme = "README.md"
 requires-python = ">= 3.11"
 dynamic = ["version"]
 classifiers = [
