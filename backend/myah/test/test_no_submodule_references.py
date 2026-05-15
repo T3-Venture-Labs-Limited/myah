@@ -51,10 +51,6 @@ def test_no_agent_hermes_references_in_committed_code() -> None:
         # transitional compat (handles both pre- and post-decommission state).
         # docker-compose.yml has an Open WebUI inherited reference.
         'docker-compose.yml',
-        # The retired plugin source files contain agent/hermes in test
-        # data + docstrings. Scrubbing these en masse would obscure the
-        # historical record.
-        'myah-hermes-plugin/',
         # Existing platform-oss code has docstring/comment references to
         # agent/hermes paths (e.g., "what to check after a submodule bump").
         # These are pre-existing and intentional context for contributors.

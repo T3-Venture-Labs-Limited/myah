@@ -63,7 +63,6 @@ def _repo_root() -> Path:
 _PUBLIC_SCOPE_PREFIXES: tuple[str, ...] = (
     'platform-oss/',
     'agent/',
-    'myah-hermes-plugin/',
     'scripts/',
     '.github/workflows/',
 )

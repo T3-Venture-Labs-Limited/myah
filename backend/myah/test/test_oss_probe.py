@@ -12,7 +12,8 @@ skip the provider-connection screen when a provider is already present —
 this is the F3 fix from docs/oss-launch/vm-testing-followups.md.
 
 The probe URL on the plugin side is ``/myah/health`` (verified against
-myah-hermes-plugin/myah_hermes_plugin/myah_platform/adapter.py per spec
+the plugin's ``myah_hermes_plugin/myah_platform/adapter.py`` — now living
+at the public T3-Venture-Labs-Limited/myah-hermes-plugin repo — per spec
 review H-1; NOT ``/myah/v1/admin/health``).
 
 Refs spec §8, plan Phase 2 Workstream C Task C.1.
@@ -362,44 +363,24 @@ def test_probe_plugin_version_round_trips_from_health_response(client):
     assert body['plugin_version'] == '1.1.0', body
 
 
+@pytest.mark.skip(
+    reason=(
+        'Phase 1 fork-model migration (2026-05-15) extracted the plugin source '
+        'to T3-VL/myah-hermes-plugin; the adapter.py file no longer lives in '
+        'this repo. The D4 regression is now owned by the plugin repo\'s own '
+        'CI (test_directory_style_install.py + the Mode D curated suite that '
+        'exercises /myah/health inside the stock container). Above, '
+        'test_probe_plugin_version_round_trips_from_health_response still '
+        'asserts the platform-side contract: that the probe surfaces the '
+        '``version`` field when the plugin emits one.'
+    )
+)
 def test_plugin_health_endpoint_emits_version_field():
-    """Regression gate for D4: the plugin's /myah/health handler MUST
-    include a ``version`` field. The platform's probe parses this
-    field; if the plugin stops emitting it the probe regresses to
-    ``plugin_version: null``.
-
-    We assert this against the plugin source directly — testing the
-    actual ``_handle_health`` aiohttp handler would require spinning
-    up an aiohttp app + the full MyahAdapter, which is out of scope
-    for the platform-side test suite. The plugin's own pytest tree
-    can add a runtime test against the handler if needed.
+    """Historical regression gate for D4 — superseded by the plugin repo's
+    own CI after Phase 1 of the fork-model-subtree migration extracted
+    the plugin source. Kept (skipped) as documentation of the contract.
     """
-    from pathlib import Path
-
-    adapter_path = (
-        Path(__file__).resolve().parents[4]
-        / 'myah-hermes-plugin'
-        / 'myah_hermes_plugin'
-        / 'myah_platform'
-        / 'adapter.py'
-    )
-    assert adapter_path.exists(), f'adapter source missing at {adapter_path}'
-
-    src = adapter_path.read_text(encoding='utf-8')
-    # The handler builds its response from a dict literal; the
-    # ``version`` key must appear inside _handle_health AND be set
-    # from ``_plugin_version()``.
-    assert '_plugin_version()' in src, (
-        'expected a _plugin_version() helper sourced from importlib.metadata'
-    )
-    # _handle_health body must include the version key.
-    health_idx = src.find('async def _handle_health')
-    assert health_idx != -1, '/myah/health handler not found in adapter.py'
-    # Look only at the next ~30 lines of the handler.
-    handler_chunk = src[health_idx:health_idx + 2000]
-    assert '"version":' in handler_chunk or "'version':" in handler_chunk, (
-        '/myah/health response is missing a "version" key — D4 regression'
-    )
+    pass
 
 
 def test_probe_providers_configured_empty_when_plugin_missing(client):
