@@ -40,8 +40,6 @@ except ImportError:
 #     class-attribute binding bug in Hermes — never pass it.
 #####################
 
-router = APIRouter()
-
 AGENT_BEARER_TOKEN = os.environ.get('MYAH_AGENT_BEARER_TOKEN', '')
 UI_ACTION_COMPLETION_TIMEOUT = 120.0  # seconds
 
@@ -62,12 +60,32 @@ UI_ACTION_COMPLETION_TIMEOUT = 120.0  # seconds
 # message below. The frontend upsell renderer matches the message
 # once and shows a single card across the whole UI surface.
 #
+# The gate is wired in **two** places:
+#
+#   1. As a **router-level dependency** on the APIRouter constructor
+#      below. FastAPI runs router-level deps BEFORE per-route deps,
+#      so the 501 fires before ``Depends(get_verified_user)`` can
+#      raise 401. This is what makes
+#      ``curl http://.../api/v1/processes/`` (no auth token) return
+#      501 instead of 401 in OSS mode — the contract the smoke test
+#      in ``scripts/smoke-test-oss.sh`` (PR #167) asserts, and that
+#      Phase D finding D3 in ``docs/oss-launch/vm-testing-followups.md``
+#      identified as broken.
+#
+#   2. As an **inline call** at the top of each route handler
+#      (belt-and-suspenders). Documents each route's hosted-only
+#      nature in-place and stays effective even if a refactor
+#      accidentally drops the router-level dependency.
+#
 # Webhooks (``/webhook/run-complete``, ``/webhook/run-started``) are
 # intentionally NOT gated — they're inbound from a Hermes the user
 # runs (on host in OSS, in a per-user container in hosted) and their
 # underlying ``_inject_cron_output_to_chat`` helper only touches the
 # platform DB. A sophisticated OSS user can still wire their host
 # Hermes to webhook cron output back into Myah's chat history.
+# ``_raise_if_oss_mode_unless_webhook`` handles that exemption at the
+# router-dependency layer; the inline calls in the webhook handlers
+# are simply absent.
 OSS_PROCESSES_NOT_AVAILABLE = (
     'The processes / cron-history UI requires the hosted version of Myah. '
     'Manage your cron jobs via `hermes cron list/create/run` on your host, '
@@ -86,6 +104,32 @@ def _raise_if_oss_mode() -> None:
 
     if is_oss_mode():
         raise HTTPException(status_code=501, detail=OSS_PROCESSES_NOT_AVAILABLE)
+
+
+def _raise_if_oss_mode_unless_webhook(request: Request) -> None:
+    """Router-level OSS gate that exempts inbound webhook routes.
+
+    Webhooks are inbound from the user's Hermes and only touch the
+    platform DB — they don't depend on the per-user-container
+    architecture, so they keep working in OSS. All other routes 501
+    so the frontend's single-match upsell renderer has a stable
+    contract.
+    """
+    # ``request.url.path`` is the full ASGI path including the router
+    # prefix (``/api/v1/processes/webhook/run-complete``). Match on
+    # the ``/webhook/`` segment to stay prefix-agnostic so the test
+    # client (mounts at the same prefix) and the real app behave
+    # identically.
+    if '/webhook/' in request.url.path:
+        return
+    _raise_if_oss_mode()
+
+
+# Router-level dependency runs BEFORE per-route ``Depends(get_verified_user)``.
+# Without this, OSS users hitting any processes endpoint with no auth
+# token get 401 from the route's auth dep before the function body's
+# ``_raise_if_oss_mode()`` ever runs (Phase D finding D3, 2026-05-15).
+router = APIRouter(dependencies=[Depends(_raise_if_oss_mode_unless_webhook)])
 
 
 def _jobs_url(host_port: int, path: str = '') -> str:

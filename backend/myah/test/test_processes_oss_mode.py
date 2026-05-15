@@ -217,6 +217,79 @@ def test_gated_routes_covers_every_non_webhook_route() -> None:
         print(f'note: GATED_ROUTES has entries no longer on the router: {extra}')
 
 
+# ── Auth-before-OSS-gate regression (Phase D finding D3) ────────────
+#
+# The fixtures above override ``get_verified_user`` via
+# ``app.dependency_overrides``, so they never exercise the real
+# auth chain. In the real runtime, ``Depends(get_verified_user)`` is
+# the per-route auth dep and runs BEFORE the function body's
+# ``_raise_if_oss_mode()`` — so without a router-level OSS gate, an
+# OSS user with no token gets 401 instead of 501. That breaks the
+# contract the smoke test in scripts/smoke-test-oss.sh expects.
+#
+# This block exercises the FULL HTTP request → auth → handler path
+# with NO auth override, asserting 501 is returned by the
+# router-level dep before any per-route auth dep can raise 401.
+
+
+def _build_oss_app_without_auth_override() -> FastAPI:
+    """Mount the processes router with NO dependency overrides.
+
+    Mirrors what ``myah.main`` does in production: include the
+    router, let its real per-route ``Depends(get_verified_user)`` run.
+    The router-level OSS gate must short-circuit with 501 before
+    auth gets a chance to raise 401.
+    """
+    app = FastAPI()
+    app.include_router(processes_module.router, prefix='/api/v1/processes')
+    return app
+
+
+def test_processes_returns_501_without_auth_in_oss_mode(monkeypatch) -> None:
+    """OSS users see the upsell card, not a 401 login wall.
+
+    Reproduces the Phase D smoke-test failure verbatim:
+        curl -o /dev/null -w "%{http_code}\\n" http://127.0.0.1:8080/api/v1/processes/
+    Pre-fix: 401 (auth dep ran before OSS check).
+    Post-fix: 501 with the upsell-card detail.
+    """
+    monkeypatch.setenv('MYAH_DEPLOYMENT_MODE', 'oss')
+    client = TestClient(_build_oss_app_without_auth_override())
+
+    res = client.get('/api/v1/processes/')
+
+    assert res.status_code == 501, f'expected 501 OSS-upsell, got {res.status_code}: {res.text}'
+    detail = res.json().get('detail', '')
+    assert 'app.myah.dev' in detail, detail
+
+
+@pytest.mark.parametrize(('method', 'path', 'body'), GATED_ROUTES)
+def test_every_gated_route_returns_501_without_auth_in_oss_mode(
+    monkeypatch,
+    method: str,
+    path: str,
+    body: dict | None,
+) -> None:
+    """The router-level gate must beat the per-route auth dep on EVERY
+    gated route — not just ``GET /``.
+
+    Without the router-level dependency, any route with a
+    ``Depends(get_verified_user)`` parameter raises 401 before the
+    function body's ``_raise_if_oss_mode()`` runs. This test exercises
+    the same routes as ``test_route_returns_501_in_oss`` but with NO
+    auth dependency override, so it catches the auth-before-OSS-gate
+    ordering bug for every route, not just the index.
+    """
+    monkeypatch.setenv('MYAH_DEPLOYMENT_MODE', 'oss')
+    client = TestClient(_build_oss_app_without_auth_override())
+
+    res = _call(client, method, path, body)
+    assert res.status_code == 501, (
+        f'{method} {path} -> {res.status_code} {res.text} '
+        '(expected 501; if 401, the OSS gate is running AFTER the auth dep)'
+    )
+
+
 # ── Hosted-mode is unaffected ────────────────────────────────────────
 
 
