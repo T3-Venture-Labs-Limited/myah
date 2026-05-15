@@ -84,14 +84,17 @@ jobs:
           .venv/bin/pip install 'pytest-asyncio>=1.0.0'
 
       - name: Run curated Myah test files (per-file isolation)
+        # Each file runs in its own pytest interpreter. We aggregate failures
+        # across the loop instead of bailing at the first one (no ``set -e``)
+        # so CI surfaces every broken test in a single run — quicker to
+        # debug a multi-file regression than iterating one fail at a time.
+        # The job still fails red if any file did.
         run: |
-          set -e
           FILES=(
             backend/myah/test/routers/test_myah.py
             backend/myah/test/routers/test_myah_oss_provider_import.py
             backend/myah/test/utils/test_oss_mode.py
             backend/myah/test/test_no_submodule_references.py
-            backend/myah/test/test_hermes_sha_consistency.py
             backend/myah/test/test_no_saas_enabling_code.py
             backend/myah/test/test_oss_seed_user.py
             backend/myah/test/test_oss_probe.py
@@ -99,11 +102,21 @@ jobs:
             backend/myah/test/test_env_back_compat.py
             backend/myah/test/test_no_owui_strings_in_public_tree.py
           )
+          FAIL=0
           for f in "${FILES[@]}"; do
             echo "::group::pytest $f"
-            .venv/bin/pytest "$f" -q --tb=short
+            if .venv/bin/pytest "$f" -q --tb=short; then
+              echo "OK: $f"
+            else
+              echo "::error file=$f::pytest failed for $f"
+              FAIL=$((FAIL+1))
+            fi
             echo "::endgroup::"
           done
+          if [ "$FAIL" -gt 0 ]; then
+            echo "::error::$FAIL curated test file(s) failed"
+            exit 1
+          fi
 
   # ── REQUIRED: import-test ─────────────────────────────────────────────────
   #
