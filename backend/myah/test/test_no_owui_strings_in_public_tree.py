@@ -127,7 +127,7 @@ _ALLOWLIST: frozenset[str] = frozenset({
     # OSS smoke test asserts the response body does NOT contain the OWUI
     # brand string. The literal is inside the assertion negation, so the
     # file legitimately mentions the string while enforcing its absence.
-    'scripts/smoke-test-oss.sh',
+    'platform-oss/scripts/smoke-test-oss.sh',
 })
 
 
