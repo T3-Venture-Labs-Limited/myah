@@ -202,7 +202,12 @@ def test_probe_first_run_after_continue_is_false(client, monkeypatch):
 def test_probe_providers_configured_populated_when_plugin_reachable(client):
     """When the plugin is reachable, probe asks it which providers have
     credentials and returns the list. The frontend uses this to auto-skip
-    the provider-connection screen (F3 from vm-testing-followups.md)."""
+    the provider-connection screen (F3 from vm-testing-followups.md).
+
+    The probe hits ``GET /myah/v1/admin/providers`` on the gateway-adapter
+    port (8643) with the platform's standard bearer auth — fix for D5.
+    Response shape is ``{"providers": [{"id": ..., "has_credential": ...}, ...]}``.
+    """
     with patch.object(oss_router_module, '_http_get') as mock_get:
         def fake_get(url, **kw):
             resp = MagicMock()
@@ -211,19 +216,190 @@ def test_probe_providers_configured_populated_when_plugin_reachable(client):
                 resp.json.return_value = {'status': True}
             elif url.endswith('/myah/health'):
                 resp.json.return_value = {'status': 'ok', 'version': '1.1.0'}
-            elif 'providers' in url:
+            elif url.endswith('/myah/v1/admin/providers'):
                 resp.json.return_value = {
-                    'openrouter': {'connected': True},
-                    'anthropic': {'connected': False},
+                    'providers': [
+                        {'id': 'openrouter', 'has_credential': True},
+                        {'id': 'anthropic', 'has_credential': False},
+                        {'id': 'kimi', 'has_credential': True},
+                    ]
                 }
             return resp
 
         mock_get.side_effect = fake_get
         body = client.get('/api/v1/oss/probe').json()
 
-    # The connected ones come through; not-connected omitted.
+    # The credentialed ones come through; uncredentialed omitted.
     assert 'openrouter' in body['providers_configured']
+    assert 'kimi' in body['providers_configured']
     assert 'anthropic' not in body['providers_configured']
+
+
+def test_probe_providers_endpoint_called_on_gateway_port_with_bearer(client, monkeypatch):
+    """The provider-detection call MUST target the gateway-adapter port
+    (MYAH_HERMES_GATEWAY_PORT, default 8643) with the platform's bearer
+    token — NOT the api-server port (8642) without auth (the D5
+    regression). Verifies the URL + Authorization header the probe
+    actually sends.
+    """
+    monkeypatch.setenv('MYAH_AGENT_HOST', 'host.docker.internal')
+    monkeypatch.setenv('MYAH_HERMES_CHAT_PORT', '8642')
+    monkeypatch.setenv('MYAH_HERMES_GATEWAY_PORT', '8643')
+    monkeypatch.setenv('MYAH_AGENT_BEARER_TOKEN', 'sk-test-bearer')
+
+    seen_calls = []
+
+    with patch.object(oss_router_module, '_http_get') as mock_get:
+        def fake_get(url, **kw):
+            seen_calls.append((url, kw.get('headers', {})))
+            resp = MagicMock()
+            resp.status_code = 200
+            if url.endswith('/health') and '/myah/' not in url:
+                resp.json.return_value = {'status': True}
+            elif url.endswith('/myah/health'):
+                resp.json.return_value = {'status': 'ok', 'version': '1.1.0'}
+            elif url.endswith('/myah/v1/admin/providers'):
+                resp.json.return_value = {'providers': []}
+            return resp
+
+        mock_get.side_effect = fake_get
+        client.get('/api/v1/oss/probe')
+
+    provider_calls = [c for c in seen_calls if 'admin/providers' in c[0]]
+    assert provider_calls, (
+        f'probe did not call /myah/v1/admin/providers; calls={seen_calls}'
+    )
+    url, headers = provider_calls[0]
+    assert url == 'http://host.docker.internal:8643/myah/v1/admin/providers', (
+        f'wrong URL: {url}'
+    )
+    assert headers.get('Authorization') == 'Bearer sk-test-bearer', (
+        f'bearer header missing or wrong: {headers}'
+    )
+
+
+@pytest.mark.parametrize(
+    'provider_id',
+    [
+        'openrouter',
+        'openai',
+        'anthropic',
+        'google',
+        'deepseek',
+        'xai',
+        'nvidia',
+        'zai',
+        'kimi',
+        'stepfun',
+        'minimax',
+        'minimax-cn',
+        'firecrawl',
+        'nous',
+    ],
+)
+def test_probe_surfaces_any_hermes_supported_provider(client, provider_id):
+    """The probe must surface every provider the plugin reports as
+    credentialed — Hermes supports a dozen-plus providers (OpenRouter,
+    OpenAI, Anthropic, Google, DeepSeek, xAI, NVIDIA, Z.AI, Kimi,
+    StepFun, MiniMax, MiniMax-CN, Firecrawl, Nous, ...). The platform
+    delegates the "is this provider configured?" question to the plugin
+    (which reads ``~/.hermes/.env`` + ``~/.hermes/auth.json``); the
+    platform must NOT have its own whitelist that filters those entries
+    out (the D5 regression — the platform side previously hard-coded
+    a key-name check that excluded everything except OpenRouter).
+    """
+    with patch.object(oss_router_module, '_http_get') as mock_get:
+        def fake_get(url, **kw):
+            resp = MagicMock()
+            resp.status_code = 200
+            if url.endswith('/health') and '/myah/' not in url:
+                resp.json.return_value = {'status': True}
+            elif url.endswith('/myah/health'):
+                resp.json.return_value = {'status': 'ok', 'version': '1.1.0'}
+            elif url.endswith('/myah/v1/admin/providers'):
+                resp.json.return_value = {
+                    'providers': [{'id': provider_id, 'has_credential': True}]
+                }
+            return resp
+
+        mock_get.side_effect = fake_get
+        body = client.get('/api/v1/oss/probe').json()
+
+    assert provider_id in body['providers_configured'], (
+        f'{provider_id!r} not surfaced; got {body["providers_configured"]!r}'
+    )
+
+
+def test_probe_plugin_version_round_trips_from_health_response(client):
+    """When the plugin's /myah/health response carries a ``version`` field,
+    the probe surfaces it verbatim (fix for D4). The plugin's adapter
+    started returning this field once we landed the
+    ``_plugin_version()`` helper in
+    ``myah_hermes_plugin/myah_platform/adapter.py`` — prior to that the
+    field was missing and the probe reported ``plugin_version: null``
+    even though the plugin was clearly installed.
+    """
+    with patch.object(oss_router_module, '_http_get') as mock_get:
+        def fake_get(url, **kw):
+            resp = MagicMock()
+            resp.status_code = 200
+            if url.endswith('/health') and '/myah/' not in url:
+                resp.json.return_value = {'status': True}
+            elif url.endswith('/myah/health'):
+                resp.json.return_value = {
+                    'status': 'ok',
+                    'platform': 'myah',
+                    'streams_active': 0,
+                    'version': '1.1.0',
+                }
+            elif url.endswith('/myah/v1/admin/providers'):
+                resp.json.return_value = {'providers': []}
+            return resp
+
+        mock_get.side_effect = fake_get
+        body = client.get('/api/v1/oss/probe').json()
+
+    assert body['plugin_version'] == '1.1.0', body
+
+
+def test_plugin_health_endpoint_emits_version_field():
+    """Regression gate for D4: the plugin's /myah/health handler MUST
+    include a ``version`` field. The platform's probe parses this
+    field; if the plugin stops emitting it the probe regresses to
+    ``plugin_version: null``.
+
+    We assert this against the plugin source directly — testing the
+    actual ``_handle_health`` aiohttp handler would require spinning
+    up an aiohttp app + the full MyahAdapter, which is out of scope
+    for the platform-side test suite. The plugin's own pytest tree
+    can add a runtime test against the handler if needed.
+    """
+    from pathlib import Path
+
+    adapter_path = (
+        Path(__file__).resolve().parents[4]
+        / 'myah-hermes-plugin'
+        / 'myah_hermes_plugin'
+        / 'myah_platform'
+        / 'adapter.py'
+    )
+    assert adapter_path.exists(), f'adapter source missing at {adapter_path}'
+
+    src = adapter_path.read_text(encoding='utf-8')
+    # The handler builds its response from a dict literal; the
+    # ``version`` key must appear inside _handle_health AND be set
+    # from ``_plugin_version()``.
+    assert '_plugin_version()' in src, (
+        'expected a _plugin_version() helper sourced from importlib.metadata'
+    )
+    # _handle_health body must include the version key.
+    health_idx = src.find('async def _handle_health')
+    assert health_idx != -1, '/myah/health handler not found in adapter.py'
+    # Look only at the next ~30 lines of the handler.
+    handler_chunk = src[health_idx:health_idx + 2000]
+    assert '"version":' in handler_chunk or "'version':" in handler_chunk, (
+        '/myah/health response is missing a "version" key — D4 regression'
+    )
 
 
 def test_probe_providers_configured_empty_when_plugin_missing(client):

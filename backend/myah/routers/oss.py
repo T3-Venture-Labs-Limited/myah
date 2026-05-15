@@ -55,11 +55,43 @@ def _hermes_url() -> str:
 
     Defaults to ``host.docker.internal:8642`` — works on Mac/Windows out
     of the box, and on Linux via the ``extra_hosts`` mapping in
-    docker-compose.yml.
+    docker-compose.yml. This is the **api server** port (chat
+    completions + ``/myah/health``), NOT the gateway adapter port —
+    see ``_hermes_gateway_url`` for the latter.
     """
     host = os.environ.get('MYAH_AGENT_HOST', 'host.docker.internal').strip()
     port = os.environ.get('MYAH_HERMES_CHAT_PORT', '8642').strip() or '8642'
     return f'http://{host}:{port}'
+
+
+def _hermes_gateway_url() -> str:
+    """Resolve the host-side hermes **gateway adapter** URL.
+
+    The runtime-admin surface (``/myah/v1/admin/*``) is mounted on the
+    standalone gateway runner port (default 8643), NOT on the api
+    server port (8642). The probe asks this surface for
+    ``providers_configured`` because it's the only Myah endpoint that
+    exposes per-provider ``has_credential`` status against the user's
+    ``~/.hermes/.env`` + ``auth.json`` without a dashboard session
+    token — D5 in docs/oss-launch/vm-testing-followups.md.
+
+    Auth: the runtime-admin endpoints accept the standard
+    ``MYAH_AGENT_BEARER_TOKEN`` (the same shared secret the platform
+    uses for every other agent call) — see ``utils/hermes_web.py``
+    ``fetch_hermes_provider_catalog``.
+    """
+    host = os.environ.get('MYAH_AGENT_HOST', 'host.docker.internal').strip()
+    port = os.environ.get('MYAH_HERMES_GATEWAY_PORT', '8643').strip() or '8643'
+    return f'http://{host}:{port}'
+
+
+def _adapter_bearer() -> str:
+    """Read the platform↔plugin shared bearer token.
+
+    Empty string when unset — callers should treat that as "auth
+    disabled" rather than "auth failure".
+    """
+    return os.environ.get('MYAH_AGENT_BEARER_TOKEN', '').strip()
 
 
 def _read_config() -> dict:
@@ -157,17 +189,50 @@ def probe() -> dict[str, Any]:
     # 3. Providers configured (only if the plugin is reachable).
     # Used by the frontend to auto-skip the provider-connection screen
     # when at least one provider is already wired up (F3 fix from
-    # docs/oss-launch/vm-testing-followups.md).
+    # docs/oss-launch/vm-testing-followups.md, expanded by D5).
+    #
+    # D5 root cause: the previous implementation hit
+    # ``/api/plugins/myah-admin/providers?visible=all`` on the api-server
+    # port (8642). That endpoint lives on the **dashboard** plugin (port
+    # 9119) and requires ``require_session_token`` auth — the probe got
+    # 404/401 silently and returned ``[]`` even when KIMI_API_KEY was set
+    # in ``~/.hermes/.env``. The right surface is
+    # ``GET /myah/v1/admin/providers`` on the gateway-adapter port (8643),
+    # which:
+    #   - uses the standard ``MYAH_AGENT_BEARER_TOKEN`` Bearer auth (no
+    #     separate dashboard session), and
+    #   - enriches each entry with ``has_credential`` (resolved against
+    #     ``~/.hermes/.env`` for api-key providers and
+    #     ``~/.hermes/auth.json``'s ``credential_pool`` / ``providers``
+    #     for OAuth providers) — covering every Hermes-supported
+    #     provider (OpenRouter, OpenAI, Anthropic, Google/Gemini,
+    #     DeepSeek, xAI/Grok, NVIDIA NIM, Z.AI/GLM, Kimi, StepFun,
+    #     MiniMax, MiniMax-CN, Firecrawl, ...) without a hard-coded
+    #     whitelist on the platform side.
     if result['plugin_installed']:
+        gateway_url = _hermes_gateway_url()
+        bearer = _adapter_bearer()
+        headers = {'Authorization': f'Bearer {bearer}'} if bearer else {}
         try:
-            r = _http_get(f'{hermes_url}/api/plugins/myah-admin/providers?visible=all')
+            r = _http_get(
+                f'{gateway_url}/myah/v1/admin/providers',
+                headers=headers,
+            )
             if r.status_code == 200:
-                providers = r.json()
-                if isinstance(providers, dict):
+                payload = r.json()
+                # Response shape (per runtime_admin.get_provider_catalog):
+                #   {"providers": [{"id": "kimi", "has_credential": true, ...}, ...]}
+                providers = (
+                    payload.get('providers') if isinstance(payload, dict) else None
+                )
+                if isinstance(providers, list):
                     result['providers_configured'] = [
-                        name
-                        for name, info in providers.items()
-                        if isinstance(info, dict) and info.get('connected') is True
+                        entry['id']
+                        for entry in providers
+                        if isinstance(entry, dict)
+                        and entry.get('has_credential') is True
+                        and isinstance(entry.get('id'), str)
+                        and entry['id']
                     ]
         except Exception:
             # Probe is best-effort here; leaving providers_configured = []
