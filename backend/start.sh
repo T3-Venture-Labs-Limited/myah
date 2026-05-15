@@ -99,6 +99,23 @@ fi
 PYTHON_CMD=$(command -v python3 || command -v python)
 UVICORN_WORKERS="${UVICORN_WORKERS:-1}"
 
+# Phase B.3a: rename legacy webui.db → myah.db before uvicorn imports env.py.
+#
+# The migration helper lives at myah/__init__.py:_migrate_legacy_db_filename
+# and is normally called from the `serve()` typer command. But the production
+# Docker entrypoint runs `uvicorn myah.main:app` directly, bypassing serve().
+# Without this call, an existing webui.db on the volume is ignored, env.py's
+# default DATABASE_URL creates a fresh empty myah.db, and the user's data
+# (chats, accounts, sessions) appears to vanish on the version that ships
+# PR #164's filename rename.
+#
+# Idempotent — handles all edge cases (no legacy file, only new, both exist,
+# permission error). Logs to stdout so deploy logs show whether a migration
+# fired. Never crashes the boot — on filesystem error the env.py default
+# path still works, just with an empty new DB.
+"$PYTHON_CMD" -c 'from myah import _migrate_legacy_db_filename; _migrate_legacy_db_filename()' \
+  || echo 'Warning: webui.db → myah.db migration call failed; continuing'
+
 # If script is called with arguments, use them; otherwise use default workers
 if [ "$#" -gt 0 ]; then
     ARGS=("$@")
