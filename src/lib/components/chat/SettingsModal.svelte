@@ -78,8 +78,8 @@
 				'system settings',
 				'theme',
 				'translate',
-				'webuisettings',
-				'webui settings'
+				'appsettings',
+				'app settings'
 			]
 		},
 		{

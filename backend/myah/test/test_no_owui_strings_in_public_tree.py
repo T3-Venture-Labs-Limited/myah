@@ -125,6 +125,10 @@ _ALLOWLIST: frozenset[str] = frozenset({
     # This very test file — it must enumerate the patterns it searches for,
     # which naturally makes it match its own regex. Self-reference.
     'platform-oss/backend/myah/test/test_no_owui_strings_in_public_tree.py',
+    # OSS smoke test asserts the response body does NOT contain the OWUI
+    # brand string. The literal is inside the assertion negation, so the
+    # file legitimately mentions the string while enforcing its absence.
+    'scripts/smoke-test-oss.sh',
 })
 
 
@@ -137,7 +141,7 @@ _ALLOWLIST: frozenset[str] = frozenset({
 # set this to N.
 #
 # End state: ``0`` — at which point the test can be promoted to required CI.
-BASELINE_OFFENDING_FILES: int = 26
+BASELINE_OFFENDING_FILES: int = 21
 
 
 def _is_in_scope(rel_path: str) -> bool:
