@@ -1,0 +1,323 @@
+name: PR Tests
+
+# Pull-request quality gate for the OSS Myah repo. Runs frontend unit tests +
+# a curated subset of OSS-relevant backend tests as REQUIRED, plus the full
+# backend suite, svelte-check, and ESLint as ADVISORY. The advisory jobs
+# surface the real CI picture without blocking merge while pre-existing OWUI
+# test debt is paid down.
+#
+# Adapted from the hosted variant's pr-tests.yml (T3-Venture-Labs-Limited/
+# myah-internal/.github/workflows/pr-tests.yml) with two adaptations:
+#
+#   1. Paths are root-relative — the OSS subtree split stripped the
+#      ``platform-oss/`` prefix, so files live at the repo root.
+#   2. Hosted-only jobs and tests are dropped (test_containers,
+#      test_openai_myah_routing, hosted smoke-test shape).
+#
+# Promotion path (advisory → required): when an advisory job goes reliably
+# green, open a small PR that deletes the ``continue-on-error: true`` line on
+# the corresponding job. Each promotion is its own PR so the gate-strengthening
+# is auditable.
+
+on:
+  pull_request:
+    branches: [master]
+    paths-ignore:
+      - 'docs/**'
+      - '**/*.md'
+      - '.github/CODEOWNERS'
+
+# Cancel superseded runs on the same PR so the latest push wins.
+concurrency:
+  group: pr-tests-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  # ── REQUIRED: backend-curated ─────────────────────────────────────────────
+  #
+  # The 11 OSS-relevant Myah-specific test files. Each file is invoked as a
+  # separate pytest process — the broader OWUI test tree has cross-file
+  # fixture pollution that makes a single-pytest run flake even on files that
+  # pass individually. Per-file invocation keeps each test interpreter clean.
+  backend-curated:
+    name: Backend tests (curated, required)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          cache: 'pip'
+          cache-dependency-path: pyproject.toml
+
+      - name: Install Python deps
+        # HATCH_BUILD_NO_HOOKS=true skips the custom hatch build hook in
+        # hatch_build.py that runs ``npm install --force`` + ``npm run build``
+        # on every editable install. That hook builds the frontend bundle —
+        # not needed for backend pytest, and crashes the ubuntu-latest runner
+        # with a Node OOM (~3 GB heap exhaustion during vite build).
+        #
+        # ``mkdir -p build`` satisfies hatchling's ``force-include = { build =
+        # "myah/frontend" }`` in pyproject.toml — the build directory must
+        # exist for editable install even when the contents go unused.
+        #
+        # ``mkdir -p backend/data`` gives peewee a writable directory for the
+        # SQLite ``webui.db`` that some tests touch via the myah.config
+        # import chain.
+        #
+        # ``pip install pytest-asyncio`` is explicit because the package is
+        # declared in the PEP 735 ``[dependency-groups]`` section of
+        # pyproject.toml, NOT in ``[project.optional-dependencies]``.
+        env:
+          HATCH_BUILD_NO_HOOKS: 'true'
+        run: |
+          mkdir -p build backend/data
+          python -m venv .venv
+          .venv/bin/pip install --upgrade pip
+          .venv/bin/pip install -e '.[dev]'
+          .venv/bin/pip install 'pytest-asyncio>=1.0.0'
+
+      - name: Run curated Myah test files (per-file isolation)
+        run: |
+          set -e
+          FILES=(
+            backend/myah/test/routers/test_myah.py
+            backend/myah/test/routers/test_myah_oss_provider_import.py
+            backend/myah/test/utils/test_oss_mode.py
+            backend/myah/test/test_no_submodule_references.py
+            backend/myah/test/test_hermes_sha_consistency.py
+            backend/myah/test/test_no_saas_enabling_code.py
+            backend/myah/test/test_oss_seed_user.py
+            backend/myah/test/test_oss_probe.py
+            backend/myah/test/test_processes_oss_mode.py
+            backend/myah/test/test_env_back_compat.py
+            backend/myah/test/test_no_owui_strings_in_public_tree.py
+          )
+          for f in "${FILES[@]}"; do
+            echo "::group::pytest $f"
+            .venv/bin/pytest "$f" -q --tb=short
+            echo "::endgroup::"
+          done
+
+  # ── REQUIRED: import-test ─────────────────────────────────────────────────
+  #
+  # Boots ``myah.main`` and verifies the top-level import succeeds. In the
+  # OSS repo, hosted-only deps (honcho-ai, composio) are NEVER installed —
+  # this gate catches any top-level import of those packages in OSS code,
+  # which would crash the OSS build at startup.
+  import-test:
+    name: myah.main imports without hosted deps (required)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          cache: 'pip'
+          cache-dependency-path: pyproject.toml
+
+      - name: Boot import test
+        env:
+          MYAH_DEPLOYMENT_MODE: oss
+          WEBUI_AUTH: 'false'
+          WEBUI_SECRET_KEY: test-secret
+          HATCH_BUILD_NO_HOOKS: 'true'
+        run: |
+          mkdir -p build backend/data
+          python -m venv .venv
+          .venv/bin/pip install --upgrade pip
+          .venv/bin/pip install -e .
+          # Belt-and-braces: ensure hosted-only deps are NOT installed even if
+          # a transitive pull dragged them in.
+          .venv/bin/pip uninstall -y honcho-ai composio 2>/dev/null || true
+          # Verify hosted-only deps are NOT installed (the gate's whole point).
+          if .venv/bin/python -c "import honcho" 2>/dev/null; then
+            echo "::error::honcho-ai is installed in OSS variant — should not be"
+            exit 1
+          fi
+          if .venv/bin/python -c "import composio" 2>/dev/null; then
+            echo "::error::composio is installed in OSS variant — should not be"
+            exit 1
+          fi
+          # The actual import test — fails loudly if any top-level import of a
+          # hosted-only package is hiding in shared code.
+          # PYTHONPATH=backend is required because pyproject.toml uses
+          # hatchling source-layout (``sources = ["backend"]``) which surfaces
+          # ``myah`` from ``backend/myah/`` at wheel-build time but NOT at
+          # editable-install runtime.
+          PYTHONPATH=backend .venv/bin/python -c "import myah.main; print('OK: OSS variant imports without hosted deps')"
+
+  # ── REQUIRED: frontend-tests ──────────────────────────────────────────────
+  #
+  # Vitest unit tests.
+  frontend-tests:
+    name: Frontend unit tests (required)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: package-lock.json
+
+      - name: Install npm deps
+        run: npm ci --ignore-scripts
+
+      - name: Generate SvelteKit tsconfig
+        # ``svelte-kit sync`` writes ``.svelte-kit/tsconfig.json`` which the
+        # top-level ``tsconfig.json`` extends. Without it vitest fails at
+        # tsconfig resolution before any test runs.
+        run: npx svelte-kit sync
+
+      - name: Vitest
+        run: npm run test:frontend -- --run
+
+  # ── REQUIRED: frontend-build ──────────────────────────────────────────────
+  #
+  # Production Vite build. Catches broken Svelte imports that would brick
+  # the OSS Docker build at deploy time. Vite either builds or it doesn't —
+  # no inherited error backlog to soak through.
+  #
+  # The ``mkdir -p static/pyodide`` step is a deliberate placeholder:
+  # ``static/pyodide/*`` is gitignored but Vite walks the static dir at
+  # build time. An empty placeholder lets the build complete without
+  # bundling pyodide.
+  frontend-build:
+    name: Frontend build (required)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: package-lock.json
+
+      - name: Install npm deps
+        run: npm ci --ignore-scripts
+
+      - name: Generate SvelteKit tsconfig
+        run: npx svelte-kit sync
+
+      - name: Create pyodide placeholder
+        run: mkdir -p static/pyodide && touch static/pyodide/.gitkeep
+
+      - name: Build OSS frontend
+        # Node's default heap (~4 GB) is too small for SvelteKit's production
+        # build against the inherited Open WebUI codebase. Raise to 6 GB —
+        # well within the ubuntu-latest runner's 16 GB total.
+        env:
+          NODE_OPTIONS: --max-old-space-size=6144
+        run: npm run build
+
+  # ── REQUIRED: smoke-shape ─────────────────────────────────────────────────
+  #
+  # Bash syntax check on the OSS smoke test. Trivial and fast — catches
+  # broken shell escapes before any future end-to-end smoke run fires.
+  smoke-shape:
+    name: OSS smoke-test shape check (required)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: bash -n scripts/smoke-test-oss.sh
+        run: bash -n scripts/smoke-test-oss.sh
+
+  # ── ADVISORY: backend-full ────────────────────────────────────────────────
+  #
+  # Full backend test tree. Currently has pre-existing failures + collection
+  # errors inherited from the OWUI codebase. Advisory until the failure
+  # count drops to zero.
+  backend-full:
+    name: Backend tests (full, advisory)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          cache: 'pip'
+          cache-dependency-path: pyproject.toml
+
+      - name: Install Python deps
+        env:
+          HATCH_BUILD_NO_HOOKS: 'true'
+        run: |
+          mkdir -p build backend/data
+          python -m venv .venv
+          .venv/bin/pip install --upgrade pip
+          .venv/bin/pip install -e '.[dev]'
+          .venv/bin/pip install 'pytest-asyncio>=1.0.0' 'pytest-xdist>=3.0.0'
+
+      - name: Run full backend test suite
+        run: |
+          .venv/bin/pytest backend/myah/test/ \
+            -q -n 4 --continue-on-collection-errors --tb=no || true
+          echo
+          echo "Advisory job — the test report above is for visibility only."
+          echo "Promote to required once the failure count drops to zero."
+
+  # ── ADVISORY: frontend-check ──────────────────────────────────────────────
+  #
+  # svelte-check + tsconfig. Inherited Open WebUI codebase has ~3900 type
+  # errors. Advisory while we work the error count down.
+  frontend-check:
+    name: Frontend svelte-check (advisory)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: package-lock.json
+
+      - name: Install npm deps
+        run: npm ci --ignore-scripts
+
+      - name: svelte-check
+        run: npm run check
+
+  # ── ADVISORY: frontend-lint ───────────────────────────────────────────────
+  #
+  # ESLint. Known to crash on some .svelte files in the inherited OWUI tree.
+  # Advisory until the crashes are diagnosed + fixed.
+  frontend-lint:
+    name: Frontend ESLint (advisory)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: package-lock.json
+
+      - name: Install npm deps
+        run: npm ci --ignore-scripts
+
+      - name: ESLint
+        run: npx eslint .
