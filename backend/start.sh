@@ -53,6 +53,11 @@ if test "$MYAH_SECRET_KEY $WEBUI_SECRET_KEY $WEBUI_JWT_SECRET_KEY" = "  "; then
   MYAH_SECRET_KEY=$(cat "$KEY_FILE")
   # Legacy back-compat: code that bypasses env.py still reads WEBUI_SECRET_KEY.
   WEBUI_SECRET_KEY="$MYAH_SECRET_KEY"
+  # Export so the uvicorn process inherits these without needing the
+  # inline `VAR=VAL exec` syntax (which would convert unset → empty
+  # string for any unset secret var and break env.py's _env() fallback
+  # logic — see the comment near the bottom of this script).
+  export MYAH_SECRET_KEY WEBUI_SECRET_KEY
 fi
 
 if [[ "${USE_OLLAMA_DOCKER,,}" == "true" ]]; then
@@ -70,7 +75,9 @@ if [ -n "$SPACE_ID" ]; then
   echo "Configuring for HuggingFace Space deployment"
   if [ -n "$ADMIN_USER_EMAIL" ] && [ -n "$ADMIN_USER_PASSWORD" ]; then
     echo "Admin user configured, creating"
-    MYAH_SECRET_KEY="$MYAH_SECRET_KEY" WEBUI_SECRET_KEY="$WEBUI_SECRET_KEY" uvicorn myah.main:app --host "$HOST" --port "$PORT" --forwarded-allow-ips "${FORWARDED_ALLOW_IPS:-*}" &
+    # See the comment block at the bottom of this script for why we
+    # don't use `VAR=VAL uvicorn ...` here.
+    uvicorn myah.main:app --host "$HOST" --port "$PORT" --forwarded-allow-ips "${FORWARDED_ALLOW_IPS:-*}" &
     myah_pid=$!
     echo "Waiting for Myah to start..."
     while ! curl -s "http://localhost:${PORT}/health" > /dev/null; do
@@ -99,8 +106,21 @@ else
     ARGS=(--workers "$UVICORN_WORKERS")
 fi
 
-# Run uvicorn
-MYAH_SECRET_KEY="$MYAH_SECRET_KEY" WEBUI_SECRET_KEY="$WEBUI_SECRET_KEY" exec "$PYTHON_CMD" -m uvicorn myah.main:app \
+# Run uvicorn.
+#
+# CRITICAL: do NOT use inline `VAR=VAL exec ...` to forward MYAH_SECRET_KEY
+# or WEBUI_SECRET_KEY. Bash converts unset → empty string in that syntax,
+# which arrives in Python's os.environ as a SET-BUT-EMPTY var. env.py's
+# _env() checks `if val is not None` (not truthiness), so it returns the
+# empty string instead of falling through to the legacy WEBUI_SECRET_KEY
+# alias. Deployments that only set WEBUI_SECRET_KEY in their .env file
+# would then crash on the `WEBUI_AUTH and WEBUI_SECRET_KEY == ''` gate.
+#
+# Instead: rely on `--env-file` (or `env_file:` in docker-compose) to set
+# both names in the container env, plus the explicit `export` in the
+# file-load branch above. Both paths produce a clean os.environ where
+# only-WEBUI or both-set work identically.
+exec "$PYTHON_CMD" -m uvicorn myah.main:app \
     --host "$HOST" \
     --port "$PORT" \
     --forwarded-allow-ips "${FORWARDED_ALLOW_IPS:-*}" \
