@@ -1,0 +1,21 @@
+{
+  "hermes_aux_tasks": [
+    "follow_up_generation",
+    "title_generation"
+  ],
+  "hermes_event_types": [
+    "message.delta",
+    "reasoning.available",
+    "reasoning.delta",
+    "run.cancelled",
+    "run.completed",
+    "run.failed",
+    "secret.required",
+    "secret.resolved",
+    "status",
+    "tool.completed",
+    "tool.confirmation_required",
+    "tool.started"
+  ],
+  "platform_enums": []
+}

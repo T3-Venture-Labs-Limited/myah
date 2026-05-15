@@ -1,0 +1,114 @@
+<script lang="ts">
+	import { getContext } from 'svelte';
+	import { env } from '$env/dynamic/public';
+	import { MYAH_NAME, showSidebar, mobile } from '$lib/stores';
+	import { page } from '$app/stores';
+	import Tooltip from '$lib/components/common/Tooltip.svelte';
+	import Sidebar from '$lib/components/icons/Sidebar.svelte';
+
+	const i18n = getContext('i18n');
+
+	// OSS-split: Memory + Integrations tabs are hosted-only (honcho + composio
+	// backed). Hide them when the deployment is in OSS mode. Set the
+	// PUBLIC_DEPLOYMENT_MODE env var to 'oss' at build/runtime.
+	const isOss = env.PUBLIC_DEPLOYMENT_MODE === 'oss';
+</script>
+
+<svelte:head>
+	<title>
+		{$i18n.t('Agent')} • {$MYAH_NAME}
+	</title>
+</svelte:head>
+
+<div
+	class=" flex flex-col w-full h-screen max-h-[100dvh] transition-width duration-200 ease-in-out {$showSidebar
+		? 'md:max-w-[calc(100%-var(--sidebar-width))]'
+		: ''} max-w-full"
+>
+	<nav class=" px-2.5 pt-1.5 backdrop-blur-xl w-full drag-region select-none">
+		<div class=" flex items-center">
+			{#if $mobile}
+				<div class="{$showSidebar ? 'md:hidden' : ''} flex flex-none items-center self-end">
+					<Tooltip
+						content={$showSidebar ? $i18n.t('Close Sidebar') : $i18n.t('Open Sidebar')}
+						interactive={true}
+					>
+						<button
+							id="sidebar-toggle-button"
+							class=" cursor-pointer flex rounded-lg hover:bg-gray-100 dark:hover:bg-gray-850 transition cursor-"
+							on:click={() => {
+								showSidebar.set(!$showSidebar);
+							}}
+						>
+							<div class=" self-center p-1.5">
+								<Sidebar />
+							</div>
+						</button>
+					</Tooltip>
+				</div>
+			{/if}
+
+			<div class=" flex w-full">
+				<div
+					class="flex gap-1 scrollbar-none overflow-x-auto w-fit text-center text-sm font-medium rounded-full bg-transparent pt-1"
+				>
+					<a
+						draggable="false"
+						class="min-w-fit p-1.5 {$page.url.pathname.includes('/agent/skills')
+							? ''
+							: 'text-gray-300 dark:text-gray-600 hover:text-gray-700 dark:hover:text-white'} transition select-none"
+						href="/agent/skills"
+					>
+						{$i18n.t('Skills')}
+					</a>
+
+<a
+					draggable="false"
+					class="min-w-fit p-1.5 {$page.url.pathname.includes('/agent/tools')
+						? ''
+						: 'text-gray-300 dark:text-gray-600 hover:text-gray-700 dark:hover:text-white'} transition select-none"
+					href="/agent/tools"
+				>
+					{$i18n.t('Tools')}
+				</a>
+
+				{#if !isOss}
+					<a
+						draggable="false"
+						class="min-w-fit p-1.5 {$page.url.pathname.includes('/agent/integrations')
+							? ''
+							: 'text-gray-300 dark:text-gray-600 hover:text-gray-700 dark:hover:text-white'} transition select-none"
+						href="/agent/integrations"
+					>
+						{$i18n.t('Integrations')}
+					</a>
+
+					<a
+						draggable="false"
+						class="min-w-fit p-1.5 {$page.url.pathname.includes('/agent/memory')
+							? ''
+							: 'text-gray-300 dark:text-gray-600 hover:text-gray-700 dark:hover:text-white'} transition select-none"
+						href="/agent/memory"
+					>
+						{$i18n.t('Memory')}
+					</a>
+				{/if}
+
+					<a
+						draggable="false"
+						class="min-w-fit p-1.5 {$page.url.pathname.includes('/agent/settings')
+							? ''
+							: 'text-gray-300 dark:text-gray-600 hover:text-gray-700 dark:hover:text-white'} transition select-none"
+						href="/agent/settings"
+					>
+						{$i18n.t('Agent')}
+					</a>
+				</div>
+			</div>
+		</div>
+	</nav>
+
+	<div class=" flex-1 max-h-full overflow-y-auto">
+		<slot />
+	</div>
+</div>

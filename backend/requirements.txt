@@ -1,0 +1,77 @@
+fastapi==0.135.1
+uvicorn[standard]==0.41.0
+pydantic==2.12.5
+python-multipart==0.0.22
+itsdangerous==2.2.0
+
+python-socketio==5.16.1
+python-jose==3.5.0
+cryptography==46.0.5
+bcrypt==5.0.0
+argon2-cffi==25.1.0
+PyJWT[crypto]==2.11.0
+authlib==1.6.9
+
+requests==2.32.5
+aiohttp==3.13.2 # do not update to 3.13.3 - broken
+async-timeout==5.0.1
+aiocache==0.12.3
+starlette-compress==1.7.0
+Brotli==1.1.0
+httpx[socks,http2,zstd,cli,brotli]==0.28.1
+# honcho-ai moved to platform-hosted/ — hosted-only memory backend
+starsessions[redis]==2.2.1
+python-mimeparse==2.0.0
+python-magic>=0.4
+
+sqlalchemy==2.0.48
+alembic==1.18.4
+peewee==3.19.0
+peewee-migrate==1.14.3
+
+pycrdt==0.12.47
+redis==7.4.0
+
+pytz==2026.1.post1
+
+loguru==0.7.3
+asgiref==3.11.1
+docker~=7.1.0
+
+# Backs the `myah` CLI entrypoint (myah/__init__.py imports typer
+# at module top). Previously transitive via chromadb/transformers — both
+# dropped in T3-992, which removed typer from the image and crash-looped
+# prod (PR #33).
+typer>=0.12.0
+
+mcp==1.26.0
+ag-ui-protocol~=0.1
+
+Markdown==3.10.2
+
+boto3==1.42.62
+
+black==26.1.0
+
+googleapis-common-protos==1.72.0
+google-cloud-storage==3.9.0
+
+azure-identity==1.25.2
+azure-storage-blob==12.28.0
+
+# sentry-sdk stays in OSS per audit §4.4 — gated on SENTRY_DSN_PLATFORM env;
+# init is a no-op when DSN unset.
+sentry-sdk[fastapi]>=2.57.0
+
+# OpenTelemetry core APIs stay in OSS — shared modules do top-level
+# `from opentelemetry import trace`. Hosted-only exporters + instrumentors
+# moved to platform-hosted/pyproject.toml.
+opentelemetry-api>=1.41.0
+opentelemetry-sdk>=1.41.0
+
+# composio + opentelemetry-instrumentation-* + opentelemetry-exporter-*
+# moved to platform-hosted/ — hosted-only third-party integrations + obs.
+
+## Tests
+pytest~=8.3.2
+pytest-docker~=3.2.5
