@@ -1,0 +1,123 @@
+# Myah OSS — single-tenant docker-compose for self-hosted installs.
+#
+# This is the OSS-canonical compose file. It ships at the root of the
+# public T3-Venture-Labs-Limited/myah repo (via the platform-oss/ →
+# repo-root subtree extraction). Hosted's parallel root-level
+# docker-compose.yml exists for hosted-side development convenience —
+# the two files differ only in their build context (this one uses
+# ``.`` because we're already inside ``platform-oss/``; hosted's uses
+# ``platform-oss`` because we're one level above).
+#
+# Bring-your-own-Hermes constraint: this stack does NOT bundle the
+# Hermes agent. The user installs Hermes on the host:
+#
+#   curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh | bash
+#   hermes plugins install T3-Venture-Labs-Limited/myah-hermes-plugin
+#   ./scripts/setup-myah-oss.sh          # generates secrets in BOTH .envs
+#                                        # and enables the myah platform
+#                                        # in ~/.hermes/config.yaml
+#   hermes gateway run                   # or `gateway install && gateway start`
+#
+# Then bring up this stack:
+#
+#   docker compose up -d
+#   open http://localhost:8080
+#
+# Architecture (single-user, no per-user agent containers):
+#
+#       ┌──────────┐         ┌────────────┐         ┌──────────────┐
+#       │ browser  │ ◀────▶  │  platform  │ ◀────▶  │ hermes (host) │
+#       │  :8080   │         │   :8080    │         │   :8642 api  │
+#       │          │         │ (container)│         │   :8643 myah │
+#       └──────────┘         └────────────┘         │   :9119 web │
+#                                ▲                  └──────────────┘
+#                                │
+#                            host.docker.internal
+#                            (or 172.17.0.1 on Linux without Docker Desktop)
+#
+# OSS mode is selected via MYAH_DEPLOYMENT_MODE=oss below. The platform
+# skips per-user-container spawning and routes every chat/admin/proxy
+# call to the single host-side hermes gateway.
+
+services:
+  platform:
+    # Locally-built image. ``myah/platform:latest`` is a convention,
+    # not a registry tag — compose checks for it on the local daemon
+    # first, then builds via the ``build:`` block below. Override via
+    # ``MYAH_PLATFORM_IMAGE=ghcr.io/your-org/myah:v0.1.0`` to use a
+    # pre-published image instead.
+    image: ${MYAH_PLATFORM_IMAGE:-myah/platform:latest}
+    build:
+      # OSS root IS platform-oss/'s content (per subtree extraction),
+      # so the build context is the directory next to this file.
+      context: .
+      dockerfile: Dockerfile
+    container_name: myah-platform
+    ports:
+      # Bind to 127.0.0.1 only — prevents accidental LAN exposure on
+      # multi-machine networks. To expose to the LAN, change to
+      # ``0.0.0.0:8080:8080`` AND re-enable auth by setting
+      # MYAH_AUTH=true (also strongly recommended: rotate
+      # MYAH_SECRET_KEY via ``./scripts/setup-myah-oss.sh --rotate``).
+      - '127.0.0.1:8080:8080'
+    volumes:
+      - platform_data:/app/backend/data
+    env_file: .env
+    environment:
+      # ── OSS-mode invariants — never override in .env ─────────────
+      # MYAH_DEPLOYMENT_MODE=oss tells the backend to skip per-user
+      # container spawning. is_oss_mode() in
+      # backend/myah/utils/hermes_web.py reads this. Setting this
+      # in the compose ``environment:`` block (rather than via .env)
+      # makes it a hard contract — even if the user deletes their
+      # .env, OSS mode stays on.
+      MYAH_DEPLOYMENT_MODE: oss
+      # Single-user OSS — no login screen, no sign-up. The
+      # oss_seed_user Alembic migration inserts the anonymous admin
+      # on first boot. The hardcoded ``false`` here defends against
+      # an accidental MYAH_AUTH=true in .env from re-enabling the
+      # hosted-style multi-user auth path.
+      MYAH_AUTH: 'false'
+      # Hermes-side port wiring. Defaults match the canonical
+      # ``hermes gateway run`` layout:
+      #   8642 — Hermes core api_server (/v1/runs, /health, /api/jobs)
+      #   8643 — Myah plugin standalone runner (/myah/health, /myah/v1/*)
+      #   9119 — ``hermes dashboard`` (web UI — separate process)
+      # Override only if you ran hermes on non-default ports.
+      MYAH_HERMES_CHAT_PORT: ${MYAH_HERMES_CHAT_PORT:-8642}
+      # NOTE: this variable is being renamed to MYAH_GATEWAY_PORT to
+      # match the plugin side. The old name stays as a back-compat
+      # alias — see backend/myah/routers/oss.py for the resolution
+      # order.
+      MYAH_HERMES_GATEWAY_PORT: ${MYAH_HERMES_GATEWAY_PORT:-${MYAH_GATEWAY_PORT:-8643}}
+      MYAH_HERMES_WEB_PORT: ${MYAH_HERMES_WEB_PORT:-9119}
+      # _detect_agent_host() in hermes_web.py falls back to
+      # ``localhost`` on misconfigured Linux. Setting host.docker.internal
+      # explicitly + the extra_hosts entry below covers Linux properly.
+      MYAH_AGENT_HOST: host.docker.internal
+    extra_hosts:
+      # Linux compatibility. Docker Desktop sets this automatically on
+      # macOS and Windows. On native Linux the host's bridge gateway
+      # (typically 172.17.0.1) is exposed under the ``host-gateway``
+      # alias and bound to the host.docker.internal hostname so the
+      # platform container can reach the host-side hermes gateway.
+      - 'host.docker.internal:host-gateway'
+    restart: unless-stopped
+    healthcheck:
+      test: ['CMD', 'wget', '--quiet', '--tries=1', '--spider', 'http://localhost:8080/health']
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      # Generous start_period: first boot runs Alembic migrations
+      # (including oss_seed_user) and that can take 30-40s on slow
+      # SD-card-backed VMs.
+      start_period: 90s
+
+volumes:
+  # SQLite database, uploaded files, and cached configs. Survives
+  # container restarts and image upgrades. Back up with:
+  #   docker run --rm \
+  #     -v myah_platform_data:/data \
+  #     -v "$PWD":/backup busybox \
+  #     tar czf /backup/myah-backup.tar.gz -C /data .
+  platform_data:

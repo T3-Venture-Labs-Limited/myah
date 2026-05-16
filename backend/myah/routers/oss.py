@@ -51,38 +51,44 @@ def _http_get(url: str, **kwargs: Any) -> httpx.Response:
 
 
 def _hermes_url() -> str:
-    """Resolve the host-side hermes gateway URL from env.
+    """Resolve the host-side hermes **api_server** URL from env.
 
     Defaults to ``host.docker.internal:8642`` — works on Mac/Windows out
     of the box, and on Linux via the ``extra_hosts`` mapping in
-    docker-compose.yml. This is the **api server** port (chat
-    completions + ``/myah/health``), NOT the gateway adapter port —
-    see ``_hermes_gateway_url`` for the latter.
+    docker-compose.yml. This is the api server port (chat completions,
+    /health, /v1/runs), NOT the plugin's standalone runner — see
+    ``_hermes_gateway_url`` for the latter.
     """
+    from myah.utils.hermes_web import _oss_chat_port  # local: avoid cycle
+
     host = os.environ.get('MYAH_AGENT_HOST', 'host.docker.internal').strip()
-    port = os.environ.get('MYAH_HERMES_CHAT_PORT', '8642').strip() or '8642'
-    return f'http://{host}:{port}'
+    return f'http://{host}:{_oss_chat_port()}'
 
 
 def _hermes_gateway_url() -> str:
-    """Resolve the host-side hermes **gateway adapter** URL.
+    """Resolve the host-side **Myah plugin** URL.
 
-    The runtime-admin surface (``/myah/v1/admin/*``) is mounted on the
-    standalone gateway runner port (default 8643), NOT on the api
-    server port (8642). The probe asks this surface for
-    ``providers_configured`` because it's the only Myah endpoint that
-    exposes per-provider ``has_credential`` status against the user's
-    ``~/.hermes/.env`` + ``auth.json`` without a dashboard session
-    token — D5 in docs/oss-launch/vm-testing-followups.md.
+    All ``/myah/*`` routes — including ``/myah/health`` and the
+    runtime-admin surface ``/myah/v1/admin/*`` — are mounted on the
+    plugin's standalone aiohttp runner (default port 8643, per
+    plugin's ``standalone_runner.py``). The api_server adapter on port
+    8642 does NOT serve any ``/myah/*`` routes and silently 404s every
+    probe.
 
     Auth: the runtime-admin endpoints accept the standard
-    ``MYAH_AGENT_BEARER_TOKEN`` (the same shared secret the platform
-    uses for every other agent call) — see ``utils/hermes_web.py``
-    ``fetch_hermes_provider_catalog``.
+    ``MYAH_AGENT_BEARER_TOKEN`` Bearer token (the same shared secret
+    the platform uses for every other agent call) — see
+    ``utils/hermes_web.py:fetch_hermes_provider_catalog``.
+
+    Port env resolution goes through ``_oss_gateway_port`` so the
+    canonical ``MYAH_GATEWAY_PORT`` and the deprecated
+    ``MYAH_HERMES_GATEWAY_PORT`` are both honoured consistently
+    across every site that needs this URL.
     """
+    from myah.utils.hermes_web import _oss_gateway_port  # local: avoid cycle
+
     host = os.environ.get('MYAH_AGENT_HOST', 'host.docker.internal').strip()
-    port = os.environ.get('MYAH_HERMES_GATEWAY_PORT', '8643').strip() or '8643'
-    return f'http://{host}:{port}'
+    return f'http://{host}:{_oss_gateway_port()}'
 
 
 def _adapter_bearer() -> str:
@@ -168,11 +174,18 @@ def probe() -> dict[str, Any]:
         # "down" so the user gets the blocking error, not a wedge.
         return result
 
-    # 2. Plugin /myah/health — verified at
-    # myah-hermes-plugin/myah_hermes_plugin/myah_platform/adapter.py per
-    # spec review H-1. NOT /myah/v1/admin/health.
+    # 2. Plugin /myah/health
+    #
+    # The /myah/* routes are mounted on the plugin's standalone aiohttp
+    # runner (port 8643 by default — see myah_platform/standalone_runner.py
+    # in the plugin). The api_server adapter on port 8642 does NOT serve
+    # /myah/* and will silently 404 every probe — that bug (D5-followup)
+    # ran for weeks in earlier preflights because the probe failed without
+    # ever surfacing the wrong-port mismatch. Always use the gateway URL
+    # for plugin endpoints.
+    plugin_health_url = _hermes_gateway_url()
     try:
-        r = _http_get(f'{hermes_url}/myah/health')
+        r = _http_get(f'{plugin_health_url}/myah/health')
         if r.status_code == 200:
             result['plugin_installed'] = True
             try:
@@ -268,13 +281,17 @@ def diagnostics() -> dict[str, Any]:
         whether they're localhost-only.
       * oss_version: the running OSS version (matches the GHCR image tag).
     """
+    from myah.utils.hermes_web import _oss_chat_port, _oss_gateway_port, _oss_web_port
+
     probe_result = probe()
     return {
         **probe_result,
         'agent_ports': {
-            'gateway': _int_env('MYAH_HERMES_CHAT_PORT', 8642),
-            'standalone': _int_env('MYAH_HERMES_GATEWAY_PORT', 8643),
-            'web': _int_env('MYAH_HERMES_WEB_PORT', 9119),
+            'gateway': _oss_chat_port(),
+            # Resolved via _oss_gateway_port so MYAH_GATEWAY_PORT and the
+            # deprecated MYAH_HERMES_GATEWAY_PORT both take effect here.
+            'standalone': _oss_gateway_port(),
+            'web': _oss_web_port(),
         },
         'platform_port_binding': '127.0.0.1:8080',
         'oss_version': os.environ.get('MYAH_OSS_VERSION', '0.1.0-beta.1'),
