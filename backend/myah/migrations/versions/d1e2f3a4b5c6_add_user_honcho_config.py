@@ -7,8 +7,18 @@ Create Date: 2026-03-30 00:00:00.000000
 Merges the agent-capabilities+vite-port branch (53bce1ae0c21) with the
 skill-table branch (a1b2c3d4e5f6) and adds the user_honcho_config table
 for per-user Honcho workspace isolation.
+
+The Honcho integration is **hosted-only** (Phase D anti-SaaS surgical
+removal). OSS users never read or write this table — Honcho memory is
+gated by ``utils/hermes_web.is_oss_mode()`` in
+``models/user_honcho_config.py`` and ``services/honcho.py`` only
+exists in hosted's overlay. Creating the table in OSS DBs ships a dead
+structure that confuses self-host operators who poke their SQLite file
+and ask "why is there a honcho table I never enabled?". Guard the
+``upgrade()`` body so OSS installs skip it.
 """
 
+import os
 from typing import Sequence, Union
 
 from alembic import op
@@ -22,7 +32,18 @@ branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
 
+def _is_oss_mode() -> bool:
+    """Direct-env check — mirrors ``utils/hermes_web.is_oss_mode`` but
+    doesn't import myah modules at migration time (alembic runs in a
+    context where some imports may not yet be available)."""
+    return os.environ.get('MYAH_DEPLOYMENT_MODE', '').strip().lower() == 'oss'
+
+
 def upgrade() -> None:
+    if _is_oss_mode():
+        # OSS doesn't ship the honcho service module; the table would be
+        # write-never. Skip cleanly so self-host SQLite stays minimal.
+        return
     existing = get_existing_tables()
     if 'user_honcho_config' not in existing:
         op.create_table(
@@ -39,4 +60,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    if _is_oss_mode():
+        # Symmetrical with upgrade() — OSS never created the table.
+        return
     op.drop_table('user_honcho_config')

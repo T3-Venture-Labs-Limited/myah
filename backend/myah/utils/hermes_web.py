@@ -56,13 +56,40 @@ def _oss_chat_port() -> int:
 
 
 def _oss_gateway_port() -> int:
-    """OSS host-side gateway adapter port (defaults to upstream's 8643)."""
-    raw = os.environ.get('MYAH_HERMES_GATEWAY_PORT', '8643').strip() or '8643'
+    """OSS host-side gateway adapter port (defaults to upstream's 8643).
+
+    Resolution order:
+      1. ``MYAH_GATEWAY_PORT``           — canonical, matches the plugin's
+         ``standalone_runner.py:resolve_default_port`` env-var name so a
+         single override at the host level affects both processes.
+      2. ``MYAH_HERMES_GATEWAY_PORT``    — deprecated alias kept for back-
+         compat with .env files written by earlier setup scripts. Reading
+         it logs a one-line deprecation warning.
+      3. ``8643`` — upstream default.
+
+    Aligning the names removes a class of "platform probes 8643 because
+    MYAH_GATEWAY_PORT, plugin binds 8643 because of its own default, but
+    user override of MYAH_HERMES_GATEWAY_PORT only moves the platform"
+    silent-misconfig bug.
+    """
+    canonical = os.environ.get('MYAH_GATEWAY_PORT', '').strip()
+    if canonical:
+        raw = canonical
+    else:
+        legacy = os.environ.get('MYAH_HERMES_GATEWAY_PORT', '').strip()
+        if legacy:
+            logger.warning(
+                'MYAH_HERMES_GATEWAY_PORT is deprecated; rename to '
+                'MYAH_GATEWAY_PORT (same value, same default 8643).'
+            )
+            raw = legacy
+        else:
+            raw = '8643'
     try:
         return int(raw)
     except ValueError:
         logger.warning(
-            f'MYAH_HERMES_GATEWAY_PORT={raw!r} is not an integer; falling back to 8643'
+            f'gateway port env value {raw!r} is not an integer; falling back to 8643'
         )
         return 8643
 

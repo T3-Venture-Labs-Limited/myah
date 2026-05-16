@@ -283,4 +283,40 @@ class OAuthSessionTable:
             return False
 
 
-OAuthSessions = OAuthSessionTable()
+class _LazyOAuthSessions:
+    """Defer ``OAuthSessionTable()`` construction until first attribute access.
+
+    Previously this module ended with ``OAuthSessions = OAuthSessionTable()``,
+    which raised at import time if ``OAUTH_SESSION_TOKEN_ENCRYPTION_KEY``
+    wasn't in the environment. A misconfigured OSS install (no setup script
+    run, ``.env`` left empty) crashed the entire FastAPI app boot with a
+    Fernet-key error long before any OAuth route was hit — and the
+    traceback didn't make it obvious that running
+    ``./scripts/setup-myah-oss.sh`` was the fix.
+
+    Lazy construction means the import is safe; the actionable error
+    surfaces only when an OAuth path is actually traversed (e.g. a user
+    clicks "Connect with Google"), with the same message as before. For
+    OSS users who never touch OAuth, the missing-key error never fires
+    at all.
+
+    All existing call sites — ``OAuthSessions.create_session(...)``,
+    ``OAuthSessions.get_active_session(...)``, etc. — work unchanged
+    because ``__getattr__`` forwards every attribute lookup to the real
+    table after a one-time construction.
+    """
+
+    _instance = None  # type: ignore[var-annotated]
+
+    def _ensure(self) -> OAuthSessionTable:
+        if self._instance is None:
+            self._instance = OAuthSessionTable()
+        return self._instance
+
+    def __getattr__(self, name: str):
+        # __getattr__ only fires on misses, so _ensure / _instance / __init__
+        # don't recurse here — they resolve via normal attribute lookup.
+        return getattr(self._ensure(), name)
+
+
+OAuthSessions = _LazyOAuthSessions()
