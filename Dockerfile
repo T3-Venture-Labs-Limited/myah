@@ -14,6 +14,14 @@ ARG BUILD_HASH
 # SvelteKit's $env/dynamic/public (adapter-static resolves at build time).
 ARG PUBLIC_SENTRY_DSN=""
 
+# Deployment mode (oss | hosted). Baked into the frontend bundle at build
+# time via SvelteKit's $env/dynamic/public. Without this, the +layout.svelte
+# isOss gate ($env.PUBLIC_DEPLOYMENT_MODE === 'oss') is always false and
+# the OSS welcome / probe / DashboardDownError state machine never runs.
+# Defaults to "oss" because this Dockerfile produces the OSS image
+# (myah/platform); platform-hosted/Dockerfile is the hosted overlay.
+ARG PUBLIC_DEPLOYMENT_MODE="oss"
+
 # Set Node.js options (heap limit Allocation failed - JavaScript heap out of memory)
 ENV NODE_OPTIONS="--max-old-space-size=4096"
 
@@ -28,6 +36,7 @@ RUN npm ci --force
 COPY . .
 ENV APP_BUILD_HASH=${BUILD_HASH}
 ENV PUBLIC_SENTRY_DSN=${PUBLIC_SENTRY_DSN}
+ENV PUBLIC_DEPLOYMENT_MODE=${PUBLIC_DEPLOYMENT_MODE}
 RUN npm run build
 
 ######## Myah backend ########

@@ -113,6 +113,69 @@ gen_key() {
   openssl rand -hex 32
 }
 
+# Return "free" if the loopback TCP port is available, "in-use" otherwise.
+# Uses /dev/tcp (bash built-in) so we don't depend on netcat/ss.
+probe_loopback_port() {
+  local port="$1"
+  if (timeout 1 bash -c "</dev/tcp/127.0.0.1/$port") 2>/dev/null; then
+    echo "in-use"
+  else
+    echo "free"
+  fi
+}
+
+# Locate the Python venv hermes-agent installed itself into. Returns
+# the venv root path on stdout, or exits 1 with a clear error message.
+#
+# Override via MYAH_HERMES_VENV env var — used by CI (and other automated
+# environments that don't follow Hermes's canonical install locations).
+# The override skips all candidate detection and trusts the caller.
+detect_hermes_venv() {
+  if [[ -n "${MYAH_HERMES_VENV:-}" ]]; then
+    if [[ -x "$MYAH_HERMES_VENV/bin/python" ]]; then
+      echo "$MYAH_HERMES_VENV"
+      return 0
+    fi
+    echo "✗ MYAH_HERMES_VENV=$MYAH_HERMES_VENV is set but $MYAH_HERMES_VENV/bin/python is not executable" >&2
+    return 1
+  fi
+  # Resolution order matches how Hermes's own installer creates them.
+  local candidates=(
+    "$HOME/.hermes/hermes-agent/venv"            # per-user install (default)
+    "/usr/local/lib/hermes-agent/venv"           # system install
+    "/opt/hermes-agent/venv"                     # Homebrew tap install
+  )
+  local candidate
+  for candidate in "${candidates[@]}"; do
+    if [[ -x "$candidate/bin/python" ]]; then
+      echo "$candidate"
+      return 0
+    fi
+  done
+
+  # Last resort: resolve the venv from the `hermes` binary's shebang.
+  if command -v hermes >/dev/null 2>&1; then
+    local hermes_bin
+    hermes_bin="$(command -v hermes)"
+    local shebang
+    shebang="$(head -n1 "$hermes_bin" 2>/dev/null || true)"
+    if [[ "$shebang" =~ ^#!(.+/python[0-9.]*)$ ]]; then
+      local python_path="${BASH_REMATCH[1]}"
+      local venv_root
+      venv_root="$(dirname "$(dirname "$python_path")")"
+      if [[ -x "$venv_root/bin/python" ]]; then
+        echo "$venv_root"
+        return 0
+      fi
+    fi
+  fi
+
+  echo "✗ Could not locate hermes-agent venv. Looked in:" >&2
+  printf '    %s\n' "${candidates[@]}" >&2
+  echo "  Make sure hermes is installed; see https://hermes-agent.nousresearch.com/docs/installation" >&2
+  return 1
+}
+
 # Ensure platform .env exists (copy from .env.example if not)
 if [[ ! -f "$PLATFORM_ENV" ]]; then
   if [[ -f "$ROOT/.env.example" ]]; then
@@ -166,6 +229,19 @@ set_var "$HERMES_ENV"   API_SERVER_KEY          "$TOKEN"
 # /v1/runs, /health, etc. — opt-in per gateway/config.py:1472-1494.
 [[ -n "$(get_var "$HERMES_ENV" API_SERVER_ENABLED)" ]] || \
   set_var "$HERMES_ENV" API_SERVER_ENABLED true
+
+# Bind the api_server to 0.0.0.0 so the platform docker container can
+# reach it via host.docker.internal:host-gateway (which resolves to the
+# host bridge IP, e.g. 172.17.0.1 — a service bound only to 127.0.0.1
+# on the host is unreachable from the container).
+#
+# Same LAN-exposure trade-off as the dashboard's --host 0.0.0.0; see
+# docs/gotchas/2026-05-17-oss-dashboard-lan-exposure.md. The api_server
+# is bearer-token gated by API_SERVER_KEY (which equals
+# MYAH_AGENT_BEARER_TOKEN, written above), so LAN attackers can't reach
+# /v1/runs without the secret.
+[[ -n "$(get_var "$HERMES_ENV" API_SERVER_HOST)" ]] || \
+  set_var "$HERMES_ENV" API_SERVER_HOST 0.0.0.0
 
 # Plugin needs to know where to call the platform back from (cron
 # delivery, attachment fetch). Default to host.docker.internal:8080
@@ -228,7 +304,125 @@ else
   echo "✓ MYAH_SECRET_KEY: generated"
 fi
 
-# ─── 4. Hermes config.yaml — enable the Myah platform ────────────────
+# ─── 4. HERMES_WEB_SESSION_TOKEN — dashboard auth ────────────────────
+#
+# The platform talks to `hermes dashboard` (port 9119 by default — see
+# platform-oss/backend/myah/utils/hermes_web.py:97) for provider, toolset,
+# and model catalog reads and for every Add/Remove/OAuth write. The
+# dashboard requires Bearer auth via HERMES_WEB_SESSION_TOKEN.
+#
+# Two env-var names hold the same value:
+#   - HERMES_WEB_SESSION_TOKEN       in ~/.hermes/.env (read by hermes
+#                                    dashboard at startup)
+#   - MYAH_HERMES_WEB_SESSION_TOKEN  in ./.env (read by the platform
+#                                    via _oss_web_session_token() in
+#                                    hermes_web.py:109)
+#
+# Token desync = 401 from every catalog read. We always set both at the
+# same value so the welcome screen never reports false dashboard-down.
+
+PLATFORM_WEB_TOKEN="$(get_var "$PLATFORM_ENV" MYAH_HERMES_WEB_SESSION_TOKEN)"
+HERMES_WEB_TOKEN="$(get_var "$HERMES_ENV" HERMES_WEB_SESSION_TOKEN)"
+WEB_TOKEN=""
+
+if [[ "$ROTATE" == 1 ]]; then
+  WEB_TOKEN=""
+  # Will hit the "generated" branch below.
+elif [[ -n "$PLATFORM_WEB_TOKEN" \
+     && "$PLATFORM_WEB_TOKEN" == "$HERMES_WEB_TOKEN" ]]; then
+  WEB_TOKEN="$PLATFORM_WEB_TOKEN"
+  echo "✓ HERMES_WEB_SESSION_TOKEN: already aligned across both .env files"
+elif [[ -n "$PLATFORM_WEB_TOKEN" && -n "$HERMES_WEB_TOKEN" ]]; then
+  # Both sides set but different — desync. Adopt platform value (it's
+  # the one the docker container reads at boot via MYAH_HERMES_WEB_SESSION_TOKEN)
+  # so the running platform stays valid; ~/.hermes/.env rewrites below.
+  WEB_TOKEN="$PLATFORM_WEB_TOKEN"
+  echo "⚠ HERMES_WEB_SESSION_TOKEN: desync detected — realigning ~/.hermes/.env to platform value"
+elif [[ -n "$PLATFORM_WEB_TOKEN" ]]; then
+  # Platform set, hermes empty — common after fresh hermes install.
+  WEB_TOKEN="$PLATFORM_WEB_TOKEN"
+  echo "✓ HERMES_WEB_SESSION_TOKEN: copying existing platform value to ~/.hermes/.env"
+elif [[ -n "$HERMES_WEB_TOKEN" ]]; then
+  # Hermes set, platform empty — fresh platform repo.
+  WEB_TOKEN="$HERMES_WEB_TOKEN"
+  echo "✓ HERMES_WEB_SESSION_TOKEN: copying existing hermes value to platform .env"
+fi
+
+if [[ -z "$WEB_TOKEN" ]]; then
+  WEB_TOKEN="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
+  echo "✓ HERMES_WEB_SESSION_TOKEN: generated (length=${#WEB_TOKEN})"
+fi
+
+set_var "$PLATFORM_ENV" MYAH_HERMES_WEB_SESSION_TOKEN "$WEB_TOKEN"
+set_var "$HERMES_ENV"   HERMES_WEB_SESSION_TOKEN       "$WEB_TOKEN"
+
+# ─── 5. Pip-install myah-hermes-plugin into Hermes's venv ────────────
+#
+# The platform calls `hermes dashboard` (a second Hermes process) for
+# provider catalog + Add/Remove/OAuth flows. That dashboard process needs
+# to import myah_hermes_plugin.myah_admin.dashboard.plugin_api at runtime,
+# which is only on sys.path if the plugin is installed in Hermes's venv.
+# `hermes plugins install` materializes the gateway-side plugin but does
+# NOT pip-install the package — that's why this step exists.
+
+HERMES_VENV="$(detect_hermes_venv)" || exit 1
+HERMES_PY="$HERMES_VENV/bin/python"
+
+# Hermes is typically installed via uv (or a uv-style installer) which
+# DOES NOT include pip in the venv by default. Bootstrap pip via stdlib
+# ensurepip before trying to pip-install anything. Idempotent — if pip
+# is already present, ensurepip is a no-op.
+if ! "$HERMES_PY" -m pip --version >/dev/null 2>&1; then
+  echo "→ Bootstrapping pip in Hermes venv via ensurepip..."
+  "$HERMES_PY" -m ensurepip --upgrade --quiet
+  if ! "$HERMES_PY" -m pip --version >/dev/null 2>&1; then
+    echo "✗ ensurepip ran but 'python -m pip' still fails. Check the venv at $HERMES_VENV" >&2
+    exit 1
+  fi
+fi
+
+# Resolve the plugin SHA from versions.env (single source of truth on the
+# public mirror; the private monorepo equivalent lives in
+# agent/Dockerfile.stock). Both the production agent image and the OSS
+# install use the same pin so upgrades stay coordinated.
+if [[ ! -f "$ROOT/versions.env" ]]; then
+  echo "✗ versions.env not found at $ROOT/versions.env" >&2
+  exit 1
+fi
+# shellcheck source=/dev/null
+source "$ROOT/versions.env"
+PLUGIN_SHA="${MYAH_PLUGIN_SHA:-}"
+if [[ -z "$PLUGIN_SHA" ]]; then
+  echo "✗ MYAH_PLUGIN_SHA not set in $ROOT/versions.env" >&2
+  exit 1
+fi
+
+# Install from GitHub at the pinned SHA. The myah-hermes-plugin repo is
+# public; the URL works unauthenticated. MYAH_PLUGIN_AUTH_TOKEN is honored
+# for forks of the plugin that happen to be private — set the env var to
+# a PAT or fine-grained token with read access if needed.
+if [[ -n "${MYAH_PLUGIN_AUTH_TOKEN:-}" ]]; then
+  PLUGIN_URL="git+https://${MYAH_PLUGIN_AUTH_TOKEN}@github.com/T3-Venture-Labs-Limited/myah-hermes-plugin@${PLUGIN_SHA}"
+else
+  PLUGIN_URL="git+https://github.com/T3-Venture-Labs-Limited/myah-hermes-plugin@${PLUGIN_SHA}"
+fi
+
+"$HERMES_PY" -m pip install --quiet --upgrade "myah-hermes-plugin @ ${PLUGIN_URL}"
+echo "✓ myah-hermes-plugin@${PLUGIN_SHA:0:8} pip-installed into $HERMES_VENV"
+
+# Materialize the dashboard shim at ~/.hermes/plugins/myah-admin/
+# (where the dashboard's plugin-discovery scans). The shim's
+# plugin_api.py imports from the package we just pip-installed.
+#
+# The console script is created by the pip install above as
+# <venv>/bin/myah-hermes-plugin. Use the absolute path so we don't
+# depend on PATH ordering.
+"$HERMES_VENV/bin/myah-hermes-plugin" install \
+  --dashboard-only \
+  --target "$HERMES_HOME_DIR/plugins/"
+echo "✓ Dashboard plugin shim materialized at $HERMES_HOME_DIR/plugins/myah-admin/"
+
+# ─── 6. Hermes config.yaml — enable the Myah platform ────────────────
 #
 # `hermes plugins install T3-Venture-Labs-Limited/myah-hermes-plugin`
 # materializes the plugin to ~/.hermes/plugins/myah-hermes-plugin/ and
@@ -293,6 +487,122 @@ PY
 }
 
 ensure_myah_platform_enabled_in_config
+
+# ─── 7. Optional service-unit setup ─────────────────────────────────
+#
+# The user has three ways to keep `hermes gateway` and `hermes dashboard`
+# running across reboots:
+#   - systemd --user units (Linux)
+#   - launchd plists (macOS)
+#   - "none": run them manually via `scripts/dev-oss.sh up`
+#
+# We offer to install the service units if the platform supports them;
+# the user can decline. Non-interactive (CI) usage: set
+# SETUP_SERVICE_CHOICE=systemd|launchd|none before running.
+
+OSS_SERVICE_CHOICE="${SETUP_SERVICE_CHOICE:-}"
+
+prompt_service_choice() {
+  if [[ -n "$OSS_SERVICE_CHOICE" ]]; then
+    return
+  fi
+  if [[ ! -t 0 ]]; then
+    # Non-interactive: skip silently. The user can re-run with
+    # SETUP_SERVICE_CHOICE=systemd|launchd|none to opt in later.
+    OSS_SERVICE_CHOICE="none"
+    return
+  fi
+  local default
+  case "$(uname -s)" in
+    Linux)  default="systemd" ;;
+    Darwin) default="launchd" ;;
+    *)      default="none" ;;
+  esac
+  echo
+  echo "Run hermes gateway + dashboard as a background service?"
+  echo "  [1] $default (recommended for $(uname -s))"
+  echo "  [2] none — start them yourself via scripts/dev-oss.sh"
+  read -rp "Choose [1]: " choice
+  case "$choice" in
+    ""|1) OSS_SERVICE_CHOICE="$default" ;;
+    2)    OSS_SERVICE_CHOICE="none" ;;
+    *)    OSS_SERVICE_CHOICE="none" ;;
+  esac
+}
+
+install_systemd_units() {
+  local hermes_bin
+  hermes_bin="$(command -v hermes)" || {
+    echo "⚠ hermes not on PATH — skipping systemd unit install"
+    return
+  }
+  local unit_dir="$HOME/.config/systemd/user"
+  mkdir -p "$unit_dir"
+  for unit in hermes-gateway hermes-dashboard; do
+    sed -e "s|__HERMES_BIN__|$hermes_bin|g" \
+        -e "s|__HERMES_HOME__|$HERMES_HOME_DIR|g" \
+        "$ROOT/scripts/oss-service-templates/${unit}.service.in" \
+        > "$unit_dir/${unit}.service"
+    systemctl --user enable --now "${unit}.service"
+  done
+  echo "✓ systemd-user units installed: hermes-gateway, hermes-dashboard"
+  echo "  Manage with: systemctl --user {start|stop|restart|status} hermes-{gateway,dashboard}"
+}
+
+install_launchd_plists() {
+  local hermes_bin
+  hermes_bin="$(command -v hermes)" || {
+    echo "⚠ hermes not on PATH — skipping launchd plist install"
+    return
+  }
+  local plist_dir="$HOME/Library/LaunchAgents"
+  mkdir -p "$plist_dir"
+  mkdir -p "$HERMES_HOME_DIR/logs"
+  for service in dev.myah.hermes-gateway dev.myah.hermes-dashboard; do
+    sed -e "s|__HERMES_BIN__|$hermes_bin|g" \
+        -e "s|__HERMES_HOME__|$HERMES_HOME_DIR|g" \
+        "$ROOT/scripts/oss-service-templates/${service}.plist.in" \
+        > "$plist_dir/${service}.plist"
+    launchctl bootstrap "gui/$UID" "$plist_dir/${service}.plist" 2>/dev/null || \
+      launchctl load "$plist_dir/${service}.plist"
+  done
+  echo "✓ launchd plists installed: dev.myah.hermes-{gateway,dashboard}"
+  echo "  Manage with: launchctl {kickstart -k|stop|print} gui/\$UID/dev.myah.hermes-{gateway,dashboard}"
+}
+
+prompt_service_choice
+case "$OSS_SERVICE_CHOICE" in
+  systemd) install_systemd_units ;;
+  launchd) install_launchd_plists ;;
+  none)    echo "✓ Service install skipped — start manually via ./scripts/dev-oss.sh up" ;;
+esac
+
+# ─── 8. Port-conflict detection ─────────────────────────────────────
+#
+# Spec §4 promises this. We probe each port the OSS stack expects to
+# bind and surface conflicts as warnings (NOT hard errors — the user
+# may have a legitimate reason, e.g. the dashboard's already running
+# under systemd from a previous setup run).
+
+echo
+echo "Probing default ports..."
+for entry in \
+    "8642:Hermes api_server" \
+    "8643:Hermes gateway adapter" \
+    "9119:Hermes dashboard" \
+    "8080:Myah platform"; do
+  port="${entry%%:*}"
+  label="${entry#*:}"
+  status="$(probe_loopback_port "$port")"
+  if [[ "$status" = "free" ]]; then
+    echo "  ✓ port $port ($label): free"
+  else
+    echo "  ⚠ port $port ($label): IN USE"
+  fi
+done
+echo "If a port shows IN USE but you expected it free, run 'lsof -i:<port>'"
+echo "to find the process. Override via env vars (MYAH_GATEWAY_PORT,"
+echo "MYAH_HERMES_WEB_PORT, MYAH_HERMES_CHAT_PORT) in both .env files."
 
 # ─── Final output ────────────────────────────────────────────────────
 

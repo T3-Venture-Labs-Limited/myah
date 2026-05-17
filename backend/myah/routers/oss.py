@@ -91,6 +91,25 @@ def _hermes_gateway_url() -> str:
     return f'http://{host}:{_oss_gateway_port()}'
 
 
+def _dashboard_url() -> str:
+    """Resolve the host-side **Hermes dashboard** URL.
+
+    The dashboard (a separate `hermes dashboard` process) hosts the
+    `myah-admin` plugin shim that exposes ``/api/plugins/myah-admin/*``
+    — the canonical surface for provider/toolset/model writes and
+    OAuth device flow. Port defaults to 9119 per
+    ``hermes_web.py:_oss_web_port``.
+
+    Auth is via ``HERMES_WEB_SESSION_TOKEN`` — but the probe does NOT
+    use it: a 401 means the dashboard IS running (just rejected the
+    request), which is what ``dashboard_running`` is supposed to surface.
+    """
+    from myah.utils.hermes_web import _oss_web_port  # local: avoid cycle
+
+    host = os.environ.get('MYAH_AGENT_HOST', 'host.docker.internal').strip()
+    return f'http://{host}:{_oss_web_port()}'
+
+
 def _adapter_bearer() -> str:
     """Read the platform↔plugin shared bearer token.
 
@@ -150,6 +169,7 @@ def probe() -> dict[str, Any]:
     either way) so the call never throws from the browser's perspective.
     """
     hermes_url = _hermes_url()
+    dashboard_url = _dashboard_url()
     result: dict[str, Any] = {
         'hermes_reachable': False,
         'hermes_url': hermes_url,
@@ -157,6 +177,10 @@ def probe() -> dict[str, Any]:
         'plugin_version': None,
         'providers_configured': [],
         'first_run': _read_first_run_flag(),
+        # Dashboard state distinct from gateway state — the welcome
+        # screen renders DashboardDownError only when running=False.
+        'dashboard_running': False,
+        'dashboard_url': dashboard_url,
     }
 
     # 1. Hermes gateway /health
@@ -198,6 +222,29 @@ def probe() -> dict[str, Any]:
         # Plugin endpoint blew up mid-call — treat as missing rather
         # than crash the probe.
         return result
+
+    # 2.5 Dashboard reachable?
+    #
+    # Hits /api/status — a public endpoint (no auth required, see
+    # hermes_cli/web_server.py:_PUBLIC_API_PATHS) that returns 200 when
+    # the dashboard FastAPI app is fully booted. Any HTTP response —
+    # including 4xx/5xx — counts as "running" because the only way to
+    # NOT get a response is connection refused / timeout / DNS error
+    # (all of which httpx raises as exceptions). The dashboard's `/`
+    # path is 404 (no root route), so probing that would falsely report
+    # "not running".
+    try:
+        r = _http_get(f'{dashboard_url}/api/status')
+        # Got any response at all → the listener exists. The welcome
+        # screen renders DashboardDownError only when this is false.
+        result['dashboard_running'] = True
+        # Silence the unused local — `r` is kept for breakpoint convenience
+        # and so a future maintainer can change the acceptance criterion
+        # without restructuring.
+        _ = r.status_code
+    except Exception:
+        # Connection refused, timeout, DNS — listener is not there.
+        pass
 
     # 3. Providers configured (only if the plugin is reachable).
     # Used by the frontend to auto-skip the provider-connection screen

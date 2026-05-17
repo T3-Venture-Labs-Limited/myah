@@ -1,5 +1,38 @@
 import { MYAH_API_BASE_URL } from '$lib/constants';
 
+// OSS first-run bootstrap. Fresh single-user installs ship with no
+// signin endpoint and no token in localStorage; this endpoint exists
+// only when MYAH_AUTH=false and issues a JWT for the seed admin user
+// so the SPA can avoid the infinite /auth → / redirect loop documented
+// in docs/gotchas/2026-05-17-oss-auth-bootstrap-missing.md.
+// Returns 404 in hosted mode.
+export const ossSignIn = async () => {
+	let error = null;
+
+	const res = await fetch(`${MYAH_API_BASE_URL}/auths/oss-signin`, {
+		method: 'POST',
+		headers: {
+			'Content-Type': 'application/json'
+		},
+		credentials: 'include'
+	})
+		.then(async (res) => {
+			if (!res.ok) throw await res.json();
+			return res.json();
+		})
+		.catch((err) => {
+			console.error(err);
+			error = 'detail' in err ? err.detail : err;
+			return null;
+		});
+
+	if (error) {
+		throw error;
+	}
+
+	return res;
+};
+
 export const getAdminDetails = async (token: string) => {
 	let error = null;
 
