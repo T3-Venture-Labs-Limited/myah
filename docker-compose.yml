@@ -41,15 +41,24 @@
 
 services:
   platform:
-    # Locally-built image. ``myah/platform:latest`` is a convention,
-    # not a registry tag — compose checks for it on the local daemon
-    # first, then builds via the ``build:`` block below. Override via
-    # ``MYAH_PLATFORM_IMAGE=ghcr.io/your-org/myah:v0.1.0`` to use a
-    # pre-published image instead.
-    image: ${MYAH_PLATFORM_IMAGE:-myah/platform:latest}
+    # Default: pull the published OSS image from GHCR. The ``:latest``
+    # tag follows the most recent tagged release on the public repo —
+    # for reproducible installs, pin a specific version, e.g.:
+    #   export MYAH_PLATFORM_IMAGE=ghcr.io/t3-venture-labs-limited/myah-platform-oss:0.1.0-beta.1
+    # Available tags: https://github.com/T3-Venture-Labs-Limited/myah/pkgs/container/myah-platform-oss
+    #
+    # To build from source instead (e.g. you've modified the code),
+    # set MYAH_PLATFORM_IMAGE to a local-only tag and `docker compose build`:
+    #   export MYAH_PLATFORM_IMAGE=myah/platform:dev
+    #   docker compose build
+    #   docker compose up -d
+    image: ${MYAH_PLATFORM_IMAGE:-ghcr.io/t3-venture-labs-limited/myah-platform-oss:latest}
     build:
       # OSS root IS platform-oss/'s content (per subtree extraction),
-      # so the build context is the directory next to this file.
+      # so the build context is the directory next to this file. The
+      # build: stanza is here for the source-modification workflow above;
+      # `docker compose up` does NOT trigger a build by default when the
+      # image: tag resolves on the registry.
       context: .
       dockerfile: Dockerfile
     container_name: myah-platform

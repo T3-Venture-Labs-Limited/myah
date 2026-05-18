@@ -65,6 +65,26 @@ reach it via `host.docker.internal`. The dashboard binding means port
 network, add a firewall rule blocking port 9119 from non-loopback
 interfaces.
 
+## Updating
+
+```bash
+cd myah
+git pull origin master           # picks up the latest pinned plugin + hermes SHAs
+docker compose pull              # pulls the newest platform image
+./scripts/setup-myah-oss.sh      # re-installs the plugin at the new pinned SHA
+./scripts/dev-oss.sh restart     # restart everything against the new versions
+```
+
+The `:latest` image tag follows the newest tagged release on the public
+repo. To pin to a specific version for reproducible installs:
+
+```bash
+export MYAH_PLATFORM_IMAGE=ghcr.io/t3-venture-labs-limited/myah-platform-oss:0.1.0-beta.1
+docker compose up -d
+```
+
+Available image tags: https://github.com/T3-Venture-Labs-Limited/myah/pkgs/container/myah-platform-oss
+
 ## Troubleshooting
 
 | Symptom | Try |
