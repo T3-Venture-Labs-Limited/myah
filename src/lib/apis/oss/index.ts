@@ -21,6 +21,8 @@ export interface OssProbe {
 	plugin_version: string | null;
 	providers_configured: string[];
 	first_run: boolean;
+	dashboard_running: boolean;
+	dashboard_url: string;
 }
 
 export interface OssDiagnostics extends OssProbe {

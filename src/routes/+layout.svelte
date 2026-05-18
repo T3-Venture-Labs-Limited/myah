@@ -50,12 +50,19 @@
 	import Welcome from '$lib/components/oss/Welcome.svelte';
 	import HermesDownError from '$lib/components/oss/HermesDownError.svelte';
 	import PluginMissingError from '$lib/components/oss/PluginMissingError.svelte';
+	import DashboardDownError from '$lib/components/oss/DashboardDownError.svelte';
 
 	const isOss = env.PUBLIC_DEPLOYMENT_MODE === 'oss';
 
-	let ossProbe = null;
-	let ossProbeLoaded = false; // becomes true after first probe attempt
-	let ossProbeError = null;
+	// $state runes — required for these bindings to re-render the
+	// {#if isOss && ossProbeLoaded}…{:else if !ossProbe.X} chain when
+	// runOssProbe() reassigns them from the "Try again" buttons. Plain
+	// `let` does NOT trigger template re-evaluation in Svelte 5 even
+	// in legacy mode for this pattern. See:
+	// docs/gotchas/2026-05-17-oss-try-again-no-refresh.md
+	let ossProbe = $state(null);
+	let ossProbeLoaded = $state(false); // becomes true after first probe attempt
+	let ossProbeError = $state(null);
 
 	async function runOssProbe() {
 		ossProbeError = null;
@@ -86,18 +93,23 @@
 
 	// Auto-skip-to-chat when first_run=true AND at least one provider is
 	// already configured. Implements F3 from vm-testing-followups.md.
-	$: if (
-		isOss &&
-		ossProbe &&
-		ossProbe.hermes_reachable &&
-		ossProbe.plugin_installed &&
-		ossProbe.first_run &&
-		ossProbe.providers_configured.length > 0
-	) {
-		// Don't block on this — fire-and-forget; if it fails the user
-		// just sees Welcome on the next load.
-		void handleWelcomeContinue();
-	}
+	// Moved from `$:` to `$effect` because adding $state runes above
+	// forces this file into runes mode (Svelte 5 is all-or-nothing per
+	// file: any rune = runes mode = `$:` is a compile error).
+	$effect(() => {
+		if (
+			isOss &&
+			ossProbe &&
+			ossProbe.hermes_reachable &&
+			ossProbe.plugin_installed &&
+			ossProbe.first_run &&
+			ossProbe.providers_configured.length > 0
+		) {
+			// Don't block on this — fire-and-forget; if it fails the user
+			// just sees Welcome on the next load.
+			void handleWelcomeContinue();
+		}
+	});
 
 	import i18n, { initI18n, getLanguages, changeLanguage } from '$lib/i18n';
 
@@ -106,7 +118,7 @@
 	import 'tippy.js/dist/tippy.css';
 
 	import { getBackendConfig, getModelsWithProviders, getVersion } from '$lib/apis';
-	import { getSessionUser, userSignOut } from '$lib/apis/auths';
+	import { getSessionUser, ossSignIn, userSignOut } from '$lib/apis/auths';
 	import { getChatList } from '$lib/apis/chats';
 	import { chatCompletion } from '$lib/apis/openai';
 	import { addOpenAIConnection, removeOpenAIConnection } from '$lib/utils/connections';
@@ -162,10 +174,10 @@
 
 	const bc = new BroadcastChannel('active-tab-channel');
 
-	let loaded = false;
+	let loaded = $state(false);
 	let tokenTimer = null;
 
-	let showRefresh = false;
+	let showRefresh = $state(false);
 
 	let heartbeatInterval = null;
 
@@ -735,6 +747,27 @@
 				const currentUrl = `${window.location.pathname}${window.location.search}`;
 				const encodedUrl = encodeURIComponent(currentUrl);
 
+				// OSS first-run auth bootstrap. Single-user OSS has no signin
+				// surface; the seed admin user exists in the DB but the SPA
+				// arrives with no token. POST /auths/oss-signin issues a JWT
+				// for that user and stores it under the same `token` key the
+				// rest of the codebase uses. The endpoint 404s in hosted
+				// mode, so this branch is a no-op there. See
+				// docs/gotchas/2026-05-17-oss-auth-bootstrap-missing.md.
+				if (isOss && !localStorage.token) {
+					try {
+						const bootstrap = await ossSignIn();
+						if (bootstrap?.token) {
+							localStorage.setItem('token', bootstrap.token);
+						}
+					} catch (err) {
+						console.error('OSS auth bootstrap failed:', err);
+						// Fall through: the no-token branch below still
+						// renders the layout's loading state. A subsequent
+						// page reload (or backend recovery) retries.
+					}
+				}
+
 				if (localStorage.token) {
 					// Validate session after socket is ready.
 					const sessionUser = await getSessionUser(localStorage.token).catch((error) => {
@@ -861,6 +894,8 @@
 		<HermesDownError hermesUrl={ossProbe.hermes_url} onRetry={runOssProbe} />
 	{:else if !ossProbe.plugin_installed}
 		<PluginMissingError hermesUrl={ossProbe.hermes_url} onRetry={runOssProbe} />
+	{:else if !ossProbe.dashboard_running}
+		<DashboardDownError probe={ossProbe} onRetry={runOssProbe} />
 	{:else if ossProbe.first_run && ossProbe.providers_configured.length === 0}
 		<Welcome probe={ossProbe} onContinue={handleWelcomeContinue} />
 	{:else if loaded}

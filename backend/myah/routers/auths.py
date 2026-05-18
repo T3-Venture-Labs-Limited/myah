@@ -31,6 +31,7 @@ from myah.models.users import (
 )
 
 from myah.constants import ERROR_MESSAGES
+from myah import env as _myah_env
 from myah.env import (
     WEBUI_AUTH_COOKIE_SAME_SITE,
     WEBUI_AUTH_COOKIE_SECURE,
@@ -238,3 +239,54 @@ async def update_timezone(
         return {'status': True}
     else:
         raise HTTPException(400, detail=ERROR_MESSAGES.INVALID_CRED)
+
+
+############################
+# OSS Sign-in (single-user bootstrap)
+############################
+
+# The seed admin user is inserted by the ``oss_seed_user`` alembic
+# migration (``d5e3b1a9c742``). In OSS (MYAH_AUTH=false) the SPA boots
+# with no token in localStorage; without an endpoint that issues a JWT
+# for this user the layout's getSessionUser call 401s and the page
+# redirects in an infinite loop. See
+# docs/gotchas/2026-05-17-oss-auth-bootstrap-missing.md for full context.
+
+_OSS_SEED_USER_ID = '00000000-0000-0000-0000-000000000001'
+
+
+@router.post('/oss-signin', response_model=SessionUserResponse)
+async def oss_signin(
+    request: Request,
+    response: Response,
+    db: Session = Depends(get_session),
+):
+    """Issue a session JWT for the OSS seed user (single-user bootstrap).
+
+    Only enabled when MYAH_AUTH is False. In hosted mode this endpoint
+    returns 404 — the surface does not exist on production. The check
+    runs at request time (via the env module attribute) so tests can
+    toggle WEBUI_AUTH between cases.
+    """
+    # Re-read at request time so test monkeypatches take effect.
+    if _myah_env.WEBUI_AUTH:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail='Endpoint not available in hosted mode',
+        )
+
+    user = Users.get_user_by_id(_OSS_SEED_USER_ID, db=db)
+    if user is None:
+        # Someone deleted the seed row — fall back to the first admin user.
+        user = Users.get_super_admin_user(db=db)
+
+    if user is None:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=(
+                'No admin user found; run alembic migrations or re-seed the '
+                'OSS user via scripts/setup-myah-oss.sh'
+            ),
+        )
+
+    return create_session_response(request, user, db, response, set_cookie=True)

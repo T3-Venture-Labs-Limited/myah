@@ -341,6 +341,54 @@ else
 fi
 
 # ──────────────────────────────────────────────────────────────────────────
+# Dashboard parity assertions
+#
+# Per docs/superpowers/specs/2026-05-17-oss-provider-data-routing-design.md,
+# the OSS install runs hermes dashboard as a second process. These
+# assertions catch the failure mode where the dashboard isn't running
+# but the probe is otherwise green.
+
+echo ""
+echo "[6/6] Dashboard parity assertions"
+
+echo "→ Probe reports dashboard_running=true"
+PROBE_BODY="$(curl -fsS "${BASE_URL}/api/v1/oss/probe")"
+echo "$PROBE_BODY" | python3 -c '
+import json, sys
+p = json.loads(sys.stdin.read())
+assert p["dashboard_running"] is True, f"dashboard_running=false: {p}"
+print("    OK: dashboard_running=true")
+'
+
+# /api/v1/providers/catalog and /api/v1/agent/toolsets are both gated
+# by get_verified_user — without a session cookie/Bearer the smoke test
+# correctly receives 401. That's a positive signal: the platform is up,
+# the endpoint exists, and auth is wired. Treat 200 OR 401 as "reachable".
+# A 5xx or 404 here would indicate a real regression.
+
+echo "→ Provider catalog reachable (200 or 401)"
+CATALOG_CODE=$(curl -s -o /tmp/catalog.json -w '%{http_code}' \
+    "${BASE_URL}/api/v1/providers/catalog" --max-time "${TIMEOUT}" \
+    2>/dev/null || echo "000")
+if [ "${CATALOG_CODE}" != "200" ] && [ "${CATALOG_CODE}" != "401" ]; then
+    echo "  FAIL: /api/v1/providers/catalog returned HTTP ${CATALOG_CODE}" >&2
+    head -c 400 /tmp/catalog.json >&2
+    exit 1
+fi
+echo "    OK: /api/v1/providers/catalog HTTP ${CATALOG_CODE}"
+
+echo "→ Agent toolsets reachable (200 or 401)"
+TOOLSETS_CODE=$(curl -s -o /tmp/toolsets.json -w '%{http_code}' \
+    "${BASE_URL}/api/v1/agent/toolsets" --max-time "${TIMEOUT}" \
+    2>/dev/null || echo "000")
+if [ "${TOOLSETS_CODE}" != "200" ] && [ "${TOOLSETS_CODE}" != "401" ]; then
+    echo "  FAIL: /api/v1/agent/toolsets returned HTTP ${TOOLSETS_CODE}" >&2
+    head -c 400 /tmp/toolsets.json >&2
+    exit 1
+fi
+echo "    OK: /api/v1/agent/toolsets HTTP ${TOOLSETS_CODE}"
+
+# ──────────────────────────────────────────────────────────────────────────
 
 echo ""
 echo "=== OSS Smoke Test PASSED ==="

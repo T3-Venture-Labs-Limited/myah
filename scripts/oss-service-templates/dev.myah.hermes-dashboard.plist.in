@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>dev.myah.hermes-dashboard</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>__HERMES_BIN__</string>
+        <string>dashboard</string>
+        <string>--no-open</string>
+        <!-- --insecure --host 0.0.0.0 required for Linux Docker reach;
+             on macOS Docker Desktop the binding is also needed because
+             host.docker.internal resolves through the same path. -->
+        <string>--insecure</string>
+        <string>--host</string>
+        <string>0.0.0.0</string>
+    </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HERMES_HOME</key>
+        <string>__HERMES_HOME__</string>
+    </dict>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>__HERMES_HOME__/logs/dashboard.stdout.log</string>
+    <key>StandardErrorPath</key>
+    <string>__HERMES_HOME__/logs/dashboard.stderr.log</string>
+</dict>
+</plist>
