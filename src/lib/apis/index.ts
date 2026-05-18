@@ -1,5 +1,6 @@
 import { MYAH_BASE_URL } from '$lib/constants';
 import { getOpenAIModelsDirect } from './openai';
+import { getModelsUnified, type ModelListItem } from '$lib/apis/providers';
 
 // Every request sent from here is a petition. May it reach
 // the one for whom it was intended, and return answered.
@@ -844,7 +845,6 @@ export const getVersion = async (token: string) => {
 	return res;
 };
 
-
 export const getWebhookUrl = async (token: string) => {
 	let error = null;
 
@@ -948,33 +948,6 @@ export interface ModelParams {}
 
 export type GlobalModelConfig = ModelConfig[];
 
-export const getProviderModels = async (token: string) => {
-	let error = null;
-
-	const res = await fetch(`${MYAH_BASE_URL}/api/v1/users/user/llm/models`, {
-		method: 'GET',
-		headers: {
-			'Content-Type': 'application/json',
-			Authorization: `Bearer ${token}`
-		}
-	})
-		.then(async (res) => {
-			if (!res.ok) throw await res.json();
-			return res.json();
-		})
-		.catch((err) => {
-			console.error(err);
-			error = 'detail' in err ? err.detail : err;
-			return null;
-		});
-
-	if (error) {
-		throw error;
-	}
-
-	return res;
-};
-
 // Fetch the union of admin base models + the user's provider-catalog models
 // (openrouter, openai, anthropic, google) so the selector, default picker,
 // and attribution badge all see the same list. Provider models take precedence
@@ -982,21 +955,29 @@ export const getProviderModels = async (token: string) => {
 // T3-932: previously the provider models were only merged in on hover of the
 // model selector button, which caused "Model not found" toasts whenever a
 // persisted provider model wasn't yet in $models.
+//
+// History: the provider-side fetch previously hit /api/v1/users/user/llm/models —
+// a legacy Open-WebUI route that was deleted when users.py was Myah-ified.
+// Calls 404'd silently (.catch(() => null) ate the error), the union collapsed
+// to baseModels (which is empty in OSS without admin "Connections" configured),
+// and the model picker rendered as if the user had nothing configured. Now we
+// call the canonical /api/v1/providers/models endpoint via the typed
+// getModelsUnified helper from apis/providers — same one (app)/+layout.svelte
+// already uses to seed $models.
 export const getModelsWithProviders = async (
 	token: string = '',
 	connections: object | null = null
 ) => {
-	const [baseModels, providerResult] = await Promise.all([
+	const [baseModels, providerModels] = await Promise.all([
 		getModels(token, connections),
-		getProviderModels(token).catch(() => null)
+		getModelsUnified(token).catch(() => [] as ModelListItem[])
 	]);
 
-	const providerModels = providerResult?.data ?? [];
 	if (providerModels.length === 0) {
 		return baseModels;
 	}
 
-	const providerIds = new Set(providerModels.map((m: { id: string }) => m.id));
+	const providerIds = new Set(providerModels.map((m) => m.id));
 	return [...providerModels, ...baseModels.filter((m: { id: string }) => !providerIds.has(m.id))];
 };
 
