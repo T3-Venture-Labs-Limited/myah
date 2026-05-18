@@ -77,6 +77,46 @@ class PollDeviceAuthBody(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+async def _oss_union_with_hermes_catalog(
+    user: UserModel,
+    existing_ids: list[str],
+) -> list[str]:
+    """Return existing_ids unioned with the hermes catalog's credentialled provider IDs.
+
+    In OSS the user owns their hermes install and may have configured
+    providers via `hermes config set …` outside the platform UI; those
+    credentials live in ~/.hermes/.env and ~/.hermes/auth.json but
+    never reach the platform's UserProviderStatuses table. The
+    gateway's GET /myah/v1/admin/providers enriches each catalog entry
+    with has_credential so we can union them in here. Hosted mode:
+    fetch_hermes_provider_catalog early-returns [] so this is a no-op.
+
+    Returns a new list — does not mutate the input. Order: existing_ids
+    first, then catalog providers not already present.
+    """
+    from myah.utils.hermes_web import fetch_hermes_provider_catalog, is_oss_mode
+
+    if not is_oss_mode():
+        return list(existing_ids)
+
+    catalog = await fetch_hermes_provider_catalog(user)
+    result = list(existing_ids)
+    seen = set(existing_ids)
+    for entry in catalog:
+        if not isinstance(entry, dict):
+            continue
+        pid = entry.get('id')
+        if not (isinstance(pid, str) and pid):
+            continue
+        if entry.get('has_credential') is not True:
+            continue
+        if pid in seen:
+            continue
+        result.append(pid)
+        seen.add(pid)
+    return result
+
+
 async def _sync_agent_active_provider(user: UserModel, provider_id: str) -> None:
     """Sync the agent's auth.json:active_provider with the user's onboarded credential.
 
@@ -125,9 +165,41 @@ async def get_catalog(user=Depends(get_verified_user)):
 
 @router.get('/status')
 async def get_status(user=Depends(get_verified_user)):
-    """Return the current user's connected provider statuses."""
+    """Return the current user's connected provider statuses.
+
+    Drives every "connected providers" surface in the UI: the post-Welcome
+    "Connect a provider" picker auto-skip (via $connectedValidProvidersV2
+    in src/lib/stores/providers.ts), the Settings → Providers tab
+    "Connected" badges, the chat model picker's provider-tag filtering,
+    and the Aux/Vision provider dropdowns in Agent → Models.
+    """
     rows = UserProviderStatuses.list_for_user(user.id)
-    return [r.model_dump() for r in rows]
+    result = [r.model_dump() for r in rows]
+
+    # ── Myah OSS: union with hermes catalog ──────────────────────────
+    # CLI-configured providers (`hermes config set …`) never reach the
+    # platform's UserProviderStatuses table — that's only written by
+    # the platform's own onboarding handlers. Synthesise rows for any
+    # catalog provider not already in the DB so the
+    # connectedValidProvidersV2 store, "Connected" badges, and picker
+    # auto-skip all see the full set. See _oss_union_with_hermes_catalog
+    # for the union semantics (hosted: no-op).
+    existing_ids = [r['provider_id'] for r in result]
+    unioned_ids = await _oss_union_with_hermes_catalog(user, existing_ids)
+    for pid in unioned_ids[len(existing_ids) :]:
+        result.append(
+            {
+                'provider_id': pid,
+                'entry_id': None,
+                'key_last_four': '',
+                'is_valid': True,
+                'reconnect_needed': False,
+                'reconnect_reason': None,
+            }
+        )
+    # ────────────────────────────────────────────────────────────────
+
+    return result
 
 
 @router.post('/{provider_id}/credential')
@@ -384,30 +456,21 @@ async def get_unified_models(user=Depends(get_verified_user)):
     statuses = UserProviderStatuses.list_for_user(user.id)
     valid_providers = [s.provider_id for s in statuses if s.is_valid]
 
-    # ── Myah OSS: catalog short-circuit ─────────────────────────────
-    # In OSS mode, the user already has all providers configured in
-    # their host-side hermes; forcing them to manually re-enter every
-    # credential through the UI is broken. When the platform DB has
-    # zero UserProviderStatuses entries (fresh OSS signup), source
-    # valid_providers from the hermes catalog directly. The existing
-    # fan-out below then continues normally.
-    if not valid_providers:
-        from myah.utils.hermes_web import (
-            is_oss_mode,
-            fetch_hermes_provider_catalog,
+    # ── Myah OSS: union with hermes catalog ─────────────────────────
+    # CLI-configured providers (`hermes config set …`) never reach the
+    # platform's UserProviderStatuses table. Union them in so the
+    # picker's fan-out covers them too. Previously this branch only
+    # fired when the DB was empty, which left a foot-gun: onboarding
+    # even one provider via the UI disengaged the fallback forever and
+    # every CLI-configured provider disappeared from the dropdown.
+    # See _oss_union_with_hermes_catalog (hosted: no-op).
+    before = len(valid_providers)
+    valid_providers = await _oss_union_with_hermes_catalog(user, valid_providers)
+    if len(valid_providers) > before:
+        logger.info(
+            f'OSS: unioned {len(valid_providers) - before} hermes-catalog providers '
+            f'into fan-out (total {len(valid_providers)}) for user {user.id}'
         )
-        if is_oss_mode():
-            catalog = await fetch_hermes_provider_catalog(user)
-            valid_providers = [
-                p.get('id', '')
-                for p in catalog
-                if p.get('id') and p.get('has_credential', False)
-            ]
-            if valid_providers:
-                logger.info(
-                    f'OSS: serving {len(valid_providers)} providers from hermes '
-                    f'catalog for user {user.id}'
-                )
     # ────────────────────────────────────────────────────────────────
 
     all_models = []
