@@ -502,6 +502,94 @@ ensure_myah_platform_enabled_in_config
 
 OSS_SERVICE_CHOICE="${SETUP_SERVICE_CHOICE:-}"
 
+# Stop any pre-existing hermes dashboard/gateway processes that this
+# script is about to manage. A stale dashboard running from a prior
+# Hermes setup can race with our launchctl bootstrap / systemctl
+# enable below, ending in a state where the NEW dashboard process is
+# the one bound to :9119 but its `myah-admin` plugin's FastAPI routes
+# never get mounted. The user sees the welcome screen "Connect a
+# provider" infinite-loading because every proxied request from the
+# platform to `/api/plugins/myah-admin/*` returns 401.
+#
+# See: docs/troubleshooting.md "Dashboard plugin not mounted" section
+# (and the gotcha doc in the internal monorepo at
+# docs/gotchas/2026-05-18-dashboard-plugin-mount-stale-process.md).
+#
+# We SIGTERM first, give 1s, then SIGKILL anything still alive. Each
+# `pgrep`/`kill` is guarded with `|| true` so `set -euo pipefail`
+# doesn't trip when there's nothing to stop.
+stop_stale_hermes_processes() {
+  local killed=0
+  local pids pattern pid
+  for pattern in 'hermes dashboard' 'hermes gateway' 'hermes_cli\.main'; do
+    pids="$(pgrep -f "$pattern" 2>/dev/null || true)"
+    for pid in $pids; do
+      [[ -z "$pid" || "$pid" == "$$" ]] && continue
+      if kill -TERM "$pid" 2>/dev/null; then
+        killed=$((killed + 1))
+      fi
+    done
+  done
+  if (( killed > 0 )); then
+    sleep 1
+    for pattern in 'hermes dashboard' 'hermes gateway' 'hermes_cli\.main'; do
+      pids="$(pgrep -f "$pattern" 2>/dev/null || true)"
+      for pid in $pids; do
+        [[ -z "$pid" || "$pid" == "$$" ]] && continue
+        kill -9 "$pid" 2>/dev/null || true
+      done
+    done
+    echo "→ stopped $killed pre-existing hermes process(es) to ensure clean service start"
+  fi
+}
+
+# Poll the dashboard's `myah-admin` plugin health endpoint until it
+# returns 200, or fail after ~15s with a clear remediation pointer.
+# Does NOT exit the script on failure — the install itself completed,
+# the runtime check is just a sanity gate. The user may still need to
+# `kickstart -k` the dashboard once, which is fine.
+#
+# Why this check: `_mount_plugin_api_routes` in upstream
+# `hermes_cli/web_server.py` catches all exceptions and logs via a
+# logger with no handler configured at module-load time. Plugin mount
+# failures are otherwise completely invisible — `/api/dashboard/plugins`
+# still lists the plugin (manifest is on disk), but FastAPI has zero
+# routes under `/api/plugins/<name>/`.
+verify_dashboard_plugin_mounted() {
+  local token="${1:-}"
+  local port="${MYAH_HERMES_WEB_PORT:-9119}"
+  local url="http://127.0.0.1:${port}/api/plugins/myah-admin/health"
+  local attempts=30
+  local delay=0.5
+  local i
+  for ((i=1; i<=attempts; i++)); do
+    if [[ -n "$token" ]]; then
+      if curl -sf -m 2 -H "Authorization: Bearer $token" "$url" >/dev/null 2>&1; then
+        echo "✓ Dashboard 'myah-admin' plugin mounted at :${port}"
+        return 0
+      fi
+    else
+      # No token configured — auth-exempt path, just check liveness.
+      if curl -sf -m 2 "$url" >/dev/null 2>&1; then
+        echo "✓ Dashboard 'myah-admin' plugin mounted at :${port}"
+        return 0
+      fi
+    fi
+    sleep "$delay"
+  done
+  echo "" >&2
+  echo "⚠ Dashboard 'myah-admin' plugin did not respond at :${port} within ~15s." >&2
+  echo "  The platform's 'Connect a provider' screen will infinite-load." >&2
+  echo "  Restart the dashboard cleanly:" >&2
+  echo "    launchctl kickstart -k gui/\$UID/dev.myah.hermes-dashboard      # macOS" >&2
+  echo "    systemctl --user restart hermes-dashboard                       # Linux" >&2
+  echo "  Then verify:" >&2
+  echo "    curl -s -H \"Authorization: Bearer \$HERMES_WEB_SESSION_TOKEN\" \\" >&2
+  echo "      http://localhost:${port}/api/plugins/myah-admin/health" >&2
+  echo "    Expected: {\"status\":\"ok\",\"plugin\":\"myah-admin\"}" >&2
+  return 1
+}
+
 prompt_service_choice() {
   if [[ -n "$OSS_SERVICE_CHOICE" ]]; then
     return
@@ -538,6 +626,13 @@ install_systemd_units() {
   }
   local unit_dir="$HOME/.config/systemd/user"
   mkdir -p "$unit_dir"
+
+  # Defensive: kill any stale hermes processes BEFORE systemctl takes
+  # over. `systemctl --user enable --now` doesn't touch processes
+  # started outside of systemd (e.g. an old `hermes gateway run` left
+  # over in a tmux window), so we'd race with them otherwise.
+  stop_stale_hermes_processes
+
   for unit in hermes-gateway hermes-dashboard; do
     sed -e "s|__HERMES_BIN__|$hermes_bin|g" \
         -e "s|__HERMES_HOME__|$HERMES_HOME_DIR|g" \
@@ -547,6 +642,12 @@ install_systemd_units() {
   done
   echo "✓ systemd-user units installed: hermes-gateway, hermes-dashboard"
   echo "  Manage with: systemctl --user {start|stop|restart|status} hermes-{gateway,dashboard}"
+
+  # Sanity-check the dashboard plugin actually mounted — the most
+  # common silent failure mode after a fresh pip-install.
+  local web_token
+  web_token="$(get_var "$HERMES_ENV" HERMES_WEB_SESSION_TOKEN)"
+  verify_dashboard_plugin_mounted "$web_token" || true
 }
 
 install_launchd_plists() {
@@ -558,16 +659,36 @@ install_launchd_plists() {
   local plist_dir="$HOME/Library/LaunchAgents"
   mkdir -p "$plist_dir"
   mkdir -p "$HERMES_HOME_DIR/logs"
+
+  # Defensive: kill any stale hermes processes BEFORE launchctl takes
+  # over. Otherwise the new dashboard can race the old for :9119 and
+  # end up running with the `myah-admin` plugin's routes unmounted.
+  # The whole point of this gate is that the failure is silent — the
+  # OpenAPI is just missing 32 routes that should be there.
+  stop_stale_hermes_processes
+
   for service in dev.myah.hermes-gateway dev.myah.hermes-dashboard; do
     sed -e "s|__HERMES_BIN__|$hermes_bin|g" \
         -e "s|__HERMES_HOME__|$HERMES_HOME_DIR|g" \
         "$ROOT/scripts/oss-service-templates/${service}.plist.in" \
         > "$plist_dir/${service}.plist"
+    # Bootout any existing registration first so we ALWAYS re-bootstrap
+    # against the latest plist + venv state (the script just pip-installed
+    # the plugin, the previously-loaded dashboard may not have seen it).
+    # Both bootout failures (service wasn't loaded) and bootstrap fallbacks
+    # to `load` are tolerated for backward compat with older launchctl.
+    launchctl bootout "gui/$UID/${service}" 2>/dev/null || true
     launchctl bootstrap "gui/$UID" "$plist_dir/${service}.plist" 2>/dev/null || \
       launchctl load "$plist_dir/${service}.plist"
   done
   echo "✓ launchd plists installed: dev.myah.hermes-{gateway,dashboard}"
   echo "  Manage with: launchctl {kickstart -k|stop|print} gui/\$UID/dev.myah.hermes-{gateway,dashboard}"
+
+  # Sanity-check the dashboard plugin actually mounted — the most
+  # common silent failure mode after a fresh pip-install.
+  local web_token
+  web_token="$(get_var "$HERMES_ENV" HERMES_WEB_SESSION_TOKEN)"
+  verify_dashboard_plugin_mounted "$web_token" || true
 }
 
 prompt_service_choice
