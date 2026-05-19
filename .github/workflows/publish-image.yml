@@ -57,6 +57,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # QEMU lets the amd64 GitHub-hosted runner produce linux/arm64
+      # binaries via user-mode emulation. Required for the multi-arch
+      # build below to cover Apple Silicon (M1/M2/M3/M4) Mac users
+      # running `docker compose up` against the published GHCR image.
+      # See docker/setup-qemu-action README for the binfmt_misc registration
+      # this performs.
+      - name: Set up QEMU (for linux/arm64)
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -97,6 +108,20 @@ jobs:
           context: .
           file: ./Dockerfile
           push: true
+          # Multi-arch build: linux/amd64 runs natively on the
+          # ubuntu-latest runner; linux/arm64 runs under QEMU emulation
+          # (registered in the setup-qemu step above). The resulting
+          # GHCR tag is a multi-arch manifest, so `docker pull` on
+          # Apple Silicon Macs selects the arm64 variant automatically
+          # — no per-platform tag suffix needed.
+          #
+          # Cold-build time is materially longer (~15-20 min) because
+          # arm64 wheels that don't ship aarch64-manylinux builds will
+          # compile under emulation. The GHA cache (cache-to/from below)
+          # scopes per-platform, so warm builds settle to ~5-10 min.
+          # If cold-build time becomes a recurring bottleneck, migrate
+          # to a native arm64 runner matrix (ubuntu-24.04-arm).
+          platforms: linux/amd64,linux/arm64
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           # Bake PUBLIC_DEPLOYMENT_MODE=oss so the SvelteKit build gates
