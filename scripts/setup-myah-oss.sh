@@ -52,9 +52,15 @@ if (( ${#missing[@]} > 0 )); then
   exit 1
 fi
 
-# PyYAML is required for the Hermes config.yaml merge. Most distros ship
-# it in `python3-yaml` (apt) or `python3-pyyaml` (dnf). It's tiny.
-if ! python3 -c 'import yaml' >/dev/null 2>&1; then
+# PyYAML is required for the Hermes config.yaml merge in step 6 — which
+# runs AFTER the MYAH_OSS_SETUP_ENV_ONLY escape hatch. Tests that only
+# verify env-write behavior set that var to short-circuit before step 5,
+# so PyYAML isn't actually needed in those runs. Skipping the check for
+# them keeps the curated CI gate green on minimal Python environments.
+# Most distros ship PyYAML in `python3-yaml` (apt) or `python3-pyyaml`
+# (dnf). It's tiny.
+if [[ -z "${MYAH_OSS_SETUP_ENV_ONLY:-}" ]] \
+   && ! python3 -c 'import yaml' >/dev/null 2>&1; then
   echo "✗ Python 'yaml' module not installed (PyYAML)." >&2
   echo "  Install one of:" >&2
   echo "    sudo apt-get install -y python3-yaml      # Debian/Ubuntu" >&2

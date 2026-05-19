@@ -337,3 +337,48 @@ def test_preserves_custom_platform_base_url(sandbox):
     assert hermes_env['MYAH_PLATFORM_BASE_URL'] == custom_url, (
         'Custom MYAH_PLATFORM_BASE_URL must be preserved across re-runs'
     )
+
+
+def test_upgrade_from_pre_bearer_install_preserves_existing_token(sandbox):
+    """Upgrade path for users already on v0.1.0-beta.1: they have four
+    aligned bearer slots and NO MYAH_PLATFORM_BEARER (the old script
+    only wrote four). Re-running the new script must ADD the bearer
+    slot using the existing token value — NOT rotate to a fresh token.
+
+    Rotation on upgrade would invalidate every cached client token,
+    log out every running session, and force a `dev-oss.sh restart`
+    cycle for every existing OSS install. The alignment-check + fallback-
+    chain logic in the script's bearer section already protects against
+    this; this test guards the protection against future refactors.
+    """
+    repo_dir, hermes_home = sandbox
+    existing_token = 'existing-bearer-from-v0-1-0-beta-1-install'
+
+    # Pre-fix state: platform .env has the token; hermes .env has 4 of
+    # the 5 slots aligned (MYAH_PLATFORM_BEARER absent because the old
+    # script never wrote it).
+    (repo_dir / '.env').write_text(
+        f'MYAH_AGENT_BEARER_TOKEN={existing_token}\n'
+    )
+    (hermes_home / '.env').write_text(
+        f'MYAH_AGENT_BEARER_TOKEN={existing_token}\n'
+        f'MYAH_ADAPTER_AUTH_KEY={existing_token}\n'
+        f'API_SERVER_KEY={existing_token}\n'
+    )
+
+    _run_script(repo_dir, hermes_home)
+
+    hermes_env = _parse_env(hermes_home / '.env')
+    platform_env = _parse_env(repo_dir / '.env')
+
+    assert hermes_env.get('MYAH_PLATFORM_BEARER') == existing_token, (
+        'Upgrade path rotated the bearer instead of reusing the existing '
+        'aligned value — would log out every OSS user on next platform '
+        f'restart. Expected: {existing_token!r}, '
+        f'Got: {hermes_env.get("MYAH_PLATFORM_BEARER")!r}'
+    )
+    # Existing four slots must remain unchanged (no rotation side-effect).
+    assert platform_env['MYAH_AGENT_BEARER_TOKEN'] == existing_token
+    assert hermes_env['MYAH_AGENT_BEARER_TOKEN'] == existing_token
+    assert hermes_env['MYAH_ADAPTER_AUTH_KEY'] == existing_token
+    assert hermes_env['API_SERVER_KEY'] == existing_token
