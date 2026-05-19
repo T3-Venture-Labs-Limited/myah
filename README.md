@@ -94,6 +94,7 @@ Available image tags: https://github.com/T3-Venture-Labs-Limited/myah/pkgs/conta
 | Settings page empty | Confirm `hermes dashboard` is running: `curl -s -o /dev/null -w '%{http_code}\n' http://localhost:9119/` should return any HTTP code (200 / 401 / 404 are all "running") |
 | Provider key in `~/.hermes/.env` not detected | Restart hermes processes after editing `~/.hermes/.env`: `./scripts/dev-oss.sh restart` |
 | `:8643/myah/health` connection refused | Re-run `./scripts/setup-myah-oss.sh` — it ensures `gateway.platforms.myah.enabled: true` in `~/.hermes/config.yaml` |
+| Sending a message with an attachment fails with 500 `Adapter missing MYAH_PLATFORM_BASE_URL / MYAH_PLATFORM_BEARER env` | Your `~/.hermes/.env` was bootstrapped by an older `setup-myah-oss.sh` that didn't write the attachment-fetch bearer. Re-run `./scripts/setup-myah-oss.sh` (it now writes `MYAH_PLATFORM_BEARER` and migrates the broken legacy `MYAH_PLATFORM_BASE_URL`), then `./scripts/dev-oss.sh restart` |
 
 ## License
 
