@@ -100,6 +100,7 @@ jobs:
             backend/myah/test/test_oss_probe.py
             backend/myah/test/test_processes_oss_mode.py
             backend/myah/test/test_env_back_compat.py
+            backend/myah/test/test_setup_myah_oss_script.py
           )
           FAIL=0
           for f in "${FILES[@]}"; do

@@ -15,8 +15,9 @@
 #
 #   Hermes .env (~/.hermes/.env):
 #     - MYAH_AGENT_BEARER_TOKEN     mirrors platform value (legacy compat)
-#     - MYAH_ADAPTER_AUTH_KEY       same value — what the plugin actually reads
+#     - MYAH_ADAPTER_AUTH_KEY       same value — plugin's incoming-auth check
 #     - API_SERVER_KEY              same value — for upstream Hermes api_server
+#     - MYAH_PLATFORM_BEARER        same value — plugin's outbound attachment-fetch bearer
 #     - API_SERVER_ENABLED=true     opt-in to the /v1/runs, /health HTTP API
 #     - MYAH_PLATFORM_BASE_URL      platform URL the plugin can call back to
 #     - MYAH_USER_ID                seeded single-user UUID (from oss_seed_user
@@ -187,32 +188,41 @@ fi
 
 # ─── 1. Shared bearer token ─────────────────────────────────────────
 #
-# The same value is written to four env-var names because three layers
-# all check Bearer auth independently:
+# The same value is written to five env-var slots. Two directions, three
+# checks each direction. Mismatch any one and a different feature breaks:
 #
-#   - MYAH_AGENT_BEARER_TOKEN  (platform side — what the platform SENDS)
-#   - MYAH_ADAPTER_AUTH_KEY    (plugin side — what _check_auth COMPARES)
-#   - API_SERVER_KEY           (Hermes upstream api_server adapter)
-#   - MYAH_AGENT_BEARER_TOKEN  (also in hermes .env — legacy compat for
-#                              code paths that still read the old name)
+#   Platform → Hermes (chat dispatch):
+#     - MYAH_AGENT_BEARER_TOKEN  (platform .env — what the platform SENDS)
+#     - MYAH_ADAPTER_AUTH_KEY    (hermes  .env — what _check_auth COMPARES)
+#     - API_SERVER_KEY           (hermes  .env — Hermes upstream api_server)
+#     - MYAH_AGENT_BEARER_TOKEN  (hermes  .env — legacy alias)
 #
-# All four MUST hold the same value or chat requests get 401.
+#   Hermes → Platform (attachment fetch, cron deliveries):
+#     - MYAH_PLATFORM_BEARER     (hermes  .env — adapter.py reads at import,
+#                                no alias fallback — omitting this surfaces
+#                                as a 500 'Adapter missing
+#                                MYAH_PLATFORM_BASE_URL / MYAH_PLATFORM_BEARER
+#                                env' on the FIRST attachment a user sends)
+#
+# All five MUST hold the same value or a feature silently fails.
 
 PLATFORM_TOKEN="$(get_var "$PLATFORM_ENV" MYAH_AGENT_BEARER_TOKEN)"
 HERMES_BEARER="$(get_var "$HERMES_ENV" MYAH_AGENT_BEARER_TOKEN)"
 HERMES_ADAPTER_KEY="$(get_var "$HERMES_ENV" MYAH_ADAPTER_AUTH_KEY)"
 HERMES_API_KEY="$(get_var "$HERMES_ENV" API_SERVER_KEY)"
+HERMES_PLATFORM_BEARER="$(get_var "$HERMES_ENV" MYAH_PLATFORM_BEARER)"
 
 if [[ "$ROTATE" == 1 ]]; then
   TOKEN=""
 elif [[ -n "$PLATFORM_TOKEN" \
      && "$PLATFORM_TOKEN" == "$HERMES_BEARER" \
      && "$PLATFORM_TOKEN" == "$HERMES_ADAPTER_KEY" \
-     && "$PLATFORM_TOKEN" == "$HERMES_API_KEY" ]]; then
-  echo "✓ MYAH_AGENT_BEARER_TOKEN: already aligned across all four slots"
+     && "$PLATFORM_TOKEN" == "$HERMES_API_KEY" \
+     && "$PLATFORM_TOKEN" == "$HERMES_PLATFORM_BEARER" ]]; then
+  echo "✓ MYAH_AGENT_BEARER_TOKEN: already aligned across all five slots"
   TOKEN="$PLATFORM_TOKEN"
 else
-  TOKEN="${PLATFORM_TOKEN:-${HERMES_BEARER:-${HERMES_ADAPTER_KEY:-${HERMES_API_KEY:-}}}}"
+  TOKEN="${PLATFORM_TOKEN:-${HERMES_BEARER:-${HERMES_ADAPTER_KEY:-${HERMES_API_KEY:-${HERMES_PLATFORM_BEARER:-}}}}}"
 fi
 
 if [[ -z "$TOKEN" ]]; then
@@ -224,6 +234,7 @@ set_var "$PLATFORM_ENV" MYAH_AGENT_BEARER_TOKEN "$TOKEN"
 set_var "$HERMES_ENV"   MYAH_AGENT_BEARER_TOKEN "$TOKEN"
 set_var "$HERMES_ENV"   MYAH_ADAPTER_AUTH_KEY   "$TOKEN"
 set_var "$HERMES_ENV"   API_SERVER_KEY          "$TOKEN"
+set_var "$HERMES_ENV"   MYAH_PLATFORM_BEARER    "$TOKEN"
 
 # Enable Hermes's HTTP api_server adapter so it binds port 8642 for
 # /v1/runs, /health, etc. — opt-in per gateway/config.py:1472-1494.
@@ -243,12 +254,22 @@ set_var "$HERMES_ENV"   API_SERVER_KEY          "$TOKEN"
 [[ -n "$(get_var "$HERMES_ENV" API_SERVER_HOST)" ]] || \
   set_var "$HERMES_ENV" API_SERVER_HOST 0.0.0.0
 
-# Plugin needs to know where to call the platform back from (cron
-# delivery, attachment fetch). Default to host.docker.internal:8080
-# which works on Linux + macOS + Windows when the platform container's
-# compose stanza maps the host gateway via extra_hosts.
-[[ -n "$(get_var "$HERMES_ENV" MYAH_PLATFORM_BASE_URL)" ]] || \
-  set_var "$HERMES_ENV" MYAH_PLATFORM_BASE_URL "http://host.docker.internal:8080"
+# Plugin (running on the host) needs to reach the platform (running in
+# docker compose). The OSS compose file publishes the platform on
+# 127.0.0.1:8080 (see docker-compose.yml ports stanza), so loopback
+# is the universally correct value for the canonical install.
+#
+# Auto-migrate installs from before this fix: the previous default was
+# 'http://host.docker.internal:8080', which only resolves from INSIDE
+# a docker container — host-side hermes can't use it, so attachments
+# would 500 with 'Adapter missing ... env' on the first send. If the
+# user still has the broken legacy default, replace it; otherwise
+# preserve whatever they've set (could be a remote platform URL).
+LEGACY_BROKEN_URL='http://host.docker.internal:8080'
+CURRENT_PLATFORM_URL="$(get_var "$HERMES_ENV" MYAH_PLATFORM_BASE_URL)"
+if [[ -z "$CURRENT_PLATFORM_URL" || "$CURRENT_PLATFORM_URL" == "$LEGACY_BROKEN_URL" ]]; then
+  set_var "$HERMES_ENV" MYAH_PLATFORM_BASE_URL "http://127.0.0.1:8080"
+fi
 
 # Seeded single-user UUID (see oss_seed_user migration).  Without this
 # the plugin's _bootstrap_user_id falls back to /whoami discovery which
@@ -355,6 +376,11 @@ fi
 
 set_var "$PLATFORM_ENV" MYAH_HERMES_WEB_SESSION_TOKEN "$WEB_TOKEN"
 set_var "$HERMES_ENV"   HERMES_WEB_SESSION_TOKEN       "$WEB_TOKEN"
+
+# ─── Test-only escape hatch: env-file writes are done; everything below
+#     touches a real Hermes venv / network. Tests that only verify env
+#     output set MYAH_OSS_SETUP_ENV_ONLY=1 to exit here.
+[[ -n "${MYAH_OSS_SETUP_ENV_ONLY:-}" ]] && exit 0
 
 # ─── 5. Pip-install myah-hermes-plugin into Hermes's venv ────────────
 #
