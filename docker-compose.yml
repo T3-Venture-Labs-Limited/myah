@@ -121,7 +121,11 @@ services:
       - 'host.docker.internal:host-gateway'
     restart: unless-stopped
     healthcheck:
-      test: ['CMD', 'wget', '--quiet', '--tries=1', '--spider', 'http://localhost:8080/health']
+      # Mirrors the Dockerfile HEALTHCHECK at Dockerfile:131. CMD-SHELL is
+      # required because the check pipes curl through jq to validate the
+      # response body ({"status": true} from /health). curl and jq are
+      # installed in the image; wget is not.
+      test: ['CMD-SHELL', 'curl --silent --fail http://localhost:8080/health | jq -ne "input.status == true" || exit 1']
       interval: 30s
       timeout: 10s
       retries: 3

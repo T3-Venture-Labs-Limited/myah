@@ -2007,6 +2007,23 @@ async def serve_cache_file(
     return FileResponse(file_path)
 
 
+# ── API catch-all: reject unregistered /api/* paths before the SPA mount ─────
+# Without this guard, any /api/* path with no registered FastAPI route falls
+# through to SPAStaticFiles mounted at '/', which serves index.html with
+# HTTP 200 (html=True swallows the 404). Hosted-only routers such as
+# /api/v1/agent/memory and /api/v1/integrations are absent from the OSS
+# deployment, so without this they return 200 text/html — breaking the JSON
+# contract callers expect.
+@app.api_route(
+    '/api/{path:path}',
+    methods=['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS', 'HEAD'],
+    include_in_schema=False,
+)
+async def api_not_found(path: str) -> None:
+    raise HTTPException(status_code=404, detail='Not Found')
+# ────────────────────────────────────────────────────────────────────────────
+
+
 def swagger_ui_html(*args, **kwargs):
     return get_swagger_ui_html(
         *args,
