@@ -280,7 +280,10 @@ async def background_tasks_handler(ctx):
                     if len(res.get('choices', [])) != 1:
                         return None
                     response_message = res['choices'][0].get('message', {})
-                    raw = response_message.get('content') or response_message.get('reasoning_content', '')
+                    # T3-1030: see _run_title above — same fallback removed here for the
+                    # same reason. Reasoning traces can incidentally embed JSON-like text
+                    # that parses as `follow_ups` and emit as real follow-up events.
+                    raw = response_message.get('content') or ''
                     json_slice = raw[raw.find('{') : raw.rfind('}') + 1]
                     try:
                         return json.loads(json_slice).get('follow_ups') or None
@@ -353,11 +356,19 @@ async def background_tasks_handler(ctx):
                             if res and isinstance(res, dict):
                                 if len(res.get('choices', [])) == 1:
                                     response_message = res.get('choices', [])[0].get('message', {})
-                                    raw_content = (
-                                        response_message.get('content')
-                                        or response_message.get('reasoning_content')
-                                        or ''
-                                    )
+                                    # T3-1030: only `content` is authoritative for the title.
+                                    # `reasoning_content` (the model's chain-of-thought from
+                                    # extended-thinking / o3 / DeepSeek-R1 etc.) must NEVER be
+                                    # used as a fallback — falling back on it caused thinking
+                                    # traces to be truncated to 80 chars and saved as titles.
+                                    raw_content = response_message.get('content') or ''
+                                    if not raw_content and response_message.get('reasoning_content'):
+                                        log.warning(
+                                            '[CHAT_PIPELINE] step=title_reasoning_only_no_content '
+                                            'chat_id=%s reasoning_len=%d',
+                                            _chat_id,
+                                            len(response_message['reasoning_content']),
+                                        )
                                 else:
                                     raw_content = ''
                                 title = _sanitize_title(raw_content)

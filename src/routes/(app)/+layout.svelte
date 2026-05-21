@@ -48,12 +48,22 @@
 		providerStatusV2,
 		connectedValidProvidersV2
 	} from '$lib/stores/providers';
-	import { getModelsUnified } from '$lib/apis/providers';
 	import { Shortcut, shortcuts } from '$lib/shortcuts';
 
 	const i18n = getContext('i18n');
 
 	let loaded = false;
+
+	// Guard: at most one setModels() in-flight at a time. A second caller
+	// sets the pending flag so that exactly one follow-up run happens after
+	// the current one finishes — no N concurrent fetches for N rapid
+	// providerStatusV2 updates.
+	let _setModelsInFlight = false;
+	let _setModelsPending = false;
+	// Snapshot of provider IDs + validity used by the reactive block below
+	// so that structurally-identical providerStatusV2 updates (new array
+	// reference, same data) do not re-trigger setModels() unnecessarily.
+	let _lastProviderSnapshot = '';
 
 	// Show the provider onboarding picker when the store has been hydrated (non-null)
 	// but no valid provider is connected. The reactive gate guards against the initial
@@ -133,26 +143,33 @@
 	};
 
 	const setModels = async () => {
-		// Merge standard Open WebUI model routing (OpenAI/Ollama connections) with
-		// the Hermes-native provider models from /api/v1/providers/models so the
-		// picker shows all available models in one list.
-		const legacy =
-			(await getModelsWithProviders(
-				localStorage.token,
-				$config?.features?.enable_direct_connections ? ($settings?.directConnections ?? null) : null
-			).catch(() => [])) ?? [];
-
-		const unified = await getModelsUnified(localStorage.token).catch(() => []);
-
-		const seen = new Set(legacy.map((m: any) => m.id));
-		const merged = [...legacy];
-		for (const m of unified) {
-			if (!seen.has(m.id)) {
-				merged.push(m);
-				seen.add(m.id);
+		// Guard: if a fetch is already in flight, mark a pending re-run and bail.
+		// The finally block will drain at most one queued call, ensuring the last
+		// caller's settings (e.g. directConnections from setUserSettings) win.
+		if (_setModelsInFlight) {
+			_setModelsPending = true;
+			return;
+		}
+		_setModelsInFlight = true;
+		_setModelsPending = false;
+		try {
+			// getModelsWithProviders already merges /api/v1/providers/models
+			// (getModelsUnified) with /api/models? internally — no second call needed.
+			const merged =
+				(await getModelsWithProviders(
+					localStorage.token,
+					$config?.features?.enable_direct_connections
+						? ($settings?.directConnections ?? null)
+						: null
+				).catch(() => [])) ?? [];
+			models.set(merged);
+		} finally {
+			_setModelsInFlight = false;
+			if (_setModelsPending) {
+				_setModelsPending = false;
+				void setModels();
 			}
 		}
-		models.set(merged);
 	};
 
 	const setBanners = async () => {
@@ -358,10 +375,20 @@
 	// When the V2 provider-status store updates (user connected/disconnected a
 	// provider via onboarding or Settings), re-fetch the models list so the
 	// switcher reflects the new provider without requiring a page refresh.
-	$: if ($providerStatusV2 && $providerStatusV2.length > 0) {
-		void setModels().catch((e) =>
-			console.error('[layout] setModels() after providerStatusV2 change failed:', e)
-		);
+	// Snapshot-compare by provider-id:validity so rapid refreshProviderStatus()
+	// calls that return identical data (new array reference, same content) do
+	// not each trigger a redundant setModels() fetch.
+	$: {
+		const _providerSnapshot = ($providerStatusV2 ?? [])
+			.map((p) => `${p.providerId}:${p.isValid}`)
+			.sort()
+			.join(',');
+		if (_providerSnapshot && _providerSnapshot !== _lastProviderSnapshot) {
+			_lastProviderSnapshot = _providerSnapshot;
+			void setModels().catch((e) =>
+				console.error('[layout] setModels() after providerStatusV2 change failed:', e)
+			);
+		}
 	}
 </script>
 

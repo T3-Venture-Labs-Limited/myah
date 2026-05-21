@@ -486,3 +486,169 @@ async def test_title_skips_when_task_absent(db_session):
         f'Title should be unchanged when TITLE_GENERATION not in tasks. '
         f'Got: {row.title!r}'
     )
+
+
+# ---------------------------------------------------------------------------
+# T3-1030: Reasoning-content leak regression tests
+#
+# When a reasoning model (Claude extended thinking, o3, DeepSeek-R1, etc.) is
+# used as the aux model for title/follow-up generation, it can return
+# content='' (or None) alongside a populated reasoning_content carrying its
+# chain-of-thought. The buggy `or reasoning_content` fallback in chat_tasks.py
+# caused the thinking trace to be truncated to 80 chars and saved as the chat
+# title (or parsed as follow-ups).
+#
+# Fix scope: drop the reasoning_content fallback in both _run_title() and
+# _parse_follow_ups(). When content is empty, no DB write should happen — the
+# provisional title from PR 1a stays.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_title_empty_content_with_reasoning_does_not_leak(db_session):
+    """Title generation must NOT use reasoning_content when content is empty.
+
+    Regression for T3-1030. Reasoning models sometimes return content='' alongside
+    a populated reasoning_content. The buggy `or` chain caused the thinking trace
+    to be truncated to 80 chars and saved as the chat title.
+
+    Expected behavior: when content is empty, no DB write happens — the
+    provisional title from PR 1a stays.
+    """
+    chat_id = str(uuid.uuid4())
+    msg_id = str(uuid.uuid4())
+    provisional_title = 'Provisional From First Message'
+    _insert_chat(db_session, chat_id, msg_id, title=provisional_title)
+
+    reasoning_trace = (
+        'Looking at the conversation, the user is asking about traveling to Paris '
+        'in spring. They want to know the best neighborhoods. A concise title that '
+        'captures this is "Paris Travel Planning Guide".'
+    )
+
+    aux_call_mock = AsyncMock(
+        return_value={
+            'status': 200,
+            'body': {
+                'choices': [{
+                    'message': {
+                        'content': '',                          # empty — the trigger
+                        'reasoning_content': reasoning_trace,
+                        'role': 'assistant',
+                    }
+                }],
+                'usage': {},
+            },
+            'headers': {},
+        }
+    )
+
+    mod = _load_chat_tasks_module(aux_call_mock)
+    ctx = _build_ctx(chat_id, msg_id)
+    await mod.background_tasks_handler(ctx)
+
+    row = _fetch_row(db_session, chat_id)
+    assert row.title == provisional_title, (
+        f'T3-1030 regression: reasoning_content leaked into title. '
+        f'Expected provisional title {provisional_title!r} (unchanged), '
+        f'got {row.title!r}'
+    )
+
+
+@pytest.mark.asyncio
+async def test_title_null_content_with_reasoning_does_not_leak(db_session):
+    """Regression for T3-1030 — covers content=None branch.
+
+    Sibling to the empty-string case; covers the case where the aux response
+    has content=None (model omits the field or sets it explicitly to null)
+    while reasoning_content is populated.
+    """
+    chat_id = str(uuid.uuid4())
+    msg_id = str(uuid.uuid4())
+    provisional_title = 'Provisional From First Message'
+    _insert_chat(db_session, chat_id, msg_id, title=provisional_title)
+
+    reasoning_trace = (
+        'Analysis: The conversation topic is Python async programming. '
+        'Best title would be "Async Python Patterns".'
+    )
+
+    aux_call_mock = AsyncMock(
+        return_value={
+            'status': 200,
+            'body': {
+                'choices': [{
+                    'message': {
+                        'content': None,                        # null — the trigger
+                        'reasoning_content': reasoning_trace,
+                        'role': 'assistant',
+                    }
+                }],
+                'usage': {},
+            },
+            'headers': {},
+        }
+    )
+
+    mod = _load_chat_tasks_module(aux_call_mock)
+    ctx = _build_ctx(chat_id, msg_id)
+    await mod.background_tasks_handler(ctx)
+
+    row = _fetch_row(db_session, chat_id)
+    assert row.title == provisional_title, (
+        f'T3-1030 regression: reasoning_content leaked into title with content=None. '
+        f'Expected {provisional_title!r}, got {row.title!r}'
+    )
+
+
+@pytest.mark.asyncio
+async def test_follow_ups_reasoning_content_does_not_leak(db_session):
+    """Regression for T3-1030 — follow-up sibling to the title fix.
+
+    Same `or reasoning_content` bug exists in _parse_follow_ups (line ~283).
+    Mocks an aux response where content is empty but reasoning_content embeds
+    a follow_ups JSON envelope (as a reasoning model might naturally write
+    while deciding what to suggest). The fix must reject this — only `content`
+    is authoritative for follow-up payloads.
+    """
+    chat_id = str(uuid.uuid4())
+    msg_id = str(uuid.uuid4())
+    _insert_chat(db_session, chat_id, msg_id, title='New Chat')
+
+    aux_call_mock = AsyncMock(
+        return_value={
+            'status': 200,
+            'body': {
+                'choices': [{
+                    'message': {
+                        'content': '',                          # empty — the trigger
+                        'reasoning_content': (
+                            'I need to suggest follow-up questions. '
+                            '{"follow_ups": ["What else should I know?", "Tell me more."]} '
+                            'These seem like reasonable follow-ups based on the context.'
+                        ),
+                        'role': 'assistant',
+                    }
+                }],
+                'usage': {},
+            },
+            'headers': {},
+        }
+    )
+
+    emitted_events = []
+
+    async def capture_emitter(event):
+        emitted_events.append(event)
+
+    ctx = _build_ctx(chat_id, msg_id, aux_event_emitter=capture_emitter)
+    ctx['tasks'] = {'title_generation': False, 'follow_up_generation': True}
+
+    mod = _load_chat_tasks_module(aux_call_mock)
+    await mod.background_tasks_handler(ctx)
+
+    follow_up_events = [e for e in emitted_events if e.get('type') == 'chat:message:follow_ups']
+    assert len(follow_up_events) == 0, (
+        f'T3-1030 regression: follow-ups leaked from reasoning_content. '
+        f'Expected zero follow-up events, got: {follow_up_events}'
+    )

@@ -377,6 +377,7 @@
 								{rateMessage}
 								{actionMessage}
 								{saveMessage}
+								{sendMessage}
 								{submitMessage}
 								{addMessages}
 								{readOnly}

@@ -491,6 +491,7 @@ async def get_unified_models(user=Depends(get_verified_user)):
 
         for m in models:
             m['tags'] = [{'name': pid}]
+            m['selection_key'] = f'{pid}::{m["id"]}'
             all_models.append(m)
 
     return all_models

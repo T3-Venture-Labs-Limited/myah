@@ -1,10 +1,17 @@
-// Tests for the cron approval option-filtering logic extracted from
-// ConfirmationCard.svelte. We test the pure filter function directly
-// because @testing-library/svelte is not installed in this project.
-// The component uses this same predicate in its $: visibleOptions reactive declaration.
+// Tests for ConfirmationCard.svelte.
+//
+// Two suites:
+//   1. The pure cron-approval option-filtering predicate (no DOM).
+//   2. Component-level tests of the 404 "stuck confirmation" recovery
+//      behavior introduced by Task 2.1 of the OSS post-launch reliability
+//      plan — when POST /openai/chat/confirm returns 404 we now render a
+//      Retry button + "interrupted" message instead of silently flipping
+//      localStatus to 'cancelled'.
 
-import { describe, expect, test } from 'vitest';
+import { describe, expect, test, vi, beforeEach, afterEach } from 'vitest';
+import { render, fireEvent, screen, waitFor } from '@testing-library/svelte';
 import type { ConfirmationItem } from './types';
+import ConfirmationCard from './ConfirmationCard.svelte';
 
 // ── Helper that mirrors the component's $: visibleOptions logic ───────────────
 
@@ -21,7 +28,23 @@ const baseItem: Pick<ConfirmationItem, 'options' | 'metadata'> = {
 	metadata: {}
 };
 
-// ── Tests ─────────────────────────────────────────────────────────────────────
+function makeConfirmationItem(overrides: Partial<ConfirmationItem> = {}): ConfirmationItem {
+	return {
+		type: 'confirmation',
+		id: 'conf-1',
+		confirmation_id: 'cf-abc',
+		run_id: 'run-xyz',
+		action_type: 'tool',
+		description: 'Run the dangerous tool?',
+		options: ['approve', 'deny'],
+		metadata: {},
+		status: 'pending',
+		chosen: null,
+		...overrides
+	};
+}
+
+// ── Pure predicate tests ──────────────────────────────────────────────────────
 
 describe('ConfirmationCard cron approval filter', () => {
 	test('non-cron approval: renders all 3 options', () => {
@@ -57,5 +80,92 @@ describe('ConfirmationCard cron approval filter', () => {
 		const result = visibleOptions({ ...baseItem, metadata: { schedule_display: null } });
 		// null is falsy — should NOT filter
 		expect(result).toContain('approve_session');
+	});
+});
+
+// ── 404 / Retry behavior (Task 2.1) ───────────────────────────────────────────
+
+describe('ConfirmationCard 404 handling', () => {
+	const originalFetch = global.fetch;
+
+	beforeEach(() => {
+		// localStorage.token is read by ConfirmationCard for the auth header
+		Object.defineProperty(window, 'localStorage', {
+			value: {
+				getItem: () => 'test-token',
+				setItem: () => {},
+				removeItem: () => {},
+				token: 'test-token'
+			},
+			configurable: true
+		});
+	});
+
+	afterEach(() => {
+		global.fetch = originalFetch;
+		vi.restoreAllMocks();
+	});
+
+	test('renders Retry button when /confirm returns 404', async () => {
+		global.fetch = vi.fn().mockResolvedValue(new Response(null, { status: 404 }));
+
+		const item = makeConfirmationItem();
+		render(ConfirmationCard, { props: { item, messageId: 'msg-1' } });
+
+		const approveBtn = screen.getByRole('button', { name: /^approve$/i });
+		await fireEvent.click(approveBtn);
+
+		await waitFor(() => {
+			expect(screen.getByRole('button', { name: /retry/i })).toBeInTheDocument();
+		});
+		expect(screen.getByText(/interrupted/i)).toBeInTheDocument();
+		// The legacy "no longer active" cancellation copy must be gone.
+		expect(screen.queryByText(/no longer active/i)).not.toBeInTheDocument();
+	});
+
+	test('dispatches retry event when Retry is clicked', async () => {
+		global.fetch = vi.fn().mockResolvedValue(new Response(null, { status: 404 }));
+
+		const { default: Harness } = await import('./__test__/ConfirmationCardHarness.svelte');
+		const item = makeConfirmationItem();
+		const onRetry = vi.fn();
+		render(Harness, { props: { item, messageId: 'msg-1', onRetry } });
+
+		const approveBtn = screen.getByRole('button', { name: /^approve$/i });
+		await fireEvent.click(approveBtn);
+
+		await waitFor(() => {
+			expect(screen.getByRole('button', { name: /retry/i })).toBeInTheDocument();
+		});
+
+		const retryBtn = screen.getByRole('button', { name: /retry/i });
+		await fireEvent.click(retryBtn);
+
+		expect(onRetry).toHaveBeenCalled();
+		expect(onRetry.mock.calls[0][0]).toMatchObject({
+			confirmation_id: 'cf-abc',
+			run_id: 'run-xyz'
+		});
+	});
+
+	test('non-404 errors still surface inline (not interrupted state)', async () => {
+		global.fetch = vi.fn().mockResolvedValue(
+			new Response(JSON.stringify({ detail: 'Server exploded' }), {
+				status: 500,
+				headers: { 'Content-Type': 'application/json' }
+			})
+		);
+
+		const item = makeConfirmationItem();
+		render(ConfirmationCard, { props: { item, messageId: 'msg-1' } });
+
+		const approveBtn = screen.getByRole('button', { name: /^approve$/i });
+		await fireEvent.click(approveBtn);
+
+		await waitFor(() => {
+			expect(screen.getByText(/Server exploded/i)).toBeInTheDocument();
+		});
+		expect(screen.queryByRole('button', { name: /retry/i })).not.toBeInTheDocument();
+		expect(screen.queryByText(/interrupted/i)).not.toBeInTheDocument();
 	});
 });

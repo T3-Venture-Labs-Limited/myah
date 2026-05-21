@@ -620,6 +620,27 @@ def _start_container_sync(
         # ── Myah: Media attachments — adapter fetches bytes from platform ────────────
         'MYAH_PLATFORM_BASE_URL': f'http://{PLATFORM_WEBHOOK_HOST}:{PLATFORM_PORT}',
         'MYAH_PLATFORM_BEARER': AGENT_BEARER_TOKEN,
+        # Keep the stock plugin's fail-closed adapter auth and cron watcher
+        # working even if entrypoint-level .env alias writing changes.
+        #
+        # SECURITY-BOUNDARY ASSUMPTION (per spec-review 2026-05-19 follow-up
+        # #1 on PR #200): we deliberately set MYAH_ADAPTER_AUTH_KEY,
+        # MYAH_AGENT_BEARER_TOKEN, MYAH_PLATFORM_BEARER, and API_SERVER_KEY
+        # ALL to the same `AGENT_BEARER_TOKEN` value. This is acceptable
+        # TODAY because the plugin treats every name as the same shared
+        # secret on the platform↔agent boundary — there's no scope or
+        # capability separation between the adapter-auth handshake, the
+        # cron-watcher webhook bearer, and the api-server admin key.
+        #
+        # If a future plugin release splits these into separate scopes
+        # (e.g. adapter-auth becomes a narrower capability than the cron
+        # bearer), this co-assignment becomes a privilege-escalation
+        # vector. The audit gate is: any time the plugin's `_check_auth`
+        # or `cron_watcher` starts reading a NEW env-var name AND the
+        # plugin docs imply that name should hold a different secret,
+        # break this co-assignment and provision the names independently.
+        'MYAH_ADAPTER_AUTH_KEY': AGENT_BEARER_TOKEN,
+        'MYAH_AGENT_BEARER_TOKEN': AGENT_BEARER_TOKEN,
         # ────────────────────────────────────────────────────────────────────────────
         'MYAH_USER_ID': user_id,
         # ── Myah: suppress upstream "no home channel" warning ──────────────

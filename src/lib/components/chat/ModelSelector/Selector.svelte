@@ -3,6 +3,8 @@
 	import { marked } from 'marked';
 	import Fuse from 'fuse.js';
 
+	import { parseSelectionKey, resolveCompositeForLegacyBareId } from '$lib/utils/modelSelection';
+
 	import dayjs from '$lib/dayjs';
 	import relativeTime from 'dayjs/plugin/relativeTime';
 	dayjs.extend(relativeTime);
@@ -79,13 +81,13 @@
 		defaultModel.set(modelId);
 		try {
 			await setUserDefaultModel(localStorage.token, modelId);
-		// Keep the Hermes container's agent.model in sync so
-		// background tasks (title/tag/follow-up) use the same model.
-		// Fire-and-forget — the platform-side default has already
-		// persisted; a Hermes sync failure shouldn't block the toast.
-		patchAgentConfig(localStorage.token, { model: modelId }).catch((err) =>
-			console.warn('[model-selector] patchAgentConfig sync failed', err)
-		);
+			// Keep the Hermes container's agent.model in sync so
+			// background tasks (title/tag/follow-up) use the same model.
+			// Fire-and-forget — the platform-side default has already
+			// persisted; a Hermes sync failure shouldn't block the toast.
+			patchAgentConfig(localStorage.token, { model: modelId }).catch((err) =>
+				console.warn('[model-selector] patchAgentConfig sync failed', err)
+			);
 			const name = items.find((i) => i.value === modelId)?.label ?? modelId;
 			toast.success($i18n.t('Default model set to {{modelName}}', { modelName: name }));
 		} catch (err) {
@@ -102,7 +104,12 @@
 	let tags = [];
 
 	let selectedModel = '';
-	$: selectedModel = items.find((item) => item.value === value) ?? '';
+	$: resolvedValue = resolveCompositeForLegacyBareId(
+		value ?? '',
+		items.map((i) => i.model)
+	);
+	$: selectedModel =
+		items.find((item) => (item.model?.selection_key ?? item.value) === resolvedValue) ?? '';
 
 	let searchValue = '';
 
@@ -208,7 +215,9 @@
 	const resetView = async () => {
 		await tick();
 
-		const selectedInFiltered = filteredItems.findIndex((item) => item.value === value);
+		const selectedInFiltered = filteredItems.findIndex(
+			(item) => (item.model?.selection_key ?? item.value) === resolvedValue
+		);
 
 		if (selectedInFiltered >= 0) {
 			// The selected model is visible in the current filter
@@ -331,8 +340,17 @@
 											aria-label={$i18n.t('Search In Models')}
 											on:keydown={(e) => {
 												if (e.code === 'Enter' && filteredItems.length > 0) {
-													value = filteredItems[selectedModelIdx].value;
+													const picked = filteredItems[selectedModelIdx];
+													const sel = parseSelectionKey(
+														picked.model?.selection_key ?? picked.value
+													);
+													// Composite outward — see onClick handler for the rationale.
+													value = picked.model?.selection_key ?? picked.value;
 													show = false;
+													dispatch('change', {
+														model: sel.modelId,
+														provider: sel.provider
+													});
 													return; // dont need to scroll on selection
 												} else if (e.code === 'ArrowDown') {
 													e.stopPropagation();
@@ -547,7 +565,7 @@
 											}}
 										>
 											<div style="height: {visibleStart * ITEM_HEIGHT}px;" />
-											{#each filteredItems.slice(visibleStart, visibleEnd) as item, i (item.value)}
+											{#each filteredItems.slice(visibleStart, visibleEnd) as item, i (item.model?.selection_key ?? item.value)}
 												{@const index = visibleStart + i}
 												<ModelItem
 													{selectedModelIdx}
@@ -557,23 +575,34 @@
 													{pinModelHandler}
 													{setDefaultHandler}
 													onClick={async () => {
-														value = item.value;
+														const sel = parseSelectionKey(item.model?.selection_key ?? item.value);
+														// Emit composite outward so the parent's selectedModels disambiguates
+														// between same-id rows from different providers. Chat.svelte lookups
+														// use (m.selection_key ?? m.id) to find the exact row that was
+														// clicked, so the dispatch payload's model_item carries the right
+														// tags[0].name. Hermes still receives BARE model_id over the wire
+														// via the setChatSessionModel call below.
+														value = item.model?.selection_key ?? item.value;
 														selectedModelIdx = index;
 														show = false;
+
+														dispatch('change', {
+															model: sel.modelId,
+															provider: sel.provider
+														});
 
 														// ── T3-932: per-session model override ──
 														// Tell the agent container to use this model
 														// for this chat session only. Does NOT write
 														// to $settings or config.yaml (that lives in
 														// Settings → Default model + "Set as default").
-														if ($chatId && item.value && item.value !== 'myah') {
+														if ($chatId && sel.modelId && sel.modelId !== 'myah') {
 															try {
-																const provider = item.model?.tags?.[0]?.name;
 																await setChatSessionModel(
 																	localStorage.token,
 																	$chatId,
-																	item.value,
-																	provider
+																	sel.modelId,
+																	sel.provider ?? undefined
 																);
 															} catch (err) {
 																console.error('[model-selector] setChatSessionModel failed', err);

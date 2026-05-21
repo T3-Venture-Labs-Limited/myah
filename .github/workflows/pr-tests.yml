@@ -98,7 +98,10 @@ jobs:
             backend/myah/test/test_no_saas_enabling_code.py
             backend/myah/test/test_oss_seed_user.py
             backend/myah/test/test_oss_probe.py
-            backend/myah/test/test_processes_oss_mode.py
+            backend/myah/test/test_processes_oss_route_classification.py
+            backend/myah/test/test_processes_no_router_level_gate.py
+            backend/myah/test/apps/myah/routers/test_processes_oss_parity.py
+            backend/myah/test/apps/myah/routers/test_providers_router_selection_key.py
             backend/myah/test/test_env_back_compat.py
             backend/myah/test/test_setup_myah_oss_script.py
           )

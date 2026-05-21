@@ -271,9 +271,17 @@ set_var "$HERMES_ENV"   MYAH_PLATFORM_BEARER    "$TOKEN"
 # would 500 with 'Adapter missing ... env' on the first send. If the
 # user still has the broken legacy default, replace it; otherwise
 # preserve whatever they've set (could be a remote platform URL).
-LEGACY_BROKEN_URL='http://host.docker.internal:8080'
+#
+# Per Task 3.3 (this PR): also migrates from the OBSOLETE port 8154
+# default that older pre-0.1.0-beta.1 installs wrote. The migration
+# block already supersedes Task 3.3's idempotent-overwrite intent.
+LEGACY_BROKEN_URLS=(
+  'http://host.docker.internal:8080'   # only resolved inside containers
+  'http://localhost:8154'              # obsolete port from pre-launch installs
+)
 CURRENT_PLATFORM_URL="$(get_var "$HERMES_ENV" MYAH_PLATFORM_BASE_URL)"
-if [[ -z "$CURRENT_PLATFORM_URL" || "$CURRENT_PLATFORM_URL" == "$LEGACY_BROKEN_URL" ]]; then
+if [[ -z "$CURRENT_PLATFORM_URL" ]] \
+    || printf '%s\n' "${LEGACY_BROKEN_URLS[@]}" | grep -Fxq "$CURRENT_PLATFORM_URL"; then
   set_var "$HERMES_ENV" MYAH_PLATFORM_BASE_URL "http://127.0.0.1:8080"
 fi
 
@@ -413,19 +421,14 @@ if ! "$HERMES_PY" -m pip --version >/dev/null 2>&1; then
   fi
 fi
 
-# Resolve the plugin SHA from versions.env (single source of truth on the
-# public mirror; the private monorepo equivalent lives in
-# agent/Dockerfile.stock). Both the production agent image and the OSS
-# install use the same pin so upgrades stay coordinated.
-if [[ ! -f "$ROOT/versions.env" ]]; then
-  echo "✗ versions.env not found at $ROOT/versions.env" >&2
-  exit 1
-fi
-# shellcheck source=/dev/null
-source "$ROOT/versions.env"
-PLUGIN_SHA="${MYAH_PLUGIN_SHA:-}"
+# Resolve the plugin SHA from agent/Dockerfile.stock (the canonical source
+# inside this internal monorepo). The public mirror reads the same SHA
+# from versions.env at its repo root — both must stay in sync.
+# Both the production agent image and the OSS install use the same pin so
+# upgrades stay coordinated.
+PLUGIN_SHA="$(grep -E '^ARG MYAH_PLUGIN_SHA=' "$ROOT/agent/Dockerfile.stock" | cut -d= -f2)"
 if [[ -z "$PLUGIN_SHA" ]]; then
-  echo "✗ MYAH_PLUGIN_SHA not set in $ROOT/versions.env" >&2
+  echo "✗ Could not find MYAH_PLUGIN_SHA in $ROOT/agent/Dockerfile.stock" >&2
   exit 1
 fi
 
@@ -650,7 +653,85 @@ prompt_service_choice() {
   esac
 }
 
+# Detect + retire pre-existing LaunchAgent plists from earlier Hermes /
+# Myah installs that used different label conventions. These conflict
+# with the canonical `dev.myah.hermes-{gateway,dashboard}` plists we
+# write below — the OS will happily run two competing copies of the
+# gateway against the same port, with the older one usually winning the
+# bind race and the newer plist staying in a flapping
+# spawn-fail-respawn loop.
+#
+# Glob patterns we treat as legacy:
+#   com.nous-research.hermes.{gateway,dashboard}.plist
+#   com.myah.*.plist  (any earlier Myah-labelled service)
+# We deliberately do NOT touch dev.myah.* — that's the current label;
+# overwriting is handled by install_launchd_plists itself.
+migrate_legacy_launchagents() {
+  local agents_dir="$HOME/Library/LaunchAgents"
+  if [[ ! -d "$agents_dir" ]]; then
+    return 0
+  fi
+  shopt -s nullglob
+  local found_legacy=()
+  for plist in "$agents_dir"/com.nous-research.hermes.*.plist "$agents_dir"/com.myah.*.plist; do
+    if [[ -f "$plist" ]]; then
+      found_legacy+=("$plist")
+    fi
+  done
+  shopt -u nullglob
+  if [[ "${#found_legacy[@]}" -eq 0 ]]; then
+    return 0
+  fi
+  echo "Detected ${#found_legacy[@]} legacy LaunchAgent plist(s); migrating..."
+  local ts
+  ts=$(date +%Y%m%d_%H%M%S)
+  for plist in "${found_legacy[@]}"; do
+    local label
+    label=$(basename "$plist" .plist)
+    echo "  Unloading $label"
+    # bootout is the modern equivalent; fall back to unload for older macOS.
+    launchctl bootout "gui/$UID/$label" 2>/dev/null \
+      || launchctl unload "$plist" 2>/dev/null \
+      || true
+    echo "  Renaming $plist → $plist.bak.$ts"
+    mv "$plist" "$plist.bak.$ts"
+  done
+}
+
+# Linux counterpart: retire pre-existing systemd-user units from
+# earlier installs that aren't part of the canonical Myah/Hermes set we
+# install below. `mask` is the strongest form of "do not start this
+# again" — equivalent to renaming the plist on macOS.
+#
+# Specifically we look for `myah-platform.service` (an older pattern
+# where the platform itself was a systemd-user unit instead of docker
+# compose). We do NOT mask `hermes-gateway` / `hermes-dashboard` here
+# because install_systemd_units below installs units with those same
+# names — they overwrite cleanly via daemon-reload, no migration needed.
+migrate_legacy_systemd_units() {
+  if ! command -v systemctl >/dev/null 2>&1; then
+    return 0
+  fi
+  local found=()
+  for unit in myah-platform; do
+    if systemctl --user list-unit-files "${unit}.service" 2>/dev/null | grep -q "${unit}.service"; then
+      found+=("$unit")
+    fi
+  done
+  if [[ "${#found[@]}" -eq 0 ]]; then
+    return 0
+  fi
+  echo "Detected ${#found[@]} legacy systemd unit(s); migrating..."
+  for unit in "${found[@]}"; do
+    echo "  Stopping + disabling + masking $unit"
+    systemctl --user stop "${unit}.service" 2>/dev/null || true
+    systemctl --user disable "${unit}.service" 2>/dev/null || true
+    systemctl --user mask "${unit}.service" 2>/dev/null || true
+  done
+}
+
 install_systemd_units() {
+  migrate_legacy_systemd_units
   local hermes_bin
   hermes_bin="$(command -v hermes)" || {
     echo "⚠ hermes not on PATH — skipping systemd unit install"
@@ -683,6 +764,7 @@ install_systemd_units() {
 }
 
 install_launchd_plists() {
+  migrate_legacy_launchagents
   local hermes_bin
   hermes_bin="$(command -v hermes)" || {
     echo "⚠ hermes not on PATH — skipping launchd plist install"
@@ -779,8 +861,8 @@ echo "     When prompted for MYAH_ADAPTER_AUTH_KEY, press Enter to skip —"
 echo "     this script already wrote that value to $HERMES_ENV."
 echo
 echo "  3. Start the Hermes gateway. Two options:"
-echo "       hermes gateway run                            # foreground"
-echo "       hermes gateway install && hermes gateway start # systemd background"
+echo "       hermes gateway run --replace                  # foreground (replaces any existing gateway)"
+echo "       ./scripts/dev-oss.sh up                       # systemd/launchd background (uses the unit installed above)"
 echo "     Verify it's reachable:"
 echo "       curl -s http://localhost:8642/health         # Hermes core"
 echo "       curl -s http://localhost:8643/myah/health    # Myah plugin"
