@@ -27,6 +27,7 @@
 #   scripts/dev-oss.sh down              # stop everything
 #   scripts/dev-oss.sh restart           # stop + start
 #   scripts/dev-oss.sh status            # PIDs, ports, health
+#   scripts/dev-oss.sh doctor            # diagnose the OSS dev environment
 #   scripts/dev-oss.sh logs <component>  # tail logs (gateway|dashboard|platform)
 #   scripts/dev-oss.sh dashboard {start|stop|restart}  # dashboard only
 #   scripts/dev-oss.sh gateway   {start|stop|restart}  # gateway only
@@ -162,6 +163,110 @@ print_status() {
   printf "%-12s %-12s %-10s %s\n" "platform" "$docker_status" "8080" "$(probe_port 8080)"
 }
 
+# `doctor` — environment diagnostic. Cheaper than `up + status` because
+# it doesn't try to start anything; just inspects state. Each check
+# prints ✓ on success and ✗ + a one-line "→ Fix: …" suggestion on
+# failure. Useful first stop when a fresh OSS install or an upgrade
+# leaves the user staring at a 401 / cron-no-output / "Plugin not
+# installed" banner. See gotchas/2026-05-19-oss-*.md for the
+# documented failure modes this exercises.
+doctor() {
+  local hermes_env="${HERMES_HOME_DIR}/.env"
+  # Public layout: .env lives at the repo root (no platform-oss/ subdir).
+  # The internal monorepo equivalent is platform-oss/.env; MYAH_PLATFORM_ENV
+  # overrides for non-standard checkouts.
+  local platform_env="${MYAH_PLATFORM_ENV:-$ROOT/.env}"
+  echo "Myah OSS environment diagnostic:"
+
+  # 1. gateway running?
+  if pgrep -f 'hermes gateway' >/dev/null 2>&1; then
+    local gw_pid
+    gw_pid=$(pgrep -f 'hermes gateway' | head -1)
+    echo "  ✓ Gateway running (PID $gw_pid)"
+  else
+    echo "  ✗ Gateway NOT running"
+    echo "    → Fix: ./scripts/dev-oss.sh up"
+  fi
+
+  # 2. dashboard running?
+  if pgrep -f 'hermes dashboard' >/dev/null 2>&1; then
+    local dash_pid
+    dash_pid=$(pgrep -f 'hermes dashboard' | head -1)
+    echo "  ✓ Dashboard running (PID $dash_pid)"
+  else
+    echo "  ✗ Dashboard NOT running"
+    echo "    → Fix: ./scripts/dev-oss.sh up"
+  fi
+
+  # 3. platform .env exists?
+  if [[ -f "$platform_env" ]]; then
+    echo "  ✓ Platform .env exists ($platform_env)"
+  else
+    echo "  ✗ Platform .env NOT found at $platform_env"
+    echo "    → Fix: cp $ROOT/.env.example $platform_env  (or re-run scripts/setup-myah-oss.sh)"
+  fi
+
+  # 4. MYAH_PLATFORM_BASE_URL in hermes .env (Task 3.5 gotcha).
+  if [[ -f "$hermes_env" ]]; then
+    local hermes_url
+    hermes_url=$(grep '^MYAH_PLATFORM_BASE_URL=' "$hermes_env" 2>/dev/null | tail -n1 | cut -d= -f2-)
+    if [[ -n "$hermes_url" ]]; then
+      echo "  ✓ MYAH_PLATFORM_BASE_URL = $hermes_url"
+      if [[ "$hermes_url" != "http://host.docker.internal:8080" ]] \
+         && [[ "$hermes_url" != "http://localhost:8080" ]]; then
+        echo "    ⚠ Non-canonical value — expected http://host.docker.internal:8080 or http://localhost:8080"
+        echo "      → Fix: re-run scripts/setup-myah-oss.sh (idempotent, overwrites stale value)"
+      fi
+    else
+      echo "  ✗ MYAH_PLATFORM_BASE_URL not set in $hermes_env"
+      echo "    → Fix: re-run scripts/setup-myah-oss.sh"
+    fi
+  else
+    echo "  ✗ $hermes_env not found"
+    echo "    → Fix: re-run scripts/setup-myah-oss.sh"
+  fi
+
+  # 5. MYAH_AGENT_BEARER_TOKEN alignment between platform .env and ~/.hermes/.env.
+  if [[ -f "$hermes_env" ]] && [[ -f "$platform_env" ]]; then
+    local hermes_token platform_token
+    hermes_token=$(grep '^MYAH_AGENT_BEARER_TOKEN=' "$hermes_env" 2>/dev/null | tail -n1 | cut -d= -f2-)
+    platform_token=$(grep '^MYAH_AGENT_BEARER_TOKEN=' "$platform_env" 2>/dev/null | tail -n1 | cut -d= -f2-)
+    if [[ -n "$hermes_token" ]] && [[ "$hermes_token" == "$platform_token" ]]; then
+      echo "  ✓ MYAH_AGENT_BEARER_TOKEN aligned (platform .env ↔ ~/.hermes/.env)"
+    elif [[ -z "$hermes_token" && -z "$platform_token" ]]; then
+      echo "  ✗ MYAH_AGENT_BEARER_TOKEN missing from both .envs"
+      echo "    → Fix: re-run scripts/setup-myah-oss.sh"
+    else
+      echo "  ✗ MYAH_AGENT_BEARER_TOKEN mismatch (or missing on one side)"
+      echo "    → Fix: re-run scripts/setup-myah-oss.sh"
+    fi
+  fi
+
+  # 6. ports reachable?
+  for port_pair in "platform 8080" "gateway 8642" "gateway-secondary 8643" "dashboard 9119"; do
+    local name=${port_pair%% *}
+    local port=${port_pair##* }
+    if [[ "$(probe_port "$port")" == "open" ]]; then
+      echo "  ✓ Port $port ($name) reachable"
+    else
+      echo "  ✗ Port $port ($name) NOT reachable"
+    fi
+  done
+
+  # 7. plugin installed?
+  if command -v hermes >/dev/null 2>&1; then
+    if hermes plugins list 2>/dev/null | grep -qE '(^|[[:space:]])myah([[:space:]]|$)'; then
+      echo "  ✓ Plugin myah installed"
+    else
+      echo "  ✗ Plugin myah NOT installed"
+      echo "    → Fix: hermes plugins install T3-Venture-Labs-Limited/myah-hermes-plugin"
+    fi
+  else
+    echo "  ✗ hermes binary not on PATH"
+    echo "    → Fix: curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh | bash"
+  fi
+}
+
 case "${1:-status}" in
   up)
     start_component gateway   "$HERMES_BIN" gateway run
@@ -184,6 +289,9 @@ case "${1:-status}" in
     ;;
   status)
     print_status
+    ;;
+  doctor)
+    doctor
     ;;
   logs)
     case "${2:-}" in
@@ -216,7 +324,7 @@ case "${1:-status}" in
     esac
     ;;
   *)
-    echo "usage: $0 {up|down|restart|status|logs <c>|gateway {start|stop|restart}|dashboard {start|stop|restart}}" >&2
+    echo "usage: $0 {up|down|restart|status|doctor|logs <c>|gateway {start|stop|restart}|dashboard {start|stop|restart}}" >&2
     exit 2
     ;;
 esac

@@ -6,7 +6,17 @@
 	import { models as allModels, defaultModel } from '$lib/stores';
 	import { setUserDefaultModel } from '$lib/apis/users';
 	import { patchAgentConfig } from '$lib/apis/agent-config';
+	import { parseSelectionKey, resolveCompositeForLegacyBareId } from '$lib/utils/modelSelection';
 	import ProviderPicker from '$lib/components/Providers/ProviderPicker.svelte';
+
+	// Subset of model fields used for selection-key rendering and save logic.
+	// The store's OpenAIModel type doesn't include selection_key/tags yet.
+	type SelectableModel = {
+		id: string;
+		name: string;
+		selection_key?: string;
+		tags?: Array<{ name: string }>;
+	};
 
 	const i18n = getContext('i18n');
 
@@ -15,23 +25,40 @@
 	// the new user.default_model column AND updates the Hermes container's
 	// agent.model config so background tasks (titles/tags) use the same
 	// model the user picked.
-	let defaultModelId: string = $defaultModel ?? '';
-	$: defaultModelId = $defaultModel ?? defaultModelId;
+	let defaultModelId: string = '';
+
+	// Hydrate from $defaultModel + current models. If $defaultModel is already
+	// composite ('provider::model'), keep it. If bare, resolve to the composite
+	// of the first matching row (helper returns bare unchanged when no match).
+	$: defaultModelId = resolveCompositeForLegacyBareId(
+		$defaultModel ?? '',
+		$allModels as SelectableModel[]
+	);
+	$: selectModels = ($allModels as SelectableModel[]).filter((m) => m.id !== 'myah');
 	let savingDefault = false;
 
 	async function saveDefaultModelFromSettings() {
-		if (!defaultModelId || defaultModelId === 'myah') {
+		if (!defaultModelId) {
 			toast.error($i18n.t('Pick a provider model first'));
 			return;
 		}
 		savingDefault = true;
 		const previous = $defaultModel;
-		defaultModel.set(defaultModelId); // optimistic
+		// Parse so we can send BARE model_id to Hermes (which expects bare) while
+		// persisting the COMPOSITE selection_key in user.default_model so the
+		// provider choice survives reloads and dropdown hydration finds the
+		// correct row. parseSelectionKey returns {provider: null} for legacy
+		// bare ids — those persist as-is.
+		const { modelId } = parseSelectionKey(defaultModelId);
+		defaultModel.set(defaultModelId); // optimistic — composite if composite
 		try {
+			// Always two calls: persist (composite or bare) to user.default_model,
+			// then sync the bare modelId to Hermes agent.model so background tasks
+			// (title gen, follow-ups) use the same model. The provider routing for
+			// interactive chats is carried by model.tags[0].name in the chat
+			// payload itself — set by ModelSelector when the user picks a row.
 			await setUserDefaultModel(localStorage.token, defaultModelId);
-			// Keep the Hermes container's agent.model in sync so
-			// title/tag/follow-up tasks use the same model by default.
-			await patchAgentConfig(localStorage.token, { model: defaultModelId });
+			await patchAgentConfig(localStorage.token, { model: modelId });
 			toast.success($i18n.t('Default model updated'));
 		} catch (err) {
 			console.error('[settings/provider] default model save failed', err);
@@ -42,7 +69,6 @@
 		}
 	}
 	// ─────────────────────────────────────────────────────────────────
-
 </script>
 
 <div class="space-y-4">
@@ -65,8 +91,10 @@
 					aria-label={$i18n.t('Default model')}
 				>
 					<option value="">{$i18n.t('— Select a default —')}</option>
-					{#each $allModels.filter((m) => m.id !== 'myah') as m (m.id)}
-						<option value={m.id}>{m.name ?? m.id}</option>
+					{#each selectModels as m (m.selection_key ?? m.id)}
+						<option value={m.selection_key ?? m.id}>
+							{m.name ?? m.id}{m.tags?.[0]?.name ? ` — ${m.tags[0].name}` : ''}
+						</option>
 					{/each}
 				</select>
 				<button

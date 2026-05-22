@@ -151,9 +151,8 @@ export function bumpArtifactExplorerRefresh(): void {
 // the active selection (with a generated id and the source filename) here;
 // the composer-side RefChipBar consumes the `composerChips` derived store
 // below to render chips above the input.
-export const composerRefs: Writable<
-	Array<SelectionPayload & { id: string; filename: string }>
-> = writable([]);
+export const composerRefs: Writable<Array<SelectionPayload & { id: string; filename: string }>> =
+	writable([]);
 
 // What the composer shows above its input. Merges user-added refs (from
 // composerRefs) with auto-derived file-edit chips (from artifactPendingEdits).
@@ -282,6 +281,16 @@ type BaseModel = {
 	name: string;
 	info?: ModelConfig;
 	owned_by: 'openai';
+	// Myah T3-1031: composite '{provider_id}::{model_id}' emitted by
+	// /api/v1/providers/models when a provider tag is attached. Used as
+	// the Svelte {#each} key and `<option value>` so two providers
+	// curating the same upstream model don't collide. Optional because
+	// legacy base models and pre-T3-1031 caches don't carry it.
+	selection_key?: string;
+	// The frontend builds provider chips and routing from tags[0].name.
+	// Models from the Hermes catalog always carry one tag; base/legacy
+	// Open WebUI models don't, so it's optional at the type level.
+	tags?: Array<{ name: string }>;
 };
 
 export interface OpenAIModel extends BaseModel {

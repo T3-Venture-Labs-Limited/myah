@@ -28,6 +28,9 @@ from pathlib import Path
 
 import pytest
 
+# Public OSS repo layout: test file at backend/myah/test/<this>.py is 3
+# levels deep, so the repo root is parents[3] (not [4] as on internal,
+# where the equivalent path nests under platform-oss/).
 REPO_ROOT = Path(__file__).resolve().parents[3]
 SCRIPT_PATH = REPO_ROOT / 'scripts' / 'setup-myah-oss.sh'
 
@@ -61,7 +64,9 @@ def _run_script(repo_dir: Path, hermes_home: Path, *args: str) -> subprocess.Com
 
     Sets ``MYAH_OSS_SETUP_ENV_ONLY=1`` so the script exits after writing env
     files and skips the plugin-install / hermes-venv-detection steps, which
-    require network access and a real Hermes installation.
+    require network access and a real Hermes installation. Also bypasses
+    the interactive systemd/launchd service-install prompt (Task 3.2's
+    migration code runs only after the env-only escape hatch fires).
 
     On non-zero exit, raises ``AssertionError`` with the script's stdout AND
     stderr inlined. ``subprocess.run(check=True)`` would raise
@@ -78,6 +83,10 @@ def _run_script(repo_dir: Path, hermes_home: Path, *args: str) -> subprocess.Com
             'HERMES_HOME': str(hermes_home),
             'MYAH_OSS_SETUP_ENV_ONLY': '1',
         },
+        # Close stdin defensively; the env-only escape hatch already
+        # fires before any interactive prompt would run.
+        stdin=subprocess.DEVNULL,
+        timeout=30,
     )
     if result.returncode != 0:
         raise AssertionError(
@@ -94,6 +103,7 @@ def sandbox(tmp_path: Path) -> tuple[Path, Path]:
 
     The script is copied (not symlinked) so each test gets a fully isolated
     invocation — modifying the script under test would not affect siblings.
+
     A minimal ``versions.env`` is also seeded; without it the script would
     bail out before reaching even the env-write steps.
     """
@@ -108,6 +118,22 @@ def sandbox(tmp_path: Path) -> tuple[Path, Path]:
     scripts_dir = repo_dir / 'scripts'
     scripts_dir.mkdir()
     shutil.copy(SCRIPT_PATH, scripts_dir / 'setup-myah-oss.sh')
+
+    # Bring agent/Dockerfile.stock into the sandbox so the script's
+    # plugin-SHA resolution step succeeds. The actual SHA value doesn't
+    # matter for these tests — the script just needs the line to exist.
+    agent_dir = repo_dir / 'agent'
+    agent_dir.mkdir()
+    real_dockerfile = REPO_ROOT / 'agent' / 'Dockerfile.stock'
+    if real_dockerfile.exists():
+        shutil.copy(real_dockerfile, agent_dir / 'Dockerfile.stock')
+    else:
+        # Fallback: synthesise a minimal Dockerfile.stock with just the
+        # ARG line the script greps for. Keeps the test fixture
+        # independent of agent/Dockerfile.stock evolving.
+        (agent_dir / 'Dockerfile.stock').write_text(
+            'ARG MYAH_PLUGIN_SHA=0000000000000000000000000000000000000000\n'
+        )
 
     hermes_home = tmp_path / 'hermes'
     # Script will create the dir itself, but creating it here proves the
@@ -217,6 +243,61 @@ def test_legacy_webui_secret_key_promoted_to_myah_secret_key(sandbox):
     platform_env = _parse_env(platform_env_path)
     assert platform_env['MYAH_SECRET_KEY'] == legacy_value, (
         'Legacy WEBUI_SECRET_KEY should seed the new MYAH_SECRET_KEY rather than the script generating a fresh one'
+    )
+
+
+def test_stale_platform_base_url_is_migrated(sandbox):
+    """Per Task 3.3 — pre-existing legacy MYAH_PLATFORM_BASE_URL values in
+    ~/.hermes/.env must be migrated to the canonical 127.0.0.1:8080. The
+    legacy URLs that the script auto-migrates (per the LEGACY_BROKEN_URLS
+    array in setup-myah-oss.sh):
+
+      - 'http://host.docker.internal:8080' (resolved only inside containers)
+      - 'http://localhost:8154' (obsolete pre-0.1.0-beta.1 port)
+
+    Unrelated variables in the same file must not be touched.
+
+    See docs/gotchas/2026-05-19-oss-cron-platform-base-url-drift.md.
+    """
+    repo_dir, hermes_home = sandbox
+    hermes_env_path = hermes_home / '.env'
+
+    # Seed ~/.hermes/.env with a legacy value as if from a prior install.
+    hermes_env_path.write_text(
+        'MYAH_PLATFORM_BASE_URL=http://localhost:8154\nOTHER_VAR=keep_me\n'
+    )
+
+    _run_script(repo_dir, hermes_home)
+
+    hermes_env = _parse_env(hermes_env_path)
+    assert hermes_env.get('MYAH_PLATFORM_BASE_URL') == 'http://127.0.0.1:8080', (
+        'Legacy MYAH_PLATFORM_BASE_URL must be migrated to canonical loopback; got '
+        f'{hermes_env.get("MYAH_PLATFORM_BASE_URL")!r}'
+    )
+    assert hermes_env.get('OTHER_VAR') == 'keep_me', (
+        'set_var helper must only modify the target key, not other lines'
+    )
+
+
+def test_user_customized_platform_base_url_is_preserved(sandbox):
+    """Per Task 3.3 + the auto-migrate logic: if the user has set a
+    non-legacy MYAH_PLATFORM_BASE_URL (e.g. pointing at a remote platform),
+    the script must preserve it — only LEGACY_BROKEN_URLS entries are
+    migrated."""
+    repo_dir, hermes_home = sandbox
+    hermes_env_path = hermes_home / '.env'
+
+    custom_url = 'https://platform.my-remote-deployment.example/v1'
+    hermes_env_path.write_text(
+        f'MYAH_PLATFORM_BASE_URL={custom_url}\nOTHER_VAR=keep_me\n'
+    )
+
+    _run_script(repo_dir, hermes_home)
+
+    hermes_env = _parse_env(hermes_env_path)
+    assert hermes_env.get('MYAH_PLATFORM_BASE_URL') == custom_url, (
+        f'Custom MYAH_PLATFORM_BASE_URL must be preserved; got '
+        f'{hermes_env.get("MYAH_PLATFORM_BASE_URL")!r}'
     )
 
 

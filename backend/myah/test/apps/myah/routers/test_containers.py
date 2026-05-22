@@ -428,9 +428,9 @@ def _fake_to_thread(containers_mod):
 # ── PR 3: Container env-var injection tests ───────────────────────────────
 """Tests for container env-var injection (PR 3 Task 3 regression gate).
 
-Verifies that MYAH_PLATFORM_BASE_URL and MYAH_PLATFORM_BEARER are present in
-the environment dict passed to the Docker containers.run() call so that the
-Hermes media adapter can fetch attachment bytes back from the platform.
+Verifies that MYAH_PLATFORM_BASE_URL, MYAH_PLATFORM_BEARER, and the auth-token
+aliases used by the stock Myah plugin are present in the environment dict passed
+to the Docker containers.run() call.
 """
 
 from unittest.mock import MagicMock, patch
@@ -441,8 +441,8 @@ from docker.errors import NotFound
 class TestContainerEnvInjection:
     """Ensure per-user agent containers receive the media-fetch env vars."""
 
-    def test_container_env_includes_myah_platform_base_and_bearer(self):
-        """MYAH_PLATFORM_BASE_URL and MYAH_PLATFORM_BEARER must be injected."""
+    def test_container_env_includes_myah_platform_base_bearer_and_auth_aliases(self):
+        """Platform URL/bearer plus plugin auth aliases must be injected."""
         from myah.routers.containers import _start_container_sync
 
         captured_env = {}
@@ -481,8 +481,12 @@ class TestContainerEnvInjection:
 
         assert 'MYAH_PLATFORM_BASE_URL' in captured_env, 'MYAH_PLATFORM_BASE_URL missing from container environment'
         assert 'MYAH_PLATFORM_BEARER' in captured_env, 'MYAH_PLATFORM_BEARER missing from container environment'
+        assert 'MYAH_ADAPTER_AUTH_KEY' in captured_env, 'MYAH_ADAPTER_AUTH_KEY missing from container environment'
+        assert 'MYAH_AGENT_BEARER_TOKEN' in captured_env, 'MYAH_AGENT_BEARER_TOKEN missing from container environment'
         assert captured_env['MYAH_PLATFORM_BASE_URL'] == 'http://host.docker.internal:8082'
         assert captured_env['MYAH_PLATFORM_BEARER'] == 'test-bearer'
+        assert captured_env['MYAH_ADAPTER_AUTH_KEY'] == 'test-bearer'
+        assert captured_env['MYAH_AGENT_BEARER_TOKEN'] == 'test-bearer'
 
     def test_container_env_includes_myah_home_chat_disabled(self):
         """B1 regression — suppress the gateway "no home channel" first-message warning.

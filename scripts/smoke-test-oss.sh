@@ -218,14 +218,18 @@ case "${CONFIG_CHECK}" in
         ;;
 esac
 
-# ── Step 3: Processes router returns 501 (upsell-card contract) ───────────
-# processes.py is the canonical "router stays mounted but every endpoint
-# 501s" example in OSS — it's the prior art for the Memory/Integrations
-# upsell-card pattern. If a regression makes it return 200, hosted-only
-# docker-exec code is running inside the OSS container and will crash
-# on first real call.
+# ── Step 3: Processes router returns a JSON array in OSS ──────────────────
+# Per the revised May 13 spec (Tasks 2.3/2.4), /api/v1/processes/
+# returns 200 in OSS — routed via _ensure_container to the host's
+# hermes gateway at host.docker.internal:8642 instead of returning the
+# old 501 upsell-card stub. Inversion lands with the cron-delivery
+# fixes shipped in v0.1.1.
+#
+# Acceptable now: 200 (canonical happy path) OR 401/403 (router is
+# mounted but auth-gated, which still proves the router is wired).
+# Unacceptable: 404 (router not mounted) or 501 (stale OSS gate).
 echo ""
-echo "  [3/5] GET /api/v1/processes/ returns 501 in OSS..."
+echo "  [3/5] GET /api/v1/processes/ returns 200 (or auth-gated) in OSS..."
 
 PROC_RESP=$(curl -s -w "\n%{http_code}" \
     -X GET "${BASE_URL}/api/v1/processes/" \
@@ -234,36 +238,39 @@ PROC_RESP=$(curl -s -w "\n%{http_code}" \
 PROC_CODE=$(echo "${PROC_RESP}" | tail -1)
 PROC_BODY=$(echo "${PROC_RESP}" | sed '$d')
 
-# Acceptable: 501 (the canonical OSS gate) OR 401/403 (the router is
-# mounted but auth-gated — the gate still fires correctly). The single
-# unacceptable status is 200, which means the hosted handler ran.
-if [ "${PROC_CODE}" = "200" ]; then
-    echo "  FAIL: /api/v1/processes/ returned 200 in OSS — hosted code leaked" >&2
-    echo "  Body: ${PROC_BODY:0:400}" >&2
-    echo "  Check _raise_if_oss_mode() at platform-oss/backend/myah/routers/processes.py:79" >&2
-    exit 1
-fi
-
-if [ "${PROC_CODE}" != "501" ]; then
-    # Non-200, non-501 (e.g. 401/403/404) — surface as a WARN so a future
-    # auth-config change doesn't silently mask the 501-shape regression.
-    # If 404 there's a real problem (router not mounted at all).
-    if [ "${PROC_CODE}" = "404" ]; then
+case "${PROC_CODE}" in
+    200)
+        # 200 — verify the body is a JSON array (the hermes /api/jobs
+        # contract is {"jobs": [...]}, but the platform unwraps it to
+        # a top-level list in list_processes()).
+        if echo "${PROC_BODY}" | python3 -c "import sys, json; v = json.load(sys.stdin); sys.exit(0 if isinstance(v, list) else 1)" 2>/dev/null; then
+            echo "  OK: /api/v1/processes/ returns 200 with a JSON array"
+        else
+            echo "  FAIL: /api/v1/processes/ returned 200 but body is not a JSON array" >&2
+            echo "  Body: ${PROC_BODY:0:400}" >&2
+            exit 1
+        fi
+        ;;
+    401|403)
+        echo "  OK: /api/v1/processes/ returned ${PROC_CODE} (auth-gated, router mounted)"
+        ;;
+    404)
         echo "  FAIL: /api/v1/processes/ returned 404 — router not mounted" >&2
-        echo "  Expected 501 (router mounted, OSS gate fires)." >&2
+        echo "  Expected 200 (router routes to host hermes gateway)." >&2
         exit 1
-    fi
-    echo "  WARN: expected 501, got ${PROC_CODE} (auth-gated? not a regression)" >&2
-else
-    # 501 — verify the canonical upsell-card detail string is present.
-    # The frontend matches on this exact substring to render the upsell.
-    if echo "${PROC_BODY}" | grep -q "app.myah.dev"; then
-        echo "  OK: /api/v1/processes/ returns 501 with upsell-card detail"
-    else
-        echo "  WARN: 501 returned but detail missing 'app.myah.dev' link" >&2
-        echo "  Body: ${PROC_BODY:0:300}" >&2
-    fi
-fi
+        ;;
+    501)
+        echo "  FAIL: /api/v1/processes/ returned 501 — stale OSS gate still active" >&2
+        echo "  Tasks 2.3/2.4 removed the gate; check _raise_if_oss_mode() at" >&2
+        echo "  platform-oss/backend/myah/routers/processes.py" >&2
+        exit 1
+        ;;
+    *)
+        echo "  FAIL: /api/v1/processes/ returned unexpected HTTP ${PROC_CODE}" >&2
+        echo "  Body: ${PROC_BODY:0:400}" >&2
+        exit 1
+        ;;
+esac
 
 # ── Step 4: Hosted-only routers are NOT mounted in OSS ───────────────────
 # integrations + agent_memory routers are conditionally include_router'd
@@ -389,6 +396,193 @@ fi
 echo "    OK: /api/v1/agent/toolsets HTTP ${TOOLSETS_CODE}"
 
 # ──────────────────────────────────────────────────────────────────────────
+# Real chat smoke (Task 5.1)
+#
+# Sends a deterministic prompt through the platform→hermes pipeline and
+# polls GET /api/v1/chats/{id} until the assistant message is persisted
+# with done=true and non-empty content (same pattern as the hosted
+# smoke at scripts/smoke-test.sh:228-280 — chat events stream via
+# Socket.IO into the DB, NOT via HTTP SSE).
+#
+# OSS shape: single-user, no auth token. Skips gracefully if either
+#   (a) E2E_OPENROUTER_KEY is unset (preserves the existing CI shape-
+#       check behavior — no provider key, no chat round-trip), or
+#   (b) the OSS bootstrap auth endpoint (oss-signin) is unavailable on
+#       this build (this internal branch does not yet ship it; the
+#       public OSS repo's auths.py:258 does). When the sync workflows
+#       land the two repos converge and this fallback can go away.
+
+fail() {
+    echo "FAIL: $1" >&2
+    exit 1
+}
+
+real_chat_smoke() {
+    if [ -z "${E2E_OPENROUTER_KEY:-}" ]; then
+        echo "  SKIPPED: E2E_OPENROUTER_KEY not set"
+        return 0
+    fi
+
+    local POLL_TIMEOUT=90
+    local POLL_INTERVAL=2
+    echo "Real chat smoke: creating chat + sending a prompt..."
+
+    # OSS has no /signin in this branch. Probe whether unauthenticated
+    # POST /api/v1/chats/new is honored (auto-admin path on the public
+    # OSS repo) before attempting the rest.
+    local probe_code
+    probe_code=$(curl -s -o /dev/null -w "%{http_code}" \
+        -H "Content-Type: application/json" \
+        -X POST -d '{"chat":{"title":"smoke-test"}}' \
+        "${BASE_URL}/api/v1/chats/new" --max-time 10 2>/dev/null || echo "000")
+    if [ "${probe_code}" = "401" ] || [ "${probe_code}" = "403" ]; then
+        echo "  SKIPPED: /api/v1/chats/new requires auth in this build (HTTP ${probe_code})"
+        echo "      The OSS bootstrap auth endpoint (oss-signin) is not present;"
+        echo "      see AGENTS.md > OSS vs Hosted > Auth row."
+        return 0
+    fi
+
+    local chat_resp chat_id
+    chat_resp=$(curl -fsS \
+        -H "Content-Type: application/json" \
+        -X POST -d '{"chat":{"title":"smoke-test"}}' \
+        "${BASE_URL}/api/v1/chats/new")
+    chat_id=$(echo "${chat_resp}" | python3 -c "import sys, json; print(json.load(sys.stdin).get('id', ''))" 2>/dev/null)
+    [ -n "${chat_id}" ] || fail "POST /api/v1/chats/new returned no id (body: ${chat_resp:0:200})"
+
+    # Fire the message — stream=true triggers the background-task path
+    # that emits Socket.IO events and persists to the DB. We don't read
+    # the stream; we poll the DB instead.
+    curl -fsS \
+        -H "Content-Type: application/json" \
+        -X POST \
+        -d "$(python3 -c "
+import json, sys
+print(json.dumps({
+    'chat_id': '${chat_id}',
+    'messages': [{'role': 'user', 'content': 'Reply with the single word OK and nothing else.'}],
+    'stream': True,
+    'model': 'myah',
+}))")" \
+        --max-time 10 \
+        "${BASE_URL}/api/v1/chat/completions" \
+        >/dev/null 2>&1 || true
+
+    local elapsed=0 found=false content=""
+    while [ $elapsed -lt $POLL_TIMEOUT ]; do
+        local chat_state
+        chat_state=$(curl -fsS "${BASE_URL}/api/v1/chats/${chat_id}" 2>/dev/null) || chat_state=""
+        if [ -n "${chat_state}" ]; then
+            content=$(echo "${chat_state}" | python3 -c "
+import sys, json
+try:
+    chat = json.load(sys.stdin)
+    messages = chat.get('chat', {}).get('history', {}).get('messages', {})
+    if isinstance(messages, dict):
+        messages = list(messages.values())
+    for msg in messages:
+        if msg.get('role') in ('assistant', None) and msg.get('done') is True:
+            if (msg.get('content') or '').strip():
+                print(msg['content'][:200])
+                sys.exit(0)
+except Exception:
+    pass
+" 2>/dev/null)
+            if [ -n "${content}" ]; then
+                found=true
+                break
+            fi
+        fi
+        sleep $POLL_INTERVAL
+        elapsed=$((elapsed + POLL_INTERVAL))
+    done
+
+    if [ "${found}" != true ]; then
+        fail "Assistant message did not arrive in ${POLL_TIMEOUT}s"
+    fi
+
+    # Re-fetch +5s later to confirm persistence (the DB write isn't
+    # racing with a subsequent overwrite from a stale background task).
+    sleep 5
+    local content_after
+    content_after=$(curl -fsS "${BASE_URL}/api/v1/chats/${chat_id}" | python3 -c "
+import sys, json
+chat = json.load(sys.stdin)
+messages = chat.get('chat', {}).get('history', {}).get('messages', {})
+if isinstance(messages, dict):
+    messages = list(messages.values())
+for msg in messages:
+    if msg.get('role') in ('assistant', None) and msg.get('done'):
+        print((msg.get('content') or '')[:200])
+        break
+" 2>/dev/null)
+    if [ -z "${content_after}" ] || [ "${content_after}" != "${content}" ]; then
+        fail "Assistant message did not persist across re-fetch"
+    fi
+
+    curl -fsS -X DELETE "${BASE_URL}/api/v1/chats/${chat_id}" >/dev/null 2>&1 || true
+    echo "  OK: real chat smoke passed (assistant content: $(echo "${content}" | head -c 60))"
+}
+
+echo ""
+echo "[7/7] Real chat smoke"
+real_chat_smoke
+
+# ──────────────────────────────────────────────────────────────────────────
+
+# selection_key is the deduplication key used by getModelsUnified on the
+# frontend — regressions here cause duplicate model entries in the UI.
+echo "  [7/7] GET /api/v1/providers/models selection_key assertion..."
+
+# The OSS variant uses no auth (MYAH_AUTH=false); the auto-admin user is
+# injected by the backend so we omit the Bearer header here.
+MODELS_CODE=$(curl -s -o /tmp/smoke-oss-models.json -w "%{http_code}" \
+    -X GET "${BASE_URL}/api/v1/providers/models" \
+    --max-time "${TIMEOUT}" 2>/dev/null) || MODELS_CODE="000"
+
+if [ "${MODELS_CODE}" != "200" ]; then
+    echo "  FAIL: /providers/models returned HTTP ${MODELS_CODE}" >&2
+    echo "  Body: $(head -c 500 /tmp/smoke-oss-models.json 2>/dev/null)" >&2
+    exit 1
+fi
+
+SELECTION_KEY_CHECK=$(python3 -c "
+import json, sys
+try:
+    data = json.load(open('/tmp/smoke-oss-models.json'))
+    models = data if isinstance(data, list) else []
+    if not models:
+        print('skip')
+        sys.exit(0)
+    for m in models:
+        sk = m.get('selection_key') if isinstance(m, dict) else None
+        if not sk or (isinstance(sk, str) and not sk.strip()):
+            print('fail: entry missing or empty selection_key', file=sys.stderr)
+            sys.exit(1)
+    keys = [m.get('selection_key') for m in models if isinstance(m, dict)]
+    if len(keys) != len(set(keys)):
+        print('fail: selection_key values are not unique', file=sys.stderr)
+        sys.exit(1)
+    print('ok:' + str(len(models)) + ' models checked')
+except Exception as e:
+    print('fail:' + str(e), file=sys.stderr)
+    sys.exit(1)
+" 2>&1) || SELECTION_KEY_CHECK="fail:python-error"
+
+case "${SELECTION_KEY_CHECK}" in
+    ok:*)
+        echo "  OK: ${SELECTION_KEY_CHECK#ok:}"
+        ;;
+    skip)
+        echo "  SKIP: no models returned"
+        ;;
+    fail:*)
+        echo "  FAIL: selection_key assertion failed: ${SELECTION_KEY_CHECK#fail:}" >&2
+        echo "  Body: $(head -c 500 /tmp/smoke-oss-models.json 2>/dev/null)" >&2
+        exit 1
+        ;;
+esac
+rm -f /tmp/smoke-oss-models.json
 
 echo ""
 echo "=== OSS Smoke Test PASSED ==="

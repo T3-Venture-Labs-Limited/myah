@@ -117,6 +117,7 @@
 	export let saveMessage: Function;
 	export let rateMessage: Function;
 	export let actionMessage: Function;
+	export let sendMessage: Function = () => {};
 
 	export let submitMessage: Function;
 
@@ -381,6 +382,19 @@
 									done={($settings?.chatFadeStreamingText ?? true)
 										? (message?.done ?? false)
 										: true}
+									on:retry={async () => {
+										// ConfirmationCard 404 recovery (Task 2.1):
+										// create a fresh assistant branch from the original
+										// parent user message. Using submitMessage(parentId,
+										// originalPrompt) would create a duplicate user message
+										// as a child of the original user message (user → user),
+										// which corrupts the chat tree. sendMessage(history,
+										// parentId) is the surviving append-only retry shape
+										// after regenerateResponse was removed.
+										const parentId = message?.parentId;
+										if (!parentId) return;
+										await sendMessage(history, parentId);
+									}}
 								/>
 							{:else if message.content && message.error !== true}
 								<!-- always show message contents even if there's an error -->

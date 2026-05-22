@@ -29,6 +29,7 @@
 	export let saveMessage;
 	export let rateMessage;
 	export let actionMessage;
+	export let sendMessage;
 	export let submitMessage;
 
 	export let addMessages;
@@ -79,6 +80,7 @@
 				{saveMessage}
 				{rateMessage}
 				{actionMessage}
+				{sendMessage}
 				{submitMessage}
 				{addMessages}
 				{readOnly}

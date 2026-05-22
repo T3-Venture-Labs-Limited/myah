@@ -74,6 +74,7 @@
 					resolvedConfirmations.set(e.detail.confirmation_id, e.detail.choice);
 					resolvedConfirmations = resolvedConfirmations;
 				}}
+				on:retry
 			/>
 		{:else if g.kind === 'secret'}
 			<SecretInputCard

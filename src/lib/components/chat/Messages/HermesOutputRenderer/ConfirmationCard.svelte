@@ -12,10 +12,18 @@
 
 	const dispatch = createEventDispatcher<{
 		confirmed: { confirmation_id: string; choice: ApprovalOption };
+		retry: { confirmation_id: string; run_id: string };
 	}>();
 
 	let submitting = false;
 	let error = '';
+	// ── Stuck-confirmation recovery (Task 2.1) ───────────────────────────
+	// When /confirm returns 404 the agent's pending-confirmation registry
+	// has no record of this confirmation_id — the buttons can never
+	// succeed. Rather than silently flipping to 'cancelled' (which leaves
+	// the user with no recourse), we expose a Retry affordance that
+	// re-sends the original prompt via the parent chain.
+	let interrupted = false;
 
 	// Keys are typed as ``ApprovalOption`` so adding a new approval option
 	// upstream lights up a TS error here until we provide a label for it.
@@ -60,15 +68,15 @@
 			if (!res.ok) {
 				const body = await res.json().catch(() => ({}));
 				const detail = body?.detail ?? `Request failed (${res.status})`;
-				// ── Stuck-confirmation recovery ──────────────────────────
+				// ── Stuck-confirmation recovery (Task 2.1) ───────────────
 				// A 404 from /openai/chat/confirm means the agent's pending
 				// confirmation registry has no record of this confirmation_id
 				// — typically because the agent container was restarted or
-				// the run timed out. The buttons can never succeed; flip
-				// localStatus to 'cancelled' so the UI shows a clear stale
-				// state and the user can move on (start a new chat / re-send).
+				// the run timed out. The buttons can never succeed. Surface
+				// a Retry affordance instead of silently cancelling so the
+				// user can resume the conversation with one click.
 				if (res.status === 404) {
-					localStatus = 'cancelled';
+					interrupted = true;
 					error = '';
 				} else {
 					error = detail;
@@ -83,6 +91,17 @@
 			error = 'Network error. Please try again.';
 			submitting = false;
 		}
+	}
+
+	function retry() {
+		// The parent component owns the chat history and the actual
+		// message-resend helper (Chat.svelte::submitMessage). All we know
+		// here is the identity of the dead run; let upstream resolve it
+		// to the original user prompt.
+		dispatch('retry', {
+			confirmation_id: item.confirmation_id,
+			run_id: item.run_id
+		});
 	}
 </script>
 
@@ -106,7 +125,18 @@
 
 	<!-- Actions / resolved state -->
 	<div class="px-4 py-3">
-		{#if localStatus === 'pending'}
+		{#if interrupted}
+			<!-- The run is gone; resume by re-sending the original prompt. -->
+			<p class="text-gray-500 dark:text-gray-400 mb-2">
+				The agent was interrupted — tap retry to continue.
+			</p>
+			<button
+				class="px-3 py-1.5 rounded-lg text-sm border border-gray-200 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 hover:bg-gray-50 dark:hover:bg-gray-700/50 font-medium transition-colors"
+				on:click={retry}
+			>
+				Retry
+			</button>
+		{:else if localStatus === 'pending'}
 			<div class="flex flex-wrap gap-2">
 				{#each visibleOptions as option}
 					<button
@@ -139,7 +169,7 @@
 	</div>
 
 	<!-- Pulsing "Awaiting user input" indicator -->
-	{#if localStatus === 'pending'}
+	{#if localStatus === 'pending' && !interrupted}
 		<div class="px-4 pb-3 flex items-center gap-1.5 text-xs text-blue-500 dark:text-blue-400">
 			<span class="relative flex h-2 w-2 flex-shrink-0">
 				<span

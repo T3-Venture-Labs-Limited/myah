@@ -99,6 +99,7 @@ export interface ModelListItem {
 	id: string;
 	name: string;
 	tags: { name: string }[];
+	selection_key?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -293,5 +294,12 @@ export const getModelsUnified = async (token: string): Promise<ModelListItem[]> 
 		});
 
 	if (error) throw error;
-	return res ?? [];
+
+	const models: ModelListItem[] = res ?? [];
+	models.forEach((m) => {
+		if (typeof m.selection_key === 'string' && m.selection_key.length > 0) return;
+		m.selection_key = (m.tags?.[0]?.name ?? '') + '::' + m.id;
+	});
+
+	return models;
 };

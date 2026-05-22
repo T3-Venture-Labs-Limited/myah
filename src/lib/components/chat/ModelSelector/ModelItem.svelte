@@ -92,7 +92,11 @@
 			<div class="flex items-center gap-1.5">
 				<Tooltip content={`${item.label} (${item.value})`} placement="top-start">
 					<div class="line-clamp-1">
-						{item.label}
+						{item.label}{#if item.model?.tags?.[0]?.name}
+							<span class="text-xs text-gray-500 dark:text-gray-400 ml-1"
+								>— {item.model.tags[0].name}</span
+							>
+						{/if}
 					</div>
 				</Tooltip>
 

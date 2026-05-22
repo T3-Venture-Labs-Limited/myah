@@ -300,7 +300,8 @@
 			return;
 		}
 
-		const model = atSelectedModel ?? $models.find((m) => m.id === selectedModels[0]);
+		const model =
+			atSelectedModel ?? $models.find((m) => (m.selection_key ?? m.id) === selectedModels[0]);
 		if (model) {
 			if ($settings?.tools) {
 				selectedToolIds = $settings.tools;
@@ -894,7 +895,7 @@
 		if ($page.url.searchParams.get('model')) {
 			const urlModelId = $page.url.searchParams.get('model') ?? '';
 
-			if (!$models.find((m) => m.id === urlModelId)) {
+			if (!$models.find((m) => (m.selection_key ?? m.id) === urlModelId)) {
 				// Model not found; open model selector and prefill
 				const modelSelectorButton = document.getElementById('model-selector-0-button');
 				if (modelSelectorButton) {
@@ -912,9 +913,10 @@
 				selectedModels = [urlModelId];
 			}
 
-			// Unavailable models filtering
+			// Unavailable models filtering — accept both bare id and composite
+			// selection_key so composite picks aren't dropped as "unavailable".
 			selectedModels = selectedModels.filter((modelId) =>
-				$models.map((m) => m.id).includes(modelId)
+				$models.some((m) => m.id === modelId || m.selection_key === modelId)
 			);
 		} else {
 			if ($selectedFolder?.data?.model_ids) {
@@ -1040,8 +1042,11 @@
 			}
 		}
 
+		// Accept both bare id and composite selection_key — see submitPrompt for
+		// the same pattern. Without this, composite picks fall through to '' and
+		// hydration shows "Select a model" on chat load.
 		selectedModels = selectedModels.map((modelId) =>
-			$models.map((m) => m.id).includes(modelId) ? modelId : ''
+			$models.some((m) => m.id === modelId || m.selection_key === modelId) ? modelId : ''
 		);
 
 		const chatInput = document.getElementById('chat-input');
@@ -1167,7 +1172,7 @@
 				...(m.usage ? { usage: m.usage } : {}),
 				...(m.sources ? { sources: m.sources } : {})
 			})),
-			model_item: $models.find((m) => m.id === modelId),
+			model_item: $models.find((m) => (m.selection_key ?? m.id) === modelId),
 			chat_id: _chatId,
 			session_id: $socket?.id,
 			id: responseMessageId
@@ -1228,7 +1233,7 @@
 				...(m.sources ? { sources: m.sources } : {})
 			})),
 			...(event ? { event: event } : {}),
-			model_item: $models.find((m) => m.id === modelId),
+			model_item: $models.find((m) => (m.selection_key ?? m.id) === modelId),
 			chat_id: _chatId,
 			session_id: $socket?.id,
 			id: responseMessageId
@@ -1283,7 +1288,7 @@
 			toast.error($i18n.t('Model not selected'));
 		} else {
 			const modelId = selectedModels[0];
-			const model = $models.filter((m) => m.id === modelId).at(0);
+			const model = $models.filter((m) => (m.selection_key ?? m.id) === modelId).at(0);
 
 			if (!model) {
 				toast.error($i18n.t('Model not found'));
@@ -1342,7 +1347,7 @@
 	};
 
 	const addMessages = async ({ modelId, parentId, messages }) => {
-		const model = $models.filter((m) => m.id === modelId).at(0);
+		const model = $models.filter((m) => (m.selection_key ?? m.id) === modelId).at(0);
 
 		let parentMessage = history.messages[parentId];
 		let currentParentId = parentMessage ? parentMessage.id : null;
@@ -1611,8 +1616,14 @@
 	}
 
 	const submitPrompt = async (userPrompt, { _raw = false, _agui_interaction = false } = {}) => {
+		// selectedModels[i] may be bare model.id (legacy) or composite selection_key
+		// (after the user picks a row from the dropdown). Accept either form when
+		// validating — same pattern as the ModelSelector wrapper. Without this,
+		// composite picks get reset to '' and the user sees "Model not selected"
+		// even though they just clicked a valid row.
+		const validKeys = new Set($models.flatMap((m) => [m.id, m.selection_key].filter(Boolean)));
 		const _selectedModels = selectedModels.map((modelId) =>
-			$models.map((m) => m.id).includes(modelId) ? modelId : ''
+			validKeys.has(modelId) ? modelId : ''
 		);
 
 		if (JSON.stringify(selectedModels) !== JSON.stringify(_selectedModels)) {
@@ -1779,7 +1790,7 @@
 
 		// Resolve the single model to use
 		const resolvedModelId = modelId ?? atSelectedModel?.id ?? selectedModels[0];
-		const model = $models.filter((m) => m.id === resolvedModelId).at(0);
+		const model = $models.filter((m) => (m.selection_key ?? m.id) === resolvedModelId).at(0);
 
 		if (!model) {
 			toast.error($i18n.t(`Model {{modelId}} not found`, { modelId: resolvedModelId }));
@@ -1884,7 +1895,7 @@
 			};
 
 		const currentModelId = atSelectedModel?.id ?? selectedModels[0];
-		const currentModel = $models.find((m) => m.id === currentModelId);
+		const currentModel = $models.find((m) => (m.selection_key ?? m.id) === currentModelId);
 		if (currentModel?.info?.meta?.capabilities?.web_search ?? true) {
 			if ($config?.features?.enable_web_search && ($settings?.webSearch ?? false) === 'always') {
 				features = { ...features, web_search: true };
@@ -2108,7 +2119,10 @@
 						$user?.email
 					)
 				},
-				model_item: $models.find((m) => m.id === model.id),
+				// model is the resolved row (composite-aware lookup above) — reuse it
+				// directly so the chat completion payload's model_item carries the
+				// exact provider tags the user selected, not a same-id duplicate.
+				model_item: model,
 
 				session_id: $socket?.id,
 				chat_id: $chatId,

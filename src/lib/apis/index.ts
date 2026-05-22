@@ -964,14 +964,65 @@ export type GlobalModelConfig = ModelConfig[];
 // call the canonical /api/v1/providers/models endpoint via the typed
 // getModelsUnified helper from apis/providers — same one (app)/+layout.svelte
 // already uses to seed $models.
+
+// In-flight request coalescing. Concurrent callers with the same connections
+// share the underlying /api/models + /api/v1/providers/models fetch pair so we
+// don't hammer the backend during a layout-mount burst (root layout, (app)
+// layout reactive, ProviderPicker $effect, SettingsModal — they can all
+// race on cold-load). The promise is cleared in `finally`, so sequential calls
+// (e.g. user adds a provider, then settings reloads) ALWAYS get a fresh fetch.
+// No time-based cache, no stale-while-revalidate — just request deduplication.
+const _inFlightGetModelsWithProviders: Map<string, Promise<unknown>> = new Map();
+
+const _connectionsKey = (connections: object | null): string => {
+	if (connections === null) return 'null';
+	try {
+		return JSON.stringify(connections);
+	} catch {
+		return 'unstringifiable';
+	}
+};
+
+/**
+ * Test-only: clears the in-flight Map so each test starts from a clean slate.
+ * Do not call from application code.
+ */
+export const _resetGetModelsWithProvidersInFlight = (): void => {
+	_inFlightGetModelsWithProviders.clear();
+};
+
 export const getModelsWithProviders = async (
 	token: string = '',
 	connections: object | null = null
 ) => {
+	const key = _connectionsKey(connections);
+	const existing = _inFlightGetModelsWithProviders.get(key);
+	if (existing) {
+		// ReturnType<async fn> is already a Promise — do NOT wrap in another.
+		return existing as ReturnType<typeof _doGetModelsWithProviders>;
+	}
+
+	const promise = _doGetModelsWithProviders(token, connections).finally(() => {
+		_inFlightGetModelsWithProviders.delete(key);
+	});
+	_inFlightGetModelsWithProviders.set(key, promise);
+	return promise;
+};
+
+const _doGetModelsWithProviders = async (token: string, connections: object | null) => {
 	const [baseModels, providerModels] = await Promise.all([
 		getModels(token, connections),
 		getModelsUnified(token).catch(() => [] as ModelListItem[])
 	]);
+
+	const ensureSelectionKey = (m: ModelListItem) => {
+		if (!m.selection_key || typeof m.selection_key !== 'string') {
+			m.selection_key = (m.tags?.[0]?.name ?? '') + '::' + m.id;
+		}
+	};
+
+	baseModels.forEach(ensureSelectionKey);
+	providerModels.forEach(ensureSelectionKey);
 
 	if (providerModels.length === 0) {
 		return baseModels;

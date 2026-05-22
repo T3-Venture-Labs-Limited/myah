@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { getContext, onMount, tick } from 'svelte';
+	import { getContext, onDestroy, onMount, tick } from 'svelte';
 	import { toast } from 'svelte-sonner';
 	import { env } from '$env/dynamic/public';
 	import { config, models, settings, user } from '$lib/stores';
@@ -433,7 +433,13 @@
 			})
 			.map((tab) => tab.id);
 
-		if (filteredSettings.length > 0 && !filteredSettings.includes(selectedTab)) {
+		// Task 2.2: only reset selectedTab when the user is actively filtering
+		// via the search input. Prior to this gate, any $config update during a
+		// transient empty $user snapshot dropped role-gated tabs (provider /
+		// secrets / interface) from filteredSettings and snapped the user back
+		// to General — regardless of what they had clicked.
+		// See docs/oss-launch/settings-modal-repro.md.
+		if (search !== '' && filteredSettings.length > 0 && !filteredSettings.includes(selectedTab)) {
 			selectedTab = filteredSettings[0];
 		}
 	};
@@ -489,14 +495,25 @@
 		}
 	};
 
+	let unsubscribeConfig: (() => void) | null = null;
+
 	onMount(() => {
 		availableSettings = getAvailableSettings();
 		setFilteredSettings();
 
-		config.subscribe((configData) => {
+		// Task 2.2: track the unsubscribe so the listener doesn't outlive
+		// the modal. Previously the subscription leaked on every mount.
+		unsubscribeConfig = config.subscribe(() => {
 			availableSettings = getAvailableSettings();
 			setFilteredSettings();
 		});
+	});
+
+	onDestroy(() => {
+		if (unsubscribeConfig) {
+			unsubscribeConfig();
+			unsubscribeConfig = null;
+		}
 	});
 </script>
 
@@ -546,7 +563,8 @@
 						{#if tabId === 'general'}
 							<button
 								role="tab"
-								aria-controls="tab-general"
+								id="tab-general"
+								aria-controls="tabpanel-general"
 								aria-selected={selectedTab === 'general'}
 								class={`px-0.5 md:px-2.5 py-1 min-w-fit rounded-xl flex-1 md:flex-none flex text-left transition
 								${
@@ -570,7 +588,8 @@
 						{:else if tabId === 'interface'}
 							<button
 								role="tab"
-								aria-controls="tab-interface"
+								id="tab-interface"
+								aria-controls="tabpanel-interface"
 								aria-selected={selectedTab === 'interface'}
 								class={`px-0.5 md:px-2.5 py-1 min-w-fit rounded-xl flex-1 md:flex-none flex text-left transition
 								${
@@ -595,7 +614,8 @@
 							{#if $user?.role === 'admin' || ($user?.role === 'user' && $config?.features?.enable_direct_connections)}
 								<button
 									role="tab"
-									aria-controls="tab-connections"
+									id="tab-connections"
+									aria-controls="tabpanel-connections"
 									aria-selected={selectedTab === 'connections'}
 									class={`px-0.5 md:px-2.5 py-1 min-w-fit rounded-xl flex-1 md:flex-none flex text-left transition
 								${
@@ -619,9 +639,9 @@
 							{/if}
 						{:else if tabId === 'provider'}
 							<button
-								id="settings-tab-provider"
+								id="tab-provider"
 								role="tab"
-								aria-controls="tab-provider"
+								aria-controls="tabpanel-provider"
 								aria-selected={selectedTab === 'provider'}
 								class={`px-0.5 md:px-2.5 py-1 min-w-fit rounded-xl flex-1 md:flex-none flex text-left transition
 								${
@@ -644,9 +664,9 @@
 							</button>
 						{:else if tabId === 'secrets'}
 							<button
-								id="settings-tab-secrets"
+								id="tab-secrets"
 								role="tab"
-								aria-controls="tab-secrets"
+								aria-controls="tabpanel-secrets"
 								aria-selected={selectedTab === 'secrets'}
 								class={`px-0.5 md:px-2.5 py-1 min-w-fit rounded-xl flex-1 md:flex-none flex text-left transition
 							${
@@ -681,7 +701,8 @@
 						{:else if tabId === 'data_controls'}
 							<button
 								role="tab"
-								aria-controls="tab-data-controls"
+								id="tab-data_controls"
+								aria-controls="tabpanel-data_controls"
 								aria-selected={selectedTab === 'data_controls'}
 								class={`px-0.5 md:px-2.5 py-1 min-w-fit rounded-xl flex-1 md:flex-none flex text-left transition
 								${
@@ -705,7 +726,8 @@
 						{:else if tabId === 'account'}
 							<button
 								role="tab"
-								aria-controls="tab-account"
+								id="tab-account"
+								aria-controls="tabpanel-account"
 								aria-selected={selectedTab === 'account'}
 								class={`px-0.5 md:px-2.5 py-1 min-w-fit rounded-xl flex-1 md:flex-none flex text-left transition
 								${
@@ -729,7 +751,8 @@
 						{:else if tabId === 'about'}
 							<button
 								role="tab"
-								aria-controls="tab-about"
+								id="tab-about"
+								aria-controls="tabpanel-about"
 								aria-selected={selectedTab === 'about'}
 								class={`px-0.5 md:px-2.5 py-1 min-w-fit rounded-xl flex-1 md:flex-none flex text-left transition
 								${
@@ -777,7 +800,17 @@
 					</a>
 				{/if}
 			</div>
-			<div class="flex-1 px-3.5 md:pl-0 md:pr-4.5 md:min-h-[42rem] max-h-[42rem] overflow-y-auto">
+			<!--
+				Task 2.2: the right pane is the live tabpanel anchor. The id
+				matches the selected tab button's aria-controls so assistive
+				tech can navigate from a tab to its panel content.
+			-->
+			<div
+				role="tabpanel"
+				id={`tabpanel-${selectedTab}`}
+				aria-labelledby={`tab-${selectedTab}`}
+				class="flex-1 px-3.5 md:pl-0 md:pr-4.5 md:min-h-[42rem] max-h-[42rem] overflow-y-auto"
+			>
 				{#if selectedTab === 'general'}
 					<General
 						{getModels}

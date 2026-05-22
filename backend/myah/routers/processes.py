@@ -125,11 +125,14 @@ def _raise_if_oss_mode_unless_webhook(request: Request) -> None:
     _raise_if_oss_mode()
 
 
-# Router-level dependency runs BEFORE per-route ``Depends(get_verified_user)``.
-# Without this, OSS users hitting any processes endpoint with no auth
-# token get 401 from the route's auth dep before the function body's
-# ``_raise_if_oss_mode()`` ever runs (Phase D finding D3, 2026-05-15).
-router = APIRouter(dependencies=[Depends(_raise_if_oss_mode_unless_webhook)])
+# Per spec §6.3 + plan Task 2.3 (2026-05-19): the blanket router-level
+# gate was removed so per-chat endpoints (list/create/get/update/delete/
+# pause/resume/trigger/link-chat) can work in OSS. Container-only
+# endpoints keep their inline ``_raise_if_oss_mode()`` calls so they
+# still 501 with the upsell card. The webhook carve-out is preserved
+# as the body of ``_raise_if_oss_mode_unless_webhook`` for any future
+# re-introduction.
+router = APIRouter()
 
 
 def _jobs_url(host_port: int, path: str = '') -> str:
@@ -275,9 +278,8 @@ async def list_processes(
     'include_disabled'" when any value is passed.  The default (False) is fine
     for the UI — disabled jobs are fetched by the drilldown endpoint anyway.
     """
-    _raise_if_oss_mode()
     host_port = await _ensure_container(user)
-    raw = await _hermes_get(_jobs_url(host_port) + '?include_disabled=true')
+    raw = await _hermes_get(_jobs_url(host_port))
     if isinstance(raw, dict) and 'jobs' in raw:
         jobs = raw['jobs']
     elif isinstance(raw, list):
@@ -375,7 +377,6 @@ async def create_process(
     cron output land back in the originating chat instead of being dropped
     by the agent's ``no delivery target resolved for deliver=origin`` path.
     """
-    _raise_if_oss_mode()
     host_port = await _ensure_container(user)
 
     body = form_data.model_dump(exclude_none=True)
@@ -420,7 +421,6 @@ async def get_process(
     user: UserModel = Depends(get_verified_user),
 ):
     """Get a single process by ID."""
-    _raise_if_oss_mode()
     host_port = await _ensure_container(user)
     raw = await _hermes_get(_jobs_url(host_port, f'/{job_id}'))
     return raw.get('job', raw) if isinstance(raw, dict) else raw
@@ -433,7 +433,6 @@ async def update_process(
     user: UserModel = Depends(get_verified_user),
 ):
     """Update a process's config (schedule, prompt, name, etc.)."""
-    _raise_if_oss_mode()
     host_port = await _ensure_container(user)
     body = form_data.model_dump(exclude_none=True)
     raw = await _hermes_patch(_jobs_url(host_port, f'/{job_id}'), body=body)
@@ -446,7 +445,6 @@ async def delete_process(
     user: UserModel = Depends(get_verified_user),
 ):
     """Delete a process."""
-    _raise_if_oss_mode()
     host_port = await _ensure_container(user)
     return await _hermes_delete(_jobs_url(host_port, f'/{job_id}'))
 
@@ -457,7 +455,6 @@ async def pause_process(
     user: UserModel = Depends(get_verified_user),
 ):
     """Pause a running process."""
-    _raise_if_oss_mode()
     host_port = await _ensure_container(user)
     raw = await _hermes_post(_jobs_url(host_port, f'/{job_id}/pause'))
     return raw.get('job', raw) if isinstance(raw, dict) else raw
@@ -469,7 +466,6 @@ async def resume_process(
     user: UserModel = Depends(get_verified_user),
 ):
     """Resume a paused process."""
-    _raise_if_oss_mode()
     host_port = await _ensure_container(user)
     raw = await _hermes_post(_jobs_url(host_port, f'/{job_id}/resume'))
     return raw.get('job', raw) if isinstance(raw, dict) else raw
@@ -490,7 +486,6 @@ async def link_process_to_chat(
     storing it on the job — prevents garbage values (e.g. temp-chat IDs
     like 'local:...') from being persisted and silently breaking delivery.
     """
-    _raise_if_oss_mode()
     body = await request.json()
     chat_id = body.get('chat_id', '')
     if not chat_id:
@@ -530,7 +525,6 @@ async def trigger_process(
     Manually trigger a process to run immediately.
     NOTE: Hermes uses /run not /trigger as the path suffix.
     """
-    _raise_if_oss_mode()
     host_port = await _ensure_container(user)
     # Hermes endpoint is /api/jobs/{id}/run — NOT /trigger
     raw = await _hermes_post(_jobs_url(host_port, f'/{job_id}/run'))

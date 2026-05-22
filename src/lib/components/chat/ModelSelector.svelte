@@ -30,8 +30,13 @@
 		await updateUserSettings(localStorage.token, { ui: $settings });
 	};
 
+	// Validity check needs to be composite-aware: selectedModels[0] may be a
+	// composite selection_key ('provider::model_id') after the user picks a
+	// row in the model dropdown, or a legacy bare model.id from older state.
+	// Accept either form so we don't spuriously clear the selection.
 	$: if (selectedModels.length > 0 && $models.length > 0) {
-		if (!$models.map((m) => m.id).includes(selectedModels[0])) {
+		const validKeys = new Set($models.flatMap((m) => [m.id, m.selection_key].filter(Boolean)));
+		if (!validKeys.has(selectedModels[0])) {
 			selectedModels = [''];
 		}
 	}
@@ -44,7 +49,10 @@
 				id="0"
 				placeholder={$i18n.t('Select a model')}
 				items={$models.map((model) => ({
-					value: model.id,
+					// Prefer composite selection_key as the option value so the bound
+					// `selectedModels[0]` carries the user's provider choice; falls
+					// back to bare id for legacy models without selection_key.
+					value: model.selection_key ?? model.id,
 					label: model.name,
 					model: model
 				}))}
