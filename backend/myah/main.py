@@ -2011,9 +2011,10 @@ async def serve_cache_file(
 # Without this guard, any /api/* path with no registered FastAPI route falls
 # through to SPAStaticFiles mounted at '/', which serves index.html with
 # HTTP 200 (html=True swallows the 404). Hosted-only routers such as
-# /api/v1/agent/memory and /api/v1/integrations are absent from the OSS
-# deployment, so without this they return 200 text/html — breaking the JSON
-# contract callers expect.
+# /api/v1/agent/memory and /api/v1/integrations are absent from platform-oss/
+# (anti-SaaS-fork: their router files live in platform-hosted/ only), so
+# without this they return 200 text/html — breaking the JSON contract callers
+# expect. This catch-all also future-proofs any hosted-only route added later.
 @app.api_route(
     '/api/{path:path}',
     methods=['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS', 'HEAD'],

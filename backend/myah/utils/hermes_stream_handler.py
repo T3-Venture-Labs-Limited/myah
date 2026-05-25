@@ -176,16 +176,23 @@ def _sse_chunk(delta: str = '', done: bool = False) -> str:
 
 
 async def handle_hermes_stream(response, ctx: dict) -> StreamingResponse | None:  # noqa: C901
-    """Process a /v1/runs SSE stream and return a StreamingResponse.
+    """Process a /myah/v1/events/{stream_id} SSE stream and return a StreamingResponse.
 
     The returned response yields OpenAI-compatible SSE chunks (with
     ``choices[0].delta.content``) so curl and other HTTP clients receive
     streaming data. Socket.IO events and DB persistence happen as side
-    effects while iterating the upstream SSE stream.
+    effects while iterating the plugin's SSE stream.
+
+    Note: production chat flow goes through the Myah plugin's
+    ``/myah/v1/events/{stream_id}`` endpoint, not upstream Hermes
+    ``/v1/runs/{run_id}/events``. The dispatch in this handler covers the
+    full plugin event vocabulary (message.delta, tool.started, tool.completed,
+    tool.confirmation_required, reasoning.available/delta, secret.required/resolved,
+    run.completed/failed/cancelled).
 
     Args:
         response: A StreamingResponse whose body_iterator yields SSE lines
-                  from the Hermes /v1/runs/{run_id}/events endpoint.
+                  from the Myah plugin's /myah/v1/events/{stream_id} endpoint.
         ctx: Context dict built by build_chat_response_context(), containing
              request, form_data, user, metadata, tasks, event_emitter, etc.
     """
