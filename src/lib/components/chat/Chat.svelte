@@ -107,6 +107,7 @@
 	import { getBanners } from '$lib/apis/configs';
 	import { linkProcessToChat } from '$lib/apis/processes';
 	import { scheduleRender } from '$lib/utils/rafScheduler';
+	import { findModelByIdOrSelectionKey } from '$lib/utils/modelSelection';
 	import {
 		saveInflightSnapshot,
 		loadInflightSnapshot,
@@ -300,8 +301,7 @@
 			return;
 		}
 
-		const model =
-			atSelectedModel ?? $models.find((m) => (m.selection_key ?? m.id) === selectedModels[0]);
+		const model = atSelectedModel ?? findModelByIdOrSelectionKey(selectedModels[0], $models);
 		if (model) {
 			if ($settings?.tools) {
 				selectedToolIds = $settings.tools;
@@ -895,7 +895,7 @@
 		if ($page.url.searchParams.get('model')) {
 			const urlModelId = $page.url.searchParams.get('model') ?? '';
 
-			if (!$models.find((m) => (m.selection_key ?? m.id) === urlModelId)) {
+			if (!findModelByIdOrSelectionKey(urlModelId, $models)) {
 				// Model not found; open model selector and prefill
 				const modelSelectorButton = document.getElementById('model-selector-0-button');
 				if (modelSelectorButton) {
@@ -1172,7 +1172,7 @@
 				...(m.usage ? { usage: m.usage } : {}),
 				...(m.sources ? { sources: m.sources } : {})
 			})),
-			model_item: $models.find((m) => (m.selection_key ?? m.id) === modelId),
+			model_item: findModelByIdOrSelectionKey(modelId, $models),
 			chat_id: _chatId,
 			session_id: $socket?.id,
 			id: responseMessageId
@@ -1233,7 +1233,7 @@
 				...(m.sources ? { sources: m.sources } : {})
 			})),
 			...(event ? { event: event } : {}),
-			model_item: $models.find((m) => (m.selection_key ?? m.id) === modelId),
+			model_item: findModelByIdOrSelectionKey(modelId, $models),
 			chat_id: _chatId,
 			session_id: $socket?.id,
 			id: responseMessageId
@@ -1288,7 +1288,7 @@
 			toast.error($i18n.t('Model not selected'));
 		} else {
 			const modelId = selectedModels[0];
-			const model = $models.filter((m) => (m.selection_key ?? m.id) === modelId).at(0);
+			const model = findModelByIdOrSelectionKey(modelId, $models);
 
 			if (!model) {
 				toast.error($i18n.t('Model not found'));
@@ -1347,7 +1347,7 @@
 	};
 
 	const addMessages = async ({ modelId, parentId, messages }) => {
-		const model = $models.filter((m) => (m.selection_key ?? m.id) === modelId).at(0);
+		const model = findModelByIdOrSelectionKey(modelId, $models);
 
 		let parentMessage = history.messages[parentId];
 		let currentParentId = parentMessage ? parentMessage.id : null;
@@ -1788,9 +1788,13 @@
 		let _chatId = JSON.parse(JSON.stringify($chatId));
 		_history = structuredClone(_history);
 
-		// Resolve the single model to use
+		// Resolve the single model to use. `findModelByIdOrSelectionKey` accepts
+		// both composite picks (post-T3-1031) and bare ids (legacy `default_model`
+		// shapes) — needed because `ensureSelectionKey` always sets `m.selection_key`
+		// on $models, making the inline `(m.selection_key ?? m.id)` pattern silently
+		// drop bare-id lookups and trip this toast on a fresh chat's first send.
 		const resolvedModelId = modelId ?? atSelectedModel?.id ?? selectedModels[0];
-		const model = $models.filter((m) => (m.selection_key ?? m.id) === resolvedModelId).at(0);
+		const model = findModelByIdOrSelectionKey(resolvedModelId, $models);
 
 		if (!model) {
 			toast.error($i18n.t(`Model {{modelId}} not found`, { modelId: resolvedModelId }));
@@ -1895,7 +1899,7 @@
 			};
 
 		const currentModelId = atSelectedModel?.id ?? selectedModels[0];
-		const currentModel = $models.find((m) => (m.selection_key ?? m.id) === currentModelId);
+		const currentModel = findModelByIdOrSelectionKey(currentModelId, $models);
 		if (currentModel?.info?.meta?.capabilities?.web_search ?? true) {
 			if ($config?.features?.enable_web_search && ($settings?.webSearch ?? false) === 'always') {
 				features = { ...features, web_search: true };

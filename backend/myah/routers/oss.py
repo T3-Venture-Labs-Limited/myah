@@ -1,6 +1,14 @@
 """
 OSS-only endpoints — first-run UX surface.
 
+**Safety contract:** all handlers in this module MUST be side-effect-free
+reads. The router is registered unconditionally in ``main.py`` (not gated
+on ``is_oss_mode()``), so these endpoints are also reachable in hosted
+mode — they just have no frontend consumer there (the hosted bundle has
+``PUBLIC_DEPLOYMENT_MODE`` unset, so ``isOss === false`` and the Welcome
+state machine never mounts). Any DB write, external call with side
+effects, or state mutation added here would leak into hosted at runtime.
+
 The OSS deployment is single-user with no login. Two endpoints make the
 first-run experience work:
 
