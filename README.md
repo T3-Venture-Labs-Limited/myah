@@ -17,12 +17,19 @@ curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scri
 
 # 2. Clone and install Myah
 git clone https://github.com/T3-Venture-Labs-Limited/myah && cd myah
-pip install -e .
+python3 -m venv .venv && source .venv/bin/activate
+MYAH_SKIP_HATCH_NPM=1 pip install -e .
+# The venv keeps us out of Ubuntu 24.04 / Debian 12+ PEP 668 territory.
+# MYAH_SKIP_HATCH_NPM=1 skips the frontend build step inside hatch_build.py
+# (the OSS install pulls a prebuilt platform container later, so the
+# editable wheel doesn't need its own frontend build). See docs/cli-reference.md
+# §Installation for the full rationale and the no-skip path.
 
 # 3. Run the installer (replaces the legacy setup-myah-oss.sh)
 myah install
 #   - generates aligned platform↔Hermes secrets (5-slot bearer)
-#   - installs the Myah plugin at the pinned SHA + dashboard shim
+#   - installs + registers + enables the Myah plugin at the pinned SHA
+#     (pip install + `hermes plugins install` + `hermes plugins enable myah`)
 #   - merges ~/.hermes/config.yaml (enables myah platform)
 #   - optionally installs systemd/launchd units for always-on
 #   - --openrouter-key sk-or-v1-... skips the credential prompt

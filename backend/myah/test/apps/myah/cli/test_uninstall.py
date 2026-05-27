@@ -36,11 +36,30 @@ runner = CliRunner()
 
 @pytest.fixture
 def fake_repo(mocker, tmp_path: Path) -> Path:
-    """Pretend we're inside a Myah clone with a populated platform-oss/.env."""
+    """Pretend we're inside a Myah clone (monorepo layout) with a populated platform-oss/.env."""
     mocker.patch('myah.cli.uninstall.find_repo_root', return_value=tmp_path)
+    # Sentinel: agent/Dockerfile.stock signals the monorepo layout, so
+    # find_platform_env_path returns <tmp_path>/platform-oss/.env.
+    (tmp_path / 'agent').mkdir(exist_ok=True)
+    (tmp_path / 'agent' / 'Dockerfile.stock').write_text(
+        'ARG HERMES_SHA=' + 'a' * 40 + '\n', encoding='utf-8'
+    )
     # Create a platform-oss/.env so removal-detection is meaningful.
     (tmp_path / 'platform-oss').mkdir(exist_ok=True)
     (tmp_path / 'platform-oss' / '.env').write_text('FOO=bar\n', encoding='utf-8')
+    return tmp_path
+
+
+@pytest.fixture
+def fake_public_repo(mocker, tmp_path: Path) -> Path:
+    """Pretend we're inside the public OSS mirror (versions.env sentinel, flat layout).
+
+    Regression coverage for C-1: uninstall must remove ``<root>/.env``
+    here, not ``<root>/platform-oss/.env`` (which doesn't exist).
+    """
+    mocker.patch('myah.cli.uninstall.find_repo_root', return_value=tmp_path)
+    (tmp_path / 'versions.env').write_text('MYAH_PLUGIN_SHA=' + 'b' * 40 + '\n', encoding='utf-8')
+    (tmp_path / '.env').write_text('FOO=bar\n', encoding='utf-8')
     return tmp_path
 
 
@@ -299,6 +318,31 @@ def test_uninstall_skips_docker_outside_clone(
     assert 'uninstall' in cmd
     # Warning surfaces.
     assert 'clone' in result.stdout.lower() or 'skip' in result.stdout.lower()
+
+
+# ── C-1 regression: public-mirror layout removes <root>/.env, not platform-oss/ ──
+
+
+def test_uninstall_public_mirror_removes_root_env(
+    fake_public_repo: Path, fake_hermes_bin: Path, mocker
+) -> None:
+    """On the public OSS mirror layout, uninstall must remove ``<root>/.env``.
+
+    Regression for PR #16 review C-1: the path was hard-coded to
+    ``platform-oss/.env`` which doesn't exist on the public mirror,
+    so the actual ``.env`` (which docker-compose reads) survived a
+    "full" uninstall.
+    """
+    mocker.patch('myah.cli.uninstall.subprocess.run', return_value=_ok())
+    root_env = fake_public_repo / '.env'
+    legacy_env = fake_public_repo / 'platform-oss' / '.env'
+    assert root_env.is_file()
+    assert not legacy_env.exists()
+
+    result = runner.invoke(app, ['uninstall', '--yes'])
+
+    assert result.exit_code == 0, result.stdout
+    assert not root_env.is_file(), '<root>/.env must be removed on the public mirror'
 
 
 # ── help + top-level ───────────────────────────────────────────────────

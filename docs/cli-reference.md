@@ -54,19 +54,33 @@ This document covers **every command** the CLI exposes, with synopsis, flags, be
 
 ```bash
 git clone https://github.com/T3-Venture-Labs-Limited/myah && cd myah
-pip install -e .
+python3 -m venv .venv && source .venv/bin/activate
+MYAH_SKIP_HATCH_NPM=1 pip install -e .
 myah --help
 ```
 
-The production container's `CMD` is `myah serve` — `myah` is the binary baked into the image.
+### Why the venv
 
-If you want a Node-less install (e.g. you only want the CLI, not the frontend build), set `MYAH_SKIP_HATCH_NPM=1` before `pip install`:
+Most modern Linux distros (Ubuntu 24.04+, Debian 12+, Fedora 39+, Arch) ship Python with [PEP 668](https://peps.python.org/pep-0668/) protection enabled by default. Running `pip install -e .` against the system Python on those distros exits 1 immediately with `error: externally-managed-environment`. A per-clone venv is the safest, most portable workaround — it sidesteps PEP 668 without polluting the system Python and matches what `myah dev worktree create` does internally.
+
+If you have `pipx` available, `pipx install --editable .` works too and is interchangeable.
+
+### Why `MYAH_SKIP_HATCH_NPM=1`
+
+`pip install -e .` triggers `hatch_build.py`, which by default runs `npm install --force` followed by `npm run build` so the wheel ships with the frontend baked in. Two consequences for editable installs:
+
+* On a fresh Ubuntu 24.04 VM with Node 22 from the Hermes installer, `npm run build` has been seen to exit 134 (SIGABRT) during the Vite step — likely a glibc / Node interaction. The install aborts with a hatchling `AttributeError` cascade.
+* OSS users `myah platform up` pulls a prebuilt `ghcr.io/.../myah-platform-oss` image whose frontend is already built. The editable wheel's frontend is therefore unused for the OSS path.
+
+`MYAH_SKIP_HATCH_NPM=1` short-circuits the hook. The `build/.gitkeep` already in the repo satisfies the hatchling `force-include` check.
+
+If you want the full editable build (e.g. you're modifying the frontend), drop the env var:
 
 ```bash
-MYAH_SKIP_HATCH_NPM=1 pip install -e .
+pip install -e .   # runs npm install + npm run build inside hatch_build.py
 ```
 
-This skips the `npm install --force` + frontend build steps inside `hatch_build.py`. The `build/.gitkeep` already in the repo satisfies the hatchling `force-include` check.
+The production container's `CMD` is `myah serve` — `myah` is the binary baked into the image. The container build path always runs the full frontend build.
 
 ---
 
@@ -434,6 +448,24 @@ myah uninstall [--keep-data] [--keep-config] [--yes]
 
 If `hermes uninstall` fails (e.g. partial install state), the platform-side cleanup continues — **soft-fail** on the Hermes step only.
 
+### Known limitation: `hermes uninstall` needs a TTY
+
+Hermes 0.14.0's `hermes uninstall` rejects non-TTY invocations with `Error: 'hermes uninstall' requires an interactive terminal.` even when `--yes` is passed. `myah uninstall --yes` therefore:
+
+* still tears down the platform container + volume (and removes the platform `.env` unless `--keep-config`);
+* prints a yellow warning that `~/.hermes/` was not removed;
+* exits 0 (the platform side completed successfully).
+
+To finish the teardown manually:
+
+```bash
+hermes uninstall --full --yes   # run from an interactive terminal
+# or, if you just want the directory gone:
+rm -rf ~/.hermes
+```
+
+Upstream tracking issue: <https://github.com/NousResearch/Hermes-Agent/issues> (will link once filed).
+
 ### Examples
 
 ```bash
@@ -443,7 +475,9 @@ myah uninstall
 # Keep my chat history but tear down the platform container
 myah uninstall --keep-data
 
-# Cron-safe: tear everything down with no prompt
+# Cron-safe — tears down the platform; the hermes-side teardown
+# still requires a manual `hermes uninstall --full --yes` from a TTY
+# until upstream lifts the requirement. See "Known limitation" above.
 myah uninstall --yes
 ```
 

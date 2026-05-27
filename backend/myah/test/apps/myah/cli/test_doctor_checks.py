@@ -118,6 +118,59 @@ def test_check_hermes_plugin_installed_fail(mocker) -> None:
     assert 'install' in result.message.lower()
 
 
+def test_check_hermes_plugin_installed_matches_real_hermes_0_14_output(mocker) -> None:
+    """Regression for PR #16 review H-3: ``hermes plugins list`` on
+    Hermes 0.14.0 prints a Rich table with the plugin name ``myah`` —
+    not ``myah-hermes-plugin``. The old grep for ``myah-hermes-plugin``
+    in stdout produced a false FAIL on every healthy install.
+
+    The verbatim Hermes 0.14.0 output captured on the VM was:
+
+        ┃ Name ┃ Status      ┃ Version ┃ Description ...
+        ┡━━━━━━╇━━━━━━━━━━━━━╇━━━━━━━━━╇━━━━━━━━━━━━━...
+        │ myah │ enabled     │ 1.1.1   │ Myah platform ...
+    """
+    from myah.lib.cli.shell import ShellResult
+    real_hermes_output = (
+        '                                    Plugins                                     \n'
+        '┏━━━━━━┳━━━━━━━━━━━━━┳━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━┓\n'
+        '┃ Name ┃ Status      ┃ Version ┃ Description                          ┃ Source ┃\n'
+        '┡━━━━━━╇━━━━━━━━━━━━━╇━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━┩\n'
+        '│ myah │ enabled     │ 1.1.1   │ Myah platform adapter for Hermes     │ git    │\n'
+        '└──────┴─────────────┴─────────┴──────────────────────────────────────┴────────┘\n'
+    )
+    mock_run = mocker.patch('myah.lib.cli.doctor_checks.run')
+    mock_run.return_value = ShellResult(returncode=0, stdout=real_hermes_output, stderr='')
+
+    result = check_hermes_plugin_installed(hermes_home='/tmp/.hermes')
+
+    assert result.status == CheckStatus.OK, (
+        f'Real Hermes 0.14.0 output must be recognized as installed; got {result}'
+    )
+    assert '1.1.1' in result.message, f'version 1.1.1 should appear in message; got: {result.message}'
+
+
+def test_check_hermes_plugin_does_not_false_positive_on_myah_admin(mocker) -> None:
+    """The dashboard shim is registered as ``myah-admin``. That row alone
+    must NOT cause the gateway-side ``myah`` plugin to be reported as
+    installed — they are independent plugins, and only ``myah`` makes
+    port 8643 bind.
+    """
+    from myah.lib.cli.shell import ShellResult
+    only_admin = (
+        '┃ Name       ┃ Status      ┃ Version ┃\n'
+        '│ myah-admin │ enabled     │ 1.1.1   │\n'
+    )
+    mock_run = mocker.patch('myah.lib.cli.doctor_checks.run')
+    mock_run.return_value = ShellResult(returncode=0, stdout=only_admin, stderr='')
+
+    result = check_hermes_plugin_installed(hermes_home='/tmp/.hermes')
+
+    assert result.status == CheckStatus.FAIL, (
+        'myah-admin alone must not satisfy the myah-plugin check'
+    )
+
+
 def test_check_hermes_plugin_installed_default_expands_tilde(mocker, monkeypatch) -> None:
     """The default hermes_home expands ~ via os.path.expanduser.
 
@@ -224,6 +277,78 @@ def test_check_plugin_sha_drift_warn_when_different(tmp_path) -> None:
     assert result.status == CheckStatus.WARN
     assert '99abf4ee' in result.message
     assert '4a1a6c5e' in result.message
+
+
+def test_check_plugin_sha_drift_recognizes_versions_env(tmp_path, monkeypatch) -> None:
+    """Regression for PR #16 review H-4: on the public OSS mirror the
+    plugin SHA lives in ``versions.env`` (not ``agent/Dockerfile.stock``).
+    The doctor check must read it from there when the Dockerfile is
+    absent, instead of producing a spurious ``could not extract
+    MYAH_PLUGIN_SHA`` WARN on every healthy public-mirror install.
+    """
+    public_repo = tmp_path / 'public'
+    public_repo.mkdir()
+    plugin_sha = 'a' * 40
+    (public_repo / 'versions.env').write_text(f'MYAH_PLUGIN_SHA={plugin_sha}\n', encoding='utf-8')
+    monkeypatch.chdir(public_repo)
+
+    result = check_plugin_sha_drift()
+
+    assert result.status == CheckStatus.OK, (
+        f'public mirror must be recognized via versions.env; got {result.status}: {result.message}'
+    )
+    assert plugin_sha[:8] in result.message
+
+
+def test_probe_required_ports_services_started_reports_in_use_as_ok(mocker) -> None:
+    """Regression for PR #16 review M-2: after ``myah install
+    --service systemd`` starts the gateway + dashboard, ports 8642 /
+    8643 / 9119 are in use BY THOSE SERVICES — the post-install table
+    must report OK, not WARN. The ``services_started=True`` kwarg
+    selects the post-start semantics.
+    """
+    from myah.lib.cli.doctor_checks import probe_required_ports
+
+    # Mock socket.bind to always fail (i.e. every port is in use).
+    mock_socket = mocker.patch('myah.lib.cli.doctor_checks.socket.socket')
+    mock_socket.return_value.__enter__.return_value.bind.side_effect = OSError('Address in use')
+
+    results = probe_required_ports(services_started=True)
+
+    assert len(results) == 4
+    for r in results:
+        assert r.status == CheckStatus.OK, (
+            f'services_started=True with bound ports must report OK; '
+            f'got {r.status} for {r.name}: {r.message}'
+        )
+
+
+def test_probe_required_ports_default_treats_in_use_as_warn(mocker) -> None:
+    """Default (pre-flight) semantics: in-use → WARN (something else is
+    bound; the OSS stack will fail to claim the port). Preserved from
+    the original behavior for the bash-parity check path."""
+    from myah.lib.cli.doctor_checks import probe_required_ports
+
+    mock_socket = mocker.patch('myah.lib.cli.doctor_checks.socket.socket')
+    mock_socket.return_value.__enter__.return_value.bind.side_effect = OSError('Address in use')
+
+    results = probe_required_ports()  # default services_started=False
+
+    assert all(r.status == CheckStatus.WARN for r in results)
+
+
+def test_check_plugin_sha_drift_outside_any_clone_warns_softly(tmp_path, monkeypatch) -> None:
+    """Outside a Myah clone (neither sentinel present) the check is a
+    no-op WARN — never raises, since ``myah doctor`` may run from
+    anywhere."""
+    nowhere = tmp_path / 'nowhere'
+    nowhere.mkdir()
+    monkeypatch.chdir(nowhere)
+
+    result = check_plugin_sha_drift()
+
+    # WARN is fine; the key invariant is "doesn't blow up the doctor".
+    assert result.status in {CheckStatus.WARN, CheckStatus.OK}
 
 
 def test_check_agent_container_env_injection_warn_when_missing(mocker) -> None:

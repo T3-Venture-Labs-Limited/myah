@@ -500,7 +500,9 @@ HERMES_PY="$HERMES_VENV/bin/python"
 # is already present, ensurepip is a no-op.
 if ! "$HERMES_PY" -m pip --version >/dev/null 2>&1; then
   echo "→ Bootstrapping pip in Hermes venv via ensurepip..."
-  "$HERMES_PY" -m ensurepip --upgrade --quiet
+  # Python 3.11's ensurepip doesn't accept --quiet; redirect stderr instead.
+  # See PR #16 review C-2 for the upstream version that triggered this.
+  "$HERMES_PY" -m ensurepip --upgrade 2>/dev/null
   if ! "$HERMES_PY" -m pip --version >/dev/null 2>&1; then
     echo "✗ ensurepip ran but 'python -m pip' still fails. Check the venv at $HERMES_VENV" >&2
     exit 1

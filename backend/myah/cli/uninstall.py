@@ -16,7 +16,10 @@ instead of remembering the sequence:
      flags are partially redundant at the Hermes layer: either one
      drops ``--full`` and Hermes preserves both. They differ at the
      Myah platform layer (docker volume vs platform .env).
-  4. Remove ``<repo-root>/platform-oss/.env`` unless ``--keep-config``.
+  4. Remove the platform ``.env`` unless ``--keep-config``. The path
+     is layout-aware via ``find_platform_env_path`` — monorepo writes
+     to ``<root>/platform-oss/.env``; public mirror writes to
+     ``<root>/.env`` (next to ``docker-compose.yml``).
 
 Soft-fail policy for Hermes step: even if ``hermes uninstall`` returns
 non-zero (corrupted state, partial install, etc.), still proceed with
@@ -41,7 +44,7 @@ import typer
 # (`myah.cli.uninstall.subprocess.run`, `myah.cli.uninstall.find_repo_root`,
 # `myah.cli.uninstall.resolve_hermes_binary_or_exit`).
 from myah.lib.cli.hermes_install import resolve_hermes_binary_or_exit
-from myah.lib.cli.repo import find_repo_root
+from myah.lib.cli.repo import find_platform_env_path, find_repo_root
 
 
 def uninstall_command(
@@ -140,7 +143,7 @@ def _print_plan(
         '[dim]Resolved plan:[/]\n'
         f'  • docker compose down{docker_v}\n'
         f'  • hermes uninstall{hermes_flags}\n'
-        f'  • platform-oss/.env: {env_action}'
+        f'  • platform .env: {env_action}'
     )
 
 
@@ -180,11 +183,23 @@ def _hermes_uninstall(*, full: bool, console) -> int:  # noqa: ANN001
 
 
 def _remove_platform_env(repo_root: Path, *, console) -> None:  # noqa: ANN001
-    """Delete ``<repo-root>/platform-oss/.env`` if it exists."""
-    env_path = repo_root / 'platform-oss' / '.env'
+    """Delete the layout-appropriate platform ``.env`` if it exists.
+
+    Monorepo → ``<root>/platform-oss/.env``. Public mirror →
+    ``<root>/.env``. Falls through to a no-op message if the file
+    isn't present (a fresh install that never ran, or a partial
+    install). C-1 regression coverage in test_uninstall.py.
+    """
+    try:
+        env_path = find_platform_env_path(repo_root)
+    except RuntimeError as err:
+        console.print(
+            f'[yellow]⚠[/] could not determine platform .env path: {err}'
+        )
+        return
     if not env_path.is_file():
         console.print(
-            f'[dim]platform-oss/.env: not present at {env_path}, nothing to remove.[/]'
+            f'[dim]platform .env: not present at {env_path}, nothing to remove.[/]'
         )
         return
     try:

@@ -186,6 +186,32 @@ class TestBootstrapPip:
         assert ensurepip_cmd[0] == str(venv_py)
         assert '-m' in ensurepip_cmd and 'ensurepip' in ensurepip_cmd
 
+    def test_ensurepip_does_not_pass_unsupported_quiet_flag(
+        self, tmp_path: Path
+    ) -> None:
+        """Regression for PR #16 review C-2: ``python -m ensurepip`` on
+        Python 3.11 (the Hermes 0.14.0 venv) does NOT accept ``--quiet``.
+        Passing it makes argparse exit 2 with
+        ``unrecognized arguments: --quiet`` and the install aborts in
+        Phase 5 before the plugin pip-install ever runs.
+
+        Captured stdout is suppressed by ``shell.run``'s ``capture_output=True``
+        regardless, so dropping the flag is a no-op for terminal noise.
+        """
+        venv_py = tmp_path / 'venv' / 'bin' / 'python'
+        with patch.object(hermes_install, 'run') as mock_run:
+            mock_run.side_effect = [
+                _fail(returncode=1, stderr='No module named pip'),
+                _ok(),
+                _ok(stdout='pip 25.0'),
+            ]
+            hermes_install.bootstrap_pip(venv_py)
+        ensurepip_cmd = mock_run.call_args_list[1].args[0]
+        assert '--quiet' not in ensurepip_cmd, (
+            f'ensurepip does not accept --quiet on Python 3.11; got {ensurepip_cmd!r}. '
+            f'See PR #16 review C-2.'
+        )
+
     def test_ensurepip_succeeds_but_pip_still_missing_raises(self, tmp_path: Path) -> None:
         venv_py = tmp_path / 'venv' / 'bin' / 'python'
         with patch.object(hermes_install, 'run') as mock_run:
@@ -354,6 +380,53 @@ class TestVerifyDashboardPluginMounted:
             with patch.object(hermes_install.time, 'sleep'):
                 hermes_install.verify_dashboard_plugin_mounted('foo')
         assert captured['headers'].get('Authorization') == 'Bearer foo'
+
+
+# ---------------------------------------------------------------------------
+# verify_gateway_plugin_bound  (regression for PR #16 review M-1)
+# ---------------------------------------------------------------------------
+
+
+class TestVerifyGatewayPluginBound:
+    """Polls ``127.0.0.1:<port>/myah/health`` — the real "is the platform
+    adapter bound?" signal. The dashboard-side check at
+    ``:9119/api/plugins/myah-admin/health`` only proves the shim
+    materialized; it doesn't prove the gateway loaded the plugin."""
+
+    def test_polls_gateway_myah_health_endpoint(self) -> None:
+        captured: dict = {}
+
+        def _fake(url, headers):
+            captured['url'] = url
+            captured['headers'] = headers
+            return True
+
+        with patch.object(hermes_install, '_http_get_ok', side_effect=_fake):
+            with patch.object(hermes_install.time, 'sleep'):
+                ok = hermes_install.verify_gateway_plugin_bound()
+        assert ok is True
+        assert captured['url'] == 'http://127.0.0.1:8643/myah/health'
+        # /myah/health is unauthed — no bearer needed.
+        assert 'Authorization' not in captured['headers']
+
+    def test_returns_false_after_timeout_never_raises(self) -> None:
+        with patch.object(hermes_install, '_http_get_ok', return_value=False) as mock_http:
+            with patch.object(hermes_install.time, 'sleep'):
+                ok = hermes_install.verify_gateway_plugin_bound(timeout_s=2.0, poll_interval_s=0.5)
+        assert ok is False
+        assert mock_http.call_count == 4
+
+    def test_custom_port_honored(self) -> None:
+        captured: dict = {}
+
+        def _fake(url, headers):
+            captured['url'] = url
+            return True
+
+        with patch.object(hermes_install, '_http_get_ok', side_effect=_fake):
+            with patch.object(hermes_install.time, 'sleep'):
+                hermes_install.verify_gateway_plugin_bound(port=18643)
+        assert captured['url'] == 'http://127.0.0.1:18643/myah/health'
 
     def test_url_uses_provided_port(self) -> None:
         captured: dict = {}
@@ -543,3 +616,65 @@ class TestDetectInstalledPluginSha:
             direct_url_content=(f'{{"vcs_info": {{"vcs": "git", "commit_id": "{sha}"}}}}'),
         )
         assert hermes_install.detect_installed_plugin_sha(venv) == sha
+
+
+# ---------------------------------------------------------------------------
+# register_plugin_with_gateway  (regression for PR #16 review C-3)
+# ---------------------------------------------------------------------------
+
+
+class TestRegisterPluginWithGateway:
+    """Phase 5b: ``hermes plugins install <repo>`` + ``hermes plugins enable myah``.
+
+    Pip-installing the plugin into the Hermes venv is necessary but not
+    sufficient. The gateway only loads plugins that are registered in
+    ``~/.hermes/plugins/<name>/`` AND enabled. Without this step the
+    OSS probe reports ``plugin_installed: false`` and the platform
+    adapter never binds port 8643 — see PR #16 review C-3 for the
+    VM-test transcript.
+    """
+
+    def test_invokes_hermes_plugins_install_then_enable(self, tmp_path: Path) -> None:
+        hermes_bin = tmp_path / 'hermes-venv' / 'bin' / 'hermes'
+        with patch.object(hermes_install, 'run') as mock_run:
+            mock_run.return_value = _ok()
+            hermes_install.register_plugin_with_gateway(hermes_bin)
+        assert mock_run.call_count == 2
+        install_cmd = mock_run.call_args_list[0].args[0]
+        assert install_cmd[0] == str(hermes_bin)
+        assert install_cmd[1:3] == ['plugins', 'install']
+        assert install_cmd[3] == 'T3-Venture-Labs-Limited/myah-hermes-plugin'
+        enable_cmd = mock_run.call_args_list[1].args[0]
+        assert enable_cmd == [str(hermes_bin), 'plugins', 'enable', 'myah']
+
+    def test_passes_adapter_auth_key_env_to_avoid_prompt(self, tmp_path: Path) -> None:
+        """The plugin's post-install hook prompts for ``MYAH_ADAPTER_AUTH_KEY``
+        unless it finds the env var. In non-interactive mode the prompt
+        blocks forever, so we pre-set the env var to the value we just
+        wrote to the Hermes .env."""
+        hermes_bin = tmp_path / 'venv' / 'bin' / 'hermes'
+        bearer = 'b' * 32
+        with patch.object(hermes_install, 'run') as mock_run:
+            mock_run.return_value = _ok()
+            hermes_install.register_plugin_with_gateway(hermes_bin, adapter_auth_key=bearer)
+        env_first = mock_run.call_args_list[0].kwargs.get('env') or {}
+        assert env_first.get('MYAH_ADAPTER_AUTH_KEY') == bearer
+
+    def test_install_failure_propagates(self, tmp_path: Path) -> None:
+        """If ``hermes plugins install`` fails, surface the ShellError."""
+        hermes_bin = tmp_path / 'venv' / 'bin' / 'hermes'
+        with patch.object(hermes_install, 'run') as mock_run:
+            mock_run.side_effect = ShellError(['hermes'], _fail())
+            with pytest.raises(ShellError):
+                hermes_install.register_plugin_with_gateway(hermes_bin)
+
+    def test_idempotent_when_already_installed(self, tmp_path: Path) -> None:
+        """Re-running an install must not error — `hermes plugins install`
+        emits ``already installed`` to stderr and exits 0. The enable
+        step still runs (enabling an already-enabled plugin is a no-op).
+        """
+        hermes_bin = tmp_path / 'venv' / 'bin' / 'hermes'
+        with patch.object(hermes_install, 'run') as mock_run:
+            mock_run.return_value = _ok(stderr='Plugin myah already installed.\n')
+            hermes_install.register_plugin_with_gateway(hermes_bin)
+        assert mock_run.call_count == 2

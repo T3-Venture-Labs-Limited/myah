@@ -87,20 +87,58 @@ def check_hermes_plugin_installed(hermes_home: str | None = None) -> CheckResult
             status=CheckStatus.FAIL,
             message='hermes binary missing; cannot list plugins. Install hermes first.',
         )
-    if result.returncode == 0 and 'myah-hermes-plugin' in result.stdout:
-        # Try to extract version
-        match = re.search(r'myah-hermes-plugin\s+(\S+)', result.stdout)
-        version = match.group(1) if match else 'unknown'
-        return CheckResult(
-            name='myah-hermes-plugin',
-            status=CheckStatus.OK,
-            message=f'plugin installed (version {version})',
-        )
+    # Hermes 0.14.0 ``plugins list`` prints a Rich table where the
+    # gateway-side plugin appears as the literal name ``myah`` (NOT
+    # ``myah-hermes-plugin`` — that's the PyPI/pip package name, never
+    # the Hermes-registered plugin name). Match either form to stay
+    # compatible with older Hermes builds that printed the package
+    # name and with the actual production output. ``myah-admin``
+    # (the dashboard shim) must NOT satisfy this check — only the
+    # gateway plugin binds port 8643. Regression for PR #16 review H-3.
+    if result.returncode == 0:
+        match = _match_myah_plugin_row(result.stdout)
+        if match is not None:
+            version = match
+            return CheckResult(
+                name='myah-hermes-plugin',
+                status=CheckStatus.OK,
+                message=f'plugin installed (version {version})',
+            )
     return CheckResult(
         name='myah-hermes-plugin',
         status=CheckStatus.FAIL,
         message='plugin not installed. Install via: hermes plugins install T3-Venture-Labs-Limited/myah-hermes-plugin',
     )
+
+
+def _match_myah_plugin_row(stdout: str) -> str | None:
+    """Return the plugin's version from a ``hermes plugins list`` table.
+
+    Recognized row shapes (in priority order):
+
+      1. Rich-table row: ``│ myah │ <status> │ <version> │ ...``
+         (Hermes 0.14.0 production format).
+      2. Plain space-separated: ``myah-hermes-plugin <version> ...``
+         (older Hermes builds + the PyPI package-name form).
+
+    Returns ``None`` when neither shape matches. Carefully excludes the
+    ``myah-admin`` shim row by anchoring on a word-boundary after the
+    name and rejecting a trailing ``-`` character.
+    """
+    # Form 1: Rich table row. The leading character of a Rich row is
+    # ``│`` (U+2502). ``myah`` must be a standalone cell — followed by
+    # whitespace then the next ``│`` separator. Excludes ``myah-admin``
+    # because the name cell ends with ``-admin``, not whitespace+``│``.
+    rich_match = re.search(r'│\s+myah\s+│\s+\S+\s+│\s+(\S+)', stdout)
+    if rich_match is not None:
+        return rich_match.group(1)
+    # Form 2: legacy plain-text. ``myah-hermes-plugin`` is a unique
+    # package-name token; the original implementation used a simple
+    # substring check, kept here as a fallback.
+    plain_match = re.search(r'\bmyah-hermes-plugin\s+(\S+)', stdout)
+    if plain_match is not None:
+        return plain_match.group(1)
+    return None
 
 
 def check_port_for_service(port: int, service_name: str | None = None) -> CheckResult:
@@ -186,18 +224,39 @@ def check_platform_container_running() -> CheckResult:
 def check_plugin_sha_drift(
     dockerfile_path: str = 'agent/Dockerfile.stock',
     deploy_yml_path: str = '.github/workflows/deploy.yml',
+    versions_env_path: str = 'versions.env',
 ) -> CheckResult:
-    """Verify Dockerfile.stock and deploy.yml pin the same MYAH_PLUGIN_SHA.
+    """Verify the canonical MYAH_PLUGIN_SHA pin source(s) agree.
 
-    Documented drift case per AGENTS.md: deploy.yml's build-arg can
-    override the Dockerfile's ARG. When they diverge, production runs
-    a different plugin SHA than the Dockerfile claims.
+    Two layouts:
+
+    * Internal monorepo — pin lives in ``agent/Dockerfile.stock``;
+      ``.github/workflows/deploy.yml`` extracts it via awk so the
+      two cannot drift by construction. When both files exist this
+      check compares the literal values for the AGENTS.md drift case.
+    * Public OSS mirror — pin lives in ``versions.env`` (no Dockerfile,
+      no deploy.yml). When only this file exists, report OK with the
+      SHA from versions.env. Regression for PR #16 review H-4: before
+      this branch the check WARN'd on every public-mirror install
+      because ``agent/Dockerfile.stock`` doesn't exist there.
     """
     dockerfile_text = Path(dockerfile_path).read_text() if Path(dockerfile_path).exists() else ''
     deploy_text = Path(deploy_yml_path).read_text() if Path(deploy_yml_path).exists() else ''
+    versions_text = Path(versions_env_path).read_text() if Path(versions_env_path).exists() else ''
 
     dockerfile_sha = _extract_sha(dockerfile_text)
     deploy_sha = _extract_sha(deploy_text)
+    versions_sha = _extract_sha(versions_text)
+
+    # Public mirror branch — versions.env is the authoritative source.
+    # Hit this BEFORE the dockerfile-missing WARN below so the public
+    # mirror gets an OK instead of a spurious WARN.
+    if not dockerfile_sha and versions_sha:
+        return CheckResult(
+            name='plugin SHA pin',
+            status=CheckStatus.OK,
+            message=f'versions.env pins {versions_sha[:8]} (public OSS mirror layout)',
+        )
 
     # Deploy workflow may extract the SHA from Dockerfile.stock at build time
     # (the `awk -F= '/^ARG MYAH_PLUGIN_SHA=/...` pattern) rather than carrying
@@ -327,23 +386,41 @@ _REQUIRED_PORTS: tuple[tuple[int, str], ...] = (
 )
 
 
-def probe_required_ports() -> list[CheckResult]:
+def probe_required_ports(*, services_started: bool = False) -> list[CheckResult]:
     """Probe the 4 ports the OSS stack expects to bind.
 
     Mirrors setup-myah-oss.sh:865-880. Returns one CheckResult per port
     in the documented order (8642, 8643, 9119, 8080).
 
-    Semantics: WARN-on-in-use (NOT OK-on-in-use like check_port_for_service).
-    The intent matches the bash script's intent: this runs right after
-    install and is used to detect "something else is bound to a port the
-    user will soon try to bind for the OSS stack." Free → OK. In-use →
-    WARN with a hint to lsof.
+    Semantics depends on ``services_started``:
+
+    * ``services_started=False`` (default) — pre-flight semantics. Free
+      → OK ('ready to bind'); in-use → WARN ('something else is bound').
+      The original bash intent: detect port conflicts before the
+      install actually starts the gateway/dashboard.
+
+    * ``services_started=True`` — post-service-install semantics. Free
+      → WARN (the service should be bound but isn't); in-use → OK
+      (assumed bound by the expected service). Regression for PR #16
+      review M-2: when ``myah install --service systemd`` starts the
+      Hermes gateway + dashboard, the same probe afterward saw those
+      ports as in-use and spuriously WARN'd, contradicting the
+      "everything's running" reality.
+
+    The owning-process identity is intentionally not checked here
+    (would require lsof / cross-platform pid parsing). The paired
+    container/service checks elsewhere validate ownership.
     """
     results: list[CheckResult] = []
     for port, service_name in _REQUIRED_PORTS:
         try:
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
                 sock.bind(('127.0.0.1', port))
+            free = True
+        except OSError:
+            free = False
+
+        if free and not services_started:
             results.append(
                 CheckResult(
                     name=f'port {port}',
@@ -351,7 +428,18 @@ def probe_required_ports() -> list[CheckResult]:
                     message=f'port {port} is free (ready for {service_name})',
                 )
             )
-        except OSError:
+        elif free and services_started:
+            results.append(
+                CheckResult(
+                    name=f'port {port}',
+                    status=CheckStatus.WARN,
+                    message=(
+                        f'port {port} is free but {service_name} should be bound — '
+                        f'check `systemctl --user status` / `launchctl list`.'
+                    ),
+                )
+            )
+        elif not free and not services_started:
             results.append(
                 CheckResult(
                     name=f'port {port}',
@@ -362,10 +450,18 @@ def probe_required_ports() -> list[CheckResult]:
                     ),
                 )
             )
+        else:  # in-use AND services_started → expected
+            results.append(
+                CheckResult(
+                    name=f'port {port}',
+                    status=CheckStatus.OK,
+                    message=f'port {port} in use (expected: {service_name})',
+                )
+            )
     return results
 
 
-def post_install_doctor_run() -> list[CheckResult]:
+def post_install_doctor_run(*, services_started: bool = False) -> list[CheckResult]:
     """Aggregate post-install verification: doctor checks + port probes.
 
     Pure orchestrator. Composes the 5 existing doctor predicates from
@@ -381,6 +477,12 @@ def post_install_doctor_run() -> list[CheckResult]:
       5. check_agent_container_env_injection
       6. probe_required_ports() — flattened (4 entries)
 
+    ``services_started`` is forwarded to ``probe_required_ports``. Pass
+    ``True`` when the caller has just installed systemd/launchd units
+    that bind those ports — otherwise the post-install table spuriously
+    WARNs on every port the install just brought up. See PR #16 review
+    M-2.
+
     Some checks (platform_container, agent_env_injection) may WARN/FAIL
     at install time because the user hasn't run `myah platform up` yet.
     That's expected; the caller decides how to render.
@@ -392,5 +494,5 @@ def post_install_doctor_run() -> list[CheckResult]:
         check_platform_container_running(),
         check_agent_container_env_injection(),
     ]
-    results.extend(probe_required_ports())
+    results.extend(probe_required_ports(services_started=services_started))
     return results

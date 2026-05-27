@@ -171,7 +171,7 @@ def _patch_named_checks(monkeypatch: pytest.MonkeyPatch, fail_name: str | None =
     ]
     monkeypatch.setattr(
         'myah.lib.cli.doctor_checks.probe_required_ports',
-        lambda: sentinel_ports,
+        lambda **_kwargs: sentinel_ports,
     )
 
 

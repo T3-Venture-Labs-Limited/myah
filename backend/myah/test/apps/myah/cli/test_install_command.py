@@ -36,7 +36,7 @@ runner = CliRunner()
 
 @pytest.fixture
 def fake_repo(tmp_path: Path) -> Path:
-    """Build a minimal fake repo root containing agent/Dockerfile.stock.
+    """Build a minimal fake repo root containing agent/Dockerfile.stock (monorepo layout).
 
     The Dockerfile pins a deterministic 40-char hex SHA so plugin SHA
     resolution succeeds without network access.
@@ -46,6 +46,24 @@ def fake_repo(tmp_path: Path) -> Path:
     (repo / 'agent' / 'Dockerfile.stock').write_text(
         'ARG HERMES_SHA=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n'
         'ARG MYAH_PLUGIN_SHA=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n',
+        encoding='utf-8',
+    )
+    return repo
+
+
+@pytest.fixture
+def fake_public_repo(tmp_path: Path) -> Path:
+    """Build a minimal fake public-mirror repo root containing versions.env (flat layout).
+
+    Regression coverage for PR #16 review C-1: ``myah install`` must
+    write the platform .env to ``<root>/.env`` here, NOT to
+    ``<root>/platform-oss/.env`` (which doesn't exist on the mirror).
+    """
+    repo = tmp_path / 'fake-public-repo'
+    repo.mkdir(parents=True)
+    (repo / 'versions.env').write_text(
+        'HERMES_SHA=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n'
+        'MYAH_PLUGIN_SHA=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n',
         encoding='utf-8',
     )
     return repo
@@ -103,6 +121,9 @@ def all_lib_mocks(mocker) -> dict[str, object]:
         'bootstrap_pip': mocker.patch('myah.cli.install.bootstrap_pip'),
         'pip_install_plugin_at_sha': mocker.patch('myah.cli.install.pip_install_plugin_at_sha'),
         'materialize_dashboard_shim': mocker.patch('myah.cli.install.materialize_dashboard_shim'),
+        'register_plugin_with_gateway': mocker.patch(
+            'myah.cli.install.register_plugin_with_gateway'
+        ),
         'enable_myah_platform': mocker.patch(
             'myah.cli.install.enable_myah_platform', return_value='created'
         ),
@@ -110,6 +131,9 @@ def all_lib_mocks(mocker) -> dict[str, object]:
         'install_launchd_plists': mocker.patch('myah.cli.install.install_launchd_plists'),
         'verify_dashboard_plugin_mounted': mocker.patch(
             'myah.cli.install.verify_dashboard_plugin_mounted', return_value=True
+        ),
+        'verify_gateway_plugin_bound': mocker.patch(
+            'myah.cli.install.verify_gateway_plugin_bound', return_value=True
         ),
         'post_install_doctor_run': mocker.patch(
             'myah.cli.install.post_install_doctor_run',
@@ -133,8 +157,34 @@ def test_non_interactive_happy_path(install_env, all_lib_mocks) -> None:
     all_lib_mocks['bootstrap_pip'].assert_called_once()
     all_lib_mocks['pip_install_plugin_at_sha'].assert_called_once()
     all_lib_mocks['materialize_dashboard_shim'].assert_called_once()
+    all_lib_mocks['register_plugin_with_gateway'].assert_called_once()
     all_lib_mocks['enable_myah_platform'].assert_called_once()
     all_lib_mocks['post_install_doctor_run'].assert_called_once()
+
+
+def test_install_registers_plugin_with_gateway_phase_5b(install_env, all_lib_mocks) -> None:
+    """Regression for PR #16 review C-3: ``myah install`` must register
+    the plugin with the gateway (``hermes plugins install`` +
+    ``hermes plugins enable myah``) so port 8643 binds.
+
+    The pip-install alone leaves the gateway-side plugin unregistered;
+    the OSS probe reports ``plugin_installed: false`` and the chat
+    surface is unreachable. The bash original told the user to do this
+    manually as a post-script step — the Python install must not
+    inherit that paper-cut.
+    """
+    result = runner.invoke(app, ['install', '--non-interactive', '--service', 'none'])
+    assert result.exit_code == 0, f'stdout: {result.stdout}\nexc: {result.exception}'
+    mock = all_lib_mocks['register_plugin_with_gateway']
+    mock.assert_called_once()
+    # The bearer just written into Hermes .env should be passed so the
+    # plugin's post-install hook doesn't prompt for it in non-interactive
+    # mode (the prompt blocks forever without a TTY).
+    kwargs = mock.call_args.kwargs
+    assert 'adapter_auth_key' in kwargs
+    assert kwargs['adapter_auth_key'], (
+        'register_plugin_with_gateway must receive a non-empty adapter_auth_key'
+    )
 
 
 # ── failure-mode flags ────────────────────────────────────────────────
@@ -317,6 +367,48 @@ def test_repo_root_versions_env_only(
     assert result.exit_code == 0, f'stdout: {result.stdout}\nexc: {result.exception}'
     call_args = all_lib_mocks['pip_install_plugin_at_sha'].call_args
     assert call_args.args[0] == plugin_sha
+
+
+def test_public_mirror_writes_platform_env_to_repo_root(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    hermes_home: Path,
+    all_lib_mocks,
+) -> None:
+    """Regression for PR #16 C-1: on the public mirror, the platform .env
+    lands at ``<root>/.env`` (next to docker-compose.yml), NOT at
+    ``<root>/platform-oss/.env`` (which doesn't exist on the mirror).
+
+    Pre-fix: install created a stray ``platform-oss/`` dir, wrote the
+    bearer + secret + Fernet key into ``platform-oss/.env``, and left
+    ``<root>/.env`` missing → docker-compose then exited with
+    ``env file ... not found``.
+    """
+    public_repo = tmp_path / 'public-oss-repo'
+    public_repo.mkdir()
+    (public_repo / 'versions.env').write_text(
+        'MYAH_PLUGIN_SHA=' + 'c' * 40 + '\n', encoding='utf-8'
+    )
+    monkeypatch.setenv('HERMES_HOME', str(hermes_home))
+    monkeypatch.chdir(public_repo)
+    monkeypatch.setattr(
+        'myah.cli.install.shutil.which',
+        lambda name: '/usr/local/bin/hermes' if name == 'hermes' else None,
+    )
+
+    result = runner.invoke(app, ['install', '--non-interactive', '--service', 'none'])
+
+    assert result.exit_code == 0, f'stdout: {result.stdout}\nexc: {result.exception}'
+    root_env = public_repo / '.env'
+    legacy_env = public_repo / 'platform-oss' / '.env'
+    assert root_env.is_file(), '<root>/.env must be written on the public mirror'
+    parsed = parse_env_file(root_env)
+    assert parsed.get('MYAH_AGENT_BEARER_TOKEN'), 'bearer must land in <root>/.env'
+    assert parsed.get('MYAH_SECRET_KEY'), 'MYAH_SECRET_KEY must land in <root>/.env'
+    assert not legacy_env.exists(), (
+        'no stray platform-oss/ directory or platform-oss/.env should be '
+        'created on the public mirror layout'
+    )
 
 
 def test_repo_root_neither_sentinel_fails(

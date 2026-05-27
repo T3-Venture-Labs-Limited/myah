@@ -148,8 +148,14 @@ def bootstrap_pip(venv_python: Path) -> None:
     if probe.returncode == 0:
         return
 
+    # NOTE: Python 3.11's ``ensurepip`` (the version Hermes 0.14.0 ships)
+    # does NOT accept ``--quiet``. Passing it makes argparse exit 2 with
+    # ``unrecognized arguments: --quiet`` and blocks every fresh OSS
+    # install on Phase 5. ``shell.run`` already captures stdout, so
+    # dropping the flag changes nothing for terminal noise. See PR #16
+    # review C-2 for the verbatim VM-repro evidence.
     run(
-        [str(venv_python), '-m', 'ensurepip', '--upgrade', '--quiet'],
+        [str(venv_python), '-m', 'ensurepip', '--upgrade'],
         check=True,
     )
 
@@ -273,6 +279,41 @@ def verify_dashboard_plugin_mounted(
     return False
 
 
+def verify_gateway_plugin_bound(
+    *,
+    port: int = 8643,
+    timeout_s: float = 15.0,
+    poll_interval_s: float = 0.5,
+) -> bool:
+    """Poll the gateway-side ``/myah/health`` endpoint until 200 or timeout.
+
+    Mount verification at the *correct* surface. The original
+    :func:`verify_dashboard_plugin_mounted` polls the dashboard's
+    ``/api/plugins/myah-admin/health`` endpoint, which proves the
+    dashboard shim got materialized into ``~/.hermes/plugins/myah-admin/``.
+    That tells you nothing about whether the gateway-side platform
+    adapter is bound — port 8643 / ``/myah/health`` is the surface
+    that the platform actually talks to.
+
+    Regression for PR #16 review M-1: the install printed "dashboard
+    plugin mount verified" while the gateway plugin was still
+    unregistered, port 8643 was unbound, and the OSS probe returned
+    ``plugin_installed: false``.
+
+    Returns ``True`` on first 200; ``False`` after timeout. Never
+    raises — install can still succeed; the caller decides how to
+    surface the result.
+    """
+    url = f'http://127.0.0.1:{port}/myah/health'
+    attempts = max(1, int(timeout_s / poll_interval_s))
+    for attempt in range(attempts):
+        if _http_get_ok(url, headers={}):
+            return True
+        if attempt < attempts - 1:
+            time.sleep(poll_interval_s)
+    return False
+
+
 def _find_plugin_dist_info(hermes_venv: Path) -> Path | None:
     """Locate the myah-hermes-plugin's .dist-info dir under a hermes venv.
 
@@ -357,6 +398,58 @@ def detect_installed_plugin_sha(hermes_venv: Path) -> str | None:
     return _git_commit_from_direct_url(dist_info / 'direct_url.json')
 
 
+def register_plugin_with_gateway(
+    hermes_bin: Path,
+    *,
+    adapter_auth_key: str | None = None,
+    repo: str = 'T3-Venture-Labs-Limited/myah-hermes-plugin',
+) -> None:
+    """Register the Myah plugin with the Hermes gateway + enable it.
+
+    Mirrors the manual ``Next steps`` block at setup-myah-oss.sh:945:
+    ``hermes plugins install <repo>`` then ``hermes plugins enable myah``.
+
+    Without this step the plugin's pip-install in
+    :func:`pip_install_plugin_at_sha` is wasted: the gateway never loads
+    the platform adapter, port 8643 never binds, and the OSS probe
+    reports ``plugin_installed: false``. The bash original instructed
+    users to do this manually; ``myah install`` should not leave the
+    same paper-cut on the floor. See PR #16 review C-3.
+
+    Args:
+      hermes_bin: Absolute path to the ``hermes`` console script
+        (typically ``<venv>/bin/hermes``). Use
+        :func:`detect_hermes_venv` to find the venv.
+      adapter_auth_key: Optional bearer to pre-populate
+        ``MYAH_ADAPTER_AUTH_KEY`` in the install subprocess's env. The
+        plugin's post-install hook reads this to skip its interactive
+        prompt — required for ``--non-interactive`` installs. Defaults
+        to inheriting the parent env (which already has the value if
+        ``write_token_to_all_slots`` ran first).
+      repo: Plugin repo slug. The default points at the public Myah
+        plugin; override only for fork testing.
+
+    Raises:
+      ShellError: when ``hermes plugins install`` or ``hermes plugins
+        enable`` returns non-zero. The install command surfaces this
+        as a Phase 5b failure with a stack trace and exits 1.
+    """
+    install_env: dict[str, str] = {**os.environ}
+    if adapter_auth_key:
+        install_env['MYAH_ADAPTER_AUTH_KEY'] = adapter_auth_key
+
+    run(
+        [str(hermes_bin), 'plugins', 'install', repo],
+        check=True,
+        env=install_env,
+    )
+    run(
+        [str(hermes_bin), 'plugins', 'enable', 'myah'],
+        check=True,
+        env=install_env,
+    )
+
+
 def resolve_hermes_binary_or_exit(*, command_hint: str = '') -> Path:
     """Detect the user's system Hermes venv and return the absolute ``<venv>/bin/hermes`` path.
 
@@ -399,6 +492,8 @@ __all__ = [
     'materialize_dashboard_shim',
     'pip_install_plugin_at_sha',
     'read_pinned_plugin_sha_from_dockerfile',
+    'register_plugin_with_gateway',
     'resolve_hermes_binary_or_exit',
     'verify_dashboard_plugin_mounted',
+    'verify_gateway_plugin_bound',
 ]

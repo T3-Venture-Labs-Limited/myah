@@ -41,9 +41,11 @@ from myah.lib.cli.hermes_install import (
     materialize_dashboard_shim,
     pip_install_plugin_at_sha,
     read_pinned_plugin_sha_from_dockerfile,
+    register_plugin_with_gateway,
     verify_dashboard_plugin_mounted,
+    verify_gateway_plugin_bound,
 )
-from myah.lib.cli.repo import find_repo_root
+from myah.lib.cli.repo import find_platform_env_path, find_repo_root
 from myah.lib.cli.service_units import install_launchd_plists, install_systemd_user_units
 from myah.lib.cli.token_gen import (
     adopt_legacy_webui_key,
@@ -323,7 +325,10 @@ def install_command(
     hermes_home = _hermes_home()
     hermes_home.mkdir(parents=True, exist_ok=True)
     hermes_env = hermes_home / '.env'
-    platform_env = repo_root / 'platform-oss' / '.env'
+    # Layout-aware: monorepo → <root>/platform-oss/.env; public mirror →
+    # <root>/.env (next to docker-compose.yml). See repo.find_platform_env_path
+    # docstring for the C-1 regression context.
+    platform_env = find_platform_env_path(repo_root)
     platform_env.parent.mkdir(parents=True, exist_ok=True)
 
     # ─── Phase 1 — Bearer token alignment + OSS defaults ──────────────
@@ -416,6 +421,26 @@ def install_command(
     )
     materialize_dashboard_shim(venv_path, hermes_home)
 
+    # ─── Phase 5b — Register plugin with the Hermes gateway ──────────
+    #
+    # The pip-install above puts ``myah_hermes_plugin`` on the venv's
+    # ``sys.path`` so the dashboard shim can import it. But the gateway
+    # only loads plugins that are registered in
+    # ``~/.hermes/plugins/<name>/`` AND enabled — those are produced by
+    # ``hermes plugins install <repo>``, not by pip. Skipping this step
+    # leaves the OSS probe reporting ``plugin_installed: false`` and
+    # port 8643 unbound. See PR #16 review C-3 for the VM transcript.
+    console.print('[bold cyan]Phase 5b:[/] register plugin with gateway')
+    hermes_bin_path = Path(shutil.which('hermes') or '')
+    try:
+        register_plugin_with_gateway(hermes_bin_path, adapter_auth_key=token)
+    except Exception as err:  # noqa: BLE001 — surface as Rich error
+        console.print(
+            f'[yellow]⚠ `hermes plugins install/enable` step failed:[/] {err}\n'
+            f'[dim]Run manually: hermes plugins install '
+            f'T3-Venture-Labs-Limited/myah-hermes-plugin && hermes plugins enable myah[/]'
+        )
+
     # ─── Phase 6 — Hermes config merge ────────────────────────────────
     console.print('[bold cyan]Phase 6:[/] Hermes config.yaml merge')
 
@@ -433,12 +458,23 @@ def install_command(
     else:  # 'none'
         console.print('  [dim]service install skipped (--service none)[/]')
 
-    # Dashboard mount verification (best-effort poll). Skipped when no
-    # service was installed — there's nothing listening.
+    # Mount verification (best-effort poll). Skipped when no service
+    # was installed — there's nothing listening.
     if chosen_service in ('systemd', 'launchd'):
-        mounted = verify_dashboard_plugin_mounted(web_token, port=9119, timeout_s=15.0)
-        if mounted:
-            console.print('  [green]dashboard plugin mount verified[/]')
+        # Gateway-side: port 8643 / /myah/health proves the platform
+        # adapter is actually bound. This is what the platform talks
+        # to; if it's not up, chat doesn't work.
+        if verify_gateway_plugin_bound(port=8643, timeout_s=15.0):
+            console.print('  [green]gateway platform adapter verified (port 8643)[/]')
+        else:
+            console.print(
+                '  [yellow]gateway platform adapter not verified within 15s — '
+                'check `hermes gateway` logs[/]'
+            )
+        # Dashboard-side: port 9119 proves the dashboard shim is mounted.
+        # Kept because the OSS UI's "Settings" page relies on it.
+        if verify_dashboard_plugin_mounted(web_token, port=9119, timeout_s=15.0):
+            console.print('  [green]dashboard plugin mount verified (port 9119)[/]')
         else:
             console.print(
                 '  [yellow]dashboard plugin mount not verified within 15s — '
@@ -448,7 +484,12 @@ def install_command(
     # ─── Phase 8 — Post-install verification ──────────────────────────
     console.print('[bold cyan]Phase 8:[/] post-install verification')
 
-    results: list[CheckResult] = post_install_doctor_run()
+    # When --service systemd|launchd ran, the gateway/dashboard ports
+    # SHOULD be bound now. Tell post_install_doctor_run so it doesn't
+    # spuriously WARN on the ports the install just brought up. See
+    # PR #16 review M-2.
+    services_started = chosen_service in ('systemd', 'launchd')
+    results: list[CheckResult] = post_install_doctor_run(services_started=services_started)
 
     table = Table(title='Post-install verification', show_header=True, header_style='bold')
     table.add_column('Check', style='cyan')
