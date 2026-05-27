@@ -33,6 +33,54 @@
 #   scripts/dev-oss.sh gateway   {start|stop|restart}  # gateway only
 set -euo pipefail
 
+# ── Deprecation warning ──────────────────────────────────────────────────
+# This script is DEPRECATED in favor of `myah dev oss <subcommand>`.
+# Will be removed in Slice 6 of the DevX + OSS CLI initiative (T3-1084).
+# Note: dev-oss.sh operates on main's ~/.hermes/.dev-oss/ (single shared
+# instance); the new `myah dev oss` is worktree-scoped (per-worktree
+# pidfiles + logs in <worktree>/.worktree-logs/).
+if [ -t 2 ] && [ "$(tput colors 2>/dev/null || echo 0)" -ge 8 ]; then
+    _DEP_RED=$'\033[31m'; _DEP_BOLD=$'\033[1m'; _DEP_RESET=$'\033[0m'
+else
+    _DEP_RED=''; _DEP_BOLD=''; _DEP_RESET=''
+fi
+# Inspect the verb the user typed so the warning recommends the exact replacement.
+_DEP_VERB="${1:-}"
+case "$_DEP_VERB" in
+    up)                 _DEP_REPLACEMENT='myah dev oss up' ;;
+    down)               _DEP_REPLACEMENT='myah dev oss down' ;;
+    restart)            _DEP_REPLACEMENT='myah dev oss restart' ;;
+    status)             _DEP_REPLACEMENT='myah dev oss status' ;;
+    logs)               _DEP_REPLACEMENT='myah dev logs' ;;
+    doctor)             _DEP_REPLACEMENT='myah doctor' ;;
+    gateway|dashboard)  _DEP_REPLACEMENT='myah dev oss {up,down,restart}' ;;
+    *)                  _DEP_REPLACEMENT='myah dev oss --help' ;;
+esac
+cat >&2 <<DEPRECATION
+${_DEP_RED}${_DEP_BOLD}DEPRECATED:${_DEP_RESET} scripts/dev-oss.sh is being replaced by:
+
+    ${_DEP_BOLD}${_DEP_REPLACEMENT}${_DEP_RESET}
+
+Full verb mapping:
+  ${0##*/} up                       →  myah dev oss up
+  ${0##*/} down                     →  myah dev oss down
+  ${0##*/} restart                  →  myah dev oss restart
+  ${0##*/} status                   →  myah dev oss status
+  ${0##*/} logs <component>         →  myah dev logs
+  ${0##*/} doctor                   →  myah doctor
+  ${0##*/} gateway   {start|stop|restart}  →  myah dev oss {up,down,restart}
+  ${0##*/} dashboard {start|stop|restart}  →  myah dev oss {up,down,restart}
+
+Note: dev-oss.sh operates on main's ~/.hermes/.dev-oss/ (single shared
+instance); 'myah dev oss' is worktree-scoped (per-worktree state in
+<worktree>/.worktree-logs/).
+
+This script will be removed in Slice 6 of T3-1084.
+Continuing with legacy behavior for backward compat...
+
+DEPRECATION
+unset _DEP_RED _DEP_BOLD _DEP_RESET _DEP_VERB _DEP_REPLACEMENT
+
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 HERMES_HOME_DIR="${HERMES_HOME:-$HOME/.hermes}"
 DEV_DIR="$HERMES_HOME_DIR/.dev-oss"
@@ -172,10 +220,7 @@ print_status() {
 # documented failure modes this exercises.
 doctor() {
   local hermes_env="${HERMES_HOME_DIR}/.env"
-  # Public layout: .env lives at the repo root (no platform-oss/ subdir).
-  # The internal monorepo equivalent is platform-oss/.env; MYAH_PLATFORM_ENV
-  # overrides for non-standard checkouts.
-  local platform_env="${MYAH_PLATFORM_ENV:-$ROOT/.env}"
+  local platform_env="${MYAH_PLATFORM_ENV:-$ROOT/platform-oss/.env}"
   echo "Myah OSS environment diagnostic:"
 
   # 1. gateway running?
@@ -203,7 +248,7 @@ doctor() {
     echo "  ✓ Platform .env exists ($platform_env)"
   else
     echo "  ✗ Platform .env NOT found at $platform_env"
-    echo "    → Fix: cp $ROOT/.env.example $platform_env  (or re-run scripts/setup-myah-oss.sh)"
+    echo "    → Fix: cp $ROOT/platform-oss/.env.example $platform_env"
   fi
 
   # 4. MYAH_PLATFORM_BASE_URL in hermes .env (Task 3.5 gotcha).

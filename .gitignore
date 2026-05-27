@@ -2,7 +2,8 @@ x.py
 yarn.lock
 .DS_Store
 node_modules
-/build
+/build/*
+!/build/.gitkeep
 /.svelte-kit
 /package
 .env
@@ -30,7 +31,12 @@ static/pyodide/*
 
 # Distribution / packaging
 .Python
-build/
+build/*
+# Force-include the placeholder so `force-include = { build = "myah/frontend" }`
+# in pyproject.toml passes hatchling's validation on Node-less installs
+# (MYAH_SKIP_HATCH_NPM=1). See docs/superpowers/specs/2026-05-22-devx-oss-cli-spike-findings.md
+# Investigation B for the full rationale.
+!build/.gitkeep
 develop-eggs/
 dist/
 downloads/

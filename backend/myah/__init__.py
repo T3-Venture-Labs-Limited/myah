@@ -193,11 +193,43 @@ def main(
     pass
 
 
+def _build_uvicorn_kwargs(host: str, port: int, reload: bool) -> dict:
+    """Pure helper that builds the kwargs dict for uvicorn.run().
+
+    Extracted so it can be unit-tested without the import-myah-main side
+    effect of `serve`. Returns a dict that callers pass to uvicorn.run().
+
+    Reads UVICORN_WORKERS from os.getenv directly (NOT from myah.env)
+    to avoid pulling in env.py's module-load side effects (DB engine,
+    Sentry init). This keeps the helper truly pure for testing.
+    Independent reviewer C6 caught the original `from myah.env import UVICORN_WORKERS`
+    pulling in the full stack.
+    """
+    workers_str = os.getenv('UVICORN_WORKERS', '1')
+    workers = int(workers_str) if workers_str.isdigit() else 1
+
+    return {
+        'app': 'myah.main:app',
+        'host': host,
+        'port': port,
+        'reload': reload,
+        'forwarded_allow_ips': '*',
+        # workers + reload are mutually exclusive in uvicorn
+        'workers': 1 if reload else workers,
+    }
+
+
 @app.command()
 def serve(
     host: str = '0.0.0.0',
     port: int = 8080,
+    reload: bool = False,
 ):
+    """Run the Myah platform via uvicorn.
+
+    Production container's CMD is `myah serve` (no flags). Local dev can
+    use `myah serve --reload` to enable hot-reload (formerly `myah dev`).
+    """
     os.environ['FROM_INIT_PY'] = 'true'
     _bootstrap_secret_key()
     # Phase B.3a: rename legacy webui.db → myah.db before any DB import.
@@ -229,31 +261,23 @@ def serve(
             os.environ['USE_CUDA_DOCKER'] = 'false'
             os.environ['LD_LIBRARY_PATH'] = ':'.join(LD_LIBRARY_PATH)
 
+    # Side-effecting imports (FastAPI app + Sentry + DB engine wiring).
+    # Note: this is run only when `serve` is invoked. The `_build_uvicorn_kwargs`
+    # helper above does NOT trigger this import, so it can be unit-tested.
     import myah.main  # noqa: F401
-    from myah.env import UVICORN_WORKERS  # Import the workers setting
 
-    uvicorn.run(
-        'myah.main:app',
-        host=host,
-        port=port,
-        forwarded_allow_ips='*',
-        workers=UVICORN_WORKERS,
-    )
+    uvicorn.run(**_build_uvicorn_kwargs(host=host, port=port, reload=reload))
 
 
-@app.command()
-def dev(
-    host: str = '0.0.0.0',
-    port: int = 8080,
-    reload: bool = True,
-):
-    uvicorn.run(
-        'myah.main:app',
-        host=host,
-        port=port,
-        reload=reload,
-        forwarded_allow_ips='*',
-    )
+# The old top-level `dev` command (uvicorn with --reload=True) is REMOVED.
+# Its behavior is preserved via `myah serve --reload`.
+# The `dev` name is now a subcommand group for developer-only commands.
+
+# Register the new CLI surface. Import is at the bottom of the module to
+# avoid circular import issues (cli modules import the `app` from here).
+from myah.cli import register_commands  # noqa: E402
+
+register_commands(app)
 
 
 if __name__ == '__main__':
