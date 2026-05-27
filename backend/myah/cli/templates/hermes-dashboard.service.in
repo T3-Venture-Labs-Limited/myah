@@ -1,0 +1,19 @@
+[Unit]
+Description=Hermes Agent dashboard (Myah OSS)
+After=network-online.target hermes-gateway.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+# --insecure --host 0.0.0.0 is required so the platform docker container can
+# reach the dashboard via host.docker.internal:host-gateway (Linux Docker
+# resolves that to the host bridge IP, e.g. 172.17.0.1 — a service bound
+# only to 127.0.0.1 is unreachable from there). Security implication: the
+# dashboard is now exposed to the LAN. See spec §13 risk row.
+ExecStart=__HERMES_BIN__ dashboard --no-open --insecure --host 0.0.0.0
+Restart=on-failure
+RestartSec=5s
+Environment=HERMES_HOME=__HERMES_HOME__
+
+[Install]
+WantedBy=default.target

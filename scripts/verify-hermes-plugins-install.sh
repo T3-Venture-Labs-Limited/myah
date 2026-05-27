@@ -61,6 +61,34 @@
 
 set -uo pipefail
 
+# ── Deprecation warning ──────────────────────────────────────────────────
+# This script is DEPRECATED in favor of the Myah CLI plugin commands.
+# Will be removed in Slice 6 of the DevX + OSS CLI initiative (T3-1084).
+# The legacy verification flow is preserved during the deprecation period
+# so users mid-investigation aren't broken; new runs should use the CLI.
+if [ -t 2 ] && [ "$(tput colors 2>/dev/null || echo 0)" -ge 8 ]; then
+    _DEP_RED=$'\033[31m'; _DEP_BOLD=$'\033[1m'; _DEP_RESET=$'\033[0m'
+else
+    _DEP_RED=''; _DEP_BOLD=''; _DEP_RESET=''
+fi
+cat >&2 <<DEPRECATION
+${_DEP_RED}${_DEP_BOLD}DEPRECATED:${_DEP_RESET} platform-oss/scripts/verify-hermes-plugins-install.sh is being replaced by:
+
+    ${_DEP_BOLD}myah plugins list${_DEP_RESET}    — quick listing of installed plugins
+    ${_DEP_BOLD}myah doctor${_DEP_RESET}          — full plugin install + SHA-drift check
+
+Between them, the two commands cover everything this script verifies:
+  - Plugin landed at the expected ~/.hermes/plugins/<name>/ path.
+  - plugin.yaml + __init__.py present (directory-style install shape).
+  - Plugin SHA matches the pin in agent/Dockerfile.stock.
+  - Hermes gateway /myah/health reachable after plugin load.
+
+This script will be removed in Slice 6 of T3-1084.
+Continuing with legacy verification flow for backward compat...
+
+DEPRECATION
+unset _DEP_RED _DEP_BOLD _DEP_RESET
+
 PLUGIN_URL="${PLUGIN_URL:-T3-Venture-Labs-Limited/myah-hermes-plugin}"
 RESULT_FILE="${RESULT_FILE:-/tmp/myah-plugin-install-result.txt}"
 

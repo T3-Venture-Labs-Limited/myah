@@ -57,6 +57,12 @@ dependencies = [
     # __init__.py, which does `import typer` at module top.
     "typer>=0.12.0",
 
+    # Rich was historically transitive via Typer. Pinned explicitly because
+    # `myah status` and `myah doctor` (Slice 1 of the DevX + OSS CLI
+    # initiative) render Rich tables; a future Typer upgrade that drops
+    # Rich must not silently break us.
+    "rich>=13.0",
+
     "mcp==1.26.0",
 
 
@@ -106,6 +112,10 @@ postgres = [
 dev = [
     "pytest~=8.3.2",
     "pytest-docker~=3.2.5",
+    # Provides the `mocker` fixture used by the CLI test suite (Slice 1+ of
+    # the DevX + OSS CLI initiative). Without it, every test that requests
+    # `mocker` fails at collection with `fixture 'mocker' not found`.
+    "pytest-mock>=3.14.0",
     # Codegen for the platform↔Hermes typed contract. See
     # ``platform/scripts/generate-ts-contract.sh`` and
     # ``.github/workflows/contract-typecheck.yml``.
@@ -147,7 +157,9 @@ exclude = [
     "myah.db",
     "chroma.sqlite3",
 ]
-force-include = { build = "myah/frontend" }
+[tool.hatch.build.targets.wheel.force-include]
+build = "myah/frontend"
+"backend/myah/cli/templates" = "myah/cli/templates"
 
 [tool.codespell]
 # Ref: https://github.com/codespell-project/codespell#using-a-config-file
@@ -169,6 +181,9 @@ dev = [
 # the typed contract module (`shared.contract.*`) resolves from tests.
 pythonpath = ["backend", "."]
 asyncio_mode = "strict"
+markers = [
+    "slow: opt-in integration tests that touch the real environment (subprocess, docker, network); excluded from the default run",
+]
 
 [tool.black]
 line-length = 120

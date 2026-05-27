@@ -1,5 +1,11 @@
 #!/usr/bin/env bash
-# scripts/setup-myah-oss.sh — one-shot OSS-mode bootstrap helper.
+# setup-myah-oss.sh — one-shot OSS-mode bootstrap helper.
+#
+# Lives at ``scripts/setup-myah-oss.sh`` on the public OSS mirror and
+# at ``platform-oss/scripts/setup-myah-oss.sh`` in the internal
+# monorepo. Invoke directly from inside the repo checkout — a PATH
+# symlink to this file would break the sentinel-based ROOT walk
+# (``dirname "$0"`` operates on the symlink path, not the target).
 #
 # Generates all shared secrets and writes them to the right places so a
 # fresh OSS install just works once Hermes is started + Myah platform
@@ -38,6 +44,49 @@
 #   ./scripts/setup-myah-oss.sh
 #   ./scripts/setup-myah-oss.sh --rotate    # force new keys
 set -euo pipefail
+
+# ── Deprecation warning ──────────────────────────────────────────────────
+# This script is DEPRECATED in favor of `myah install`.
+# Will be removed in Slice 6 of the DevX + OSS CLI initiative (T3-1084).
+# The legacy bash flow is preserved during the deprecation period so users
+# mid-install aren't broken; new install runs should use the Python CLI.
+if [ -t 2 ] && [ "$(tput colors 2>/dev/null || echo 0)" -ge 8 ]; then
+    _DEP_RED=$'\033[31m'; _DEP_BOLD=$'\033[1m'; _DEP_RESET=$'\033[0m'
+else
+    _DEP_RED=''; _DEP_BOLD=''; _DEP_RESET=''
+fi
+# Inspect the first arg so the warning recommends the exact replacement.
+_DEP_FLAG="${1:-}"
+case "$_DEP_FLAG" in
+    --rotate)   _DEP_REPLACEMENT='myah install --rotate' ;;
+    '')         _DEP_REPLACEMENT='myah install' ;;
+    *)          _DEP_REPLACEMENT='myah install --help' ;;
+esac
+cat >&2 <<DEPRECATION
+${_DEP_RED}${_DEP_BOLD}DEPRECATED:${_DEP_RESET} platform-oss/scripts/setup-myah-oss.sh is being replaced by:
+
+    ${_DEP_BOLD}${_DEP_REPLACEMENT}${_DEP_RESET}
+
+The new command:
+  - Implements the same 8 phases as this script (tokens, plugin install,
+    config merge, service units, port probe + doctor) in tested Python.
+  - Adds --non-interactive flag for CI usage.
+  - Adds --service systemd|launchd|none for explicit service-framework
+    choice (replaces the SETUP_SERVICE_CHOICE env var).
+  - Adds post-install verification via myah doctor primitives.
+
+Flag mapping:
+  ${0##*/} --rotate   →  myah install --rotate
+  (no flags)          →  myah install
+
+For the full surface:
+  myah install --help
+
+This script will be removed in Slice 6 of T3-1084.
+Continuing with legacy bash flow for backward compat...
+
+DEPRECATION
+unset _DEP_RED _DEP_BOLD _DEP_RESET _DEP_FLAG _DEP_REPLACEMENT
 
 # ─── 0. Prerequisite checks ─────────────────────────────────────────
 # Fail early and loudly so the user knows exactly what's missing before
@@ -79,7 +128,44 @@ if command -v docker >/dev/null 2>&1 && ! docker compose version >/dev/null 2>&1
   echo "⚠ 'docker compose' subcommand unavailable — install Docker Compose v2"
 fi
 
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# Resolve ROOT to the repo root by checking the two supported
+# layouts explicitly — no generic ancestor walk. A walk would
+# silently ascend into an unrelated outer repo if the user has
+# nested Myah checkouts that share sentinel files (rare in
+# practice, easy to defend against by being layout-explicit).
+#
+#  * Public mirror (T3-Venture-Labs-Limited/myah): script lives at
+#    ``scripts/setup-myah-oss.sh``; ROOT is the script's direct
+#    parent; the parent has ``versions.env``.
+#
+#  * Internal monorepo (T3-Venture-Labs-Limited/myah-hosted):
+#    PR #182 moved the script to ``platform-oss/scripts/setup-myah-oss.sh``;
+#    ROOT is two levels up; the grandparent has ``agent/Dockerfile.stock``.
+#
+# Anything else fails fast with a clear error. The check is
+# directional (sentinel must match the expected relative depth), so
+# a public-layout script next to an internal-only sentinel won't
+# pick the wrong root.
+_find_root() {
+  local script_dir
+  script_dir="$(cd "$(dirname "$0")" && pwd)"
+  # Public layout: $REPO/scripts/setup-myah-oss.sh
+  if [[ -f "$script_dir/../versions.env" ]]; then
+    (cd "$script_dir/.." && pwd)
+    return 0
+  fi
+  # Internal layout: $REPO/platform-oss/scripts/setup-myah-oss.sh
+  if [[ -f "$script_dir/../../agent/Dockerfile.stock" ]]; then
+    (cd "$script_dir/../.." && pwd)
+    return 0
+  fi
+  echo "✗ Could not locate repo root from $(dirname "$0")" >&2
+  echo "  Expected one of:" >&2
+  echo "    $script_dir/../versions.env             (public mirror layout)" >&2
+  echo "    $script_dir/../../agent/Dockerfile.stock (internal monorepo layout)" >&2
+  return 1
+}
+ROOT="$(_find_root)" || exit 1
 PLATFORM_ENV="$ROOT/.env"
 HERMES_HOME_DIR="${HERMES_HOME:-$HOME/.hermes}"
 HERMES_ENV="$HERMES_HOME_DIR/.env"
@@ -421,19 +507,14 @@ if ! "$HERMES_PY" -m pip --version >/dev/null 2>&1; then
   fi
 fi
 
-# Resolve the plugin SHA from versions.env (single source of truth on the
-# public mirror; the private monorepo equivalent lives in
-# agent/Dockerfile.stock). Both the production agent image and the OSS
-# install use the same pin so upgrades stay coordinated.
-if [[ ! -f "$ROOT/versions.env" ]]; then
-  echo "✗ versions.env not found at $ROOT/versions.env" >&2
-  exit 1
-fi
-# shellcheck source=/dev/null
-source "$ROOT/versions.env"
-PLUGIN_SHA="${MYAH_PLUGIN_SHA:-}"
+# Resolve the plugin SHA from agent/Dockerfile.stock (the canonical source
+# inside this internal monorepo). The public mirror reads the same SHA
+# from versions.env at its repo root — both must stay in sync.
+# Both the production agent image and the OSS install use the same pin so
+# upgrades stay coordinated.
+PLUGIN_SHA="$(grep -E '^ARG MYAH_PLUGIN_SHA=' "$ROOT/agent/Dockerfile.stock" | cut -d= -f2)"
 if [[ -z "$PLUGIN_SHA" ]]; then
-  echo "✗ MYAH_PLUGIN_SHA not set in $ROOT/versions.env" >&2
+  echo "✗ Could not find MYAH_PLUGIN_SHA in $ROOT/agent/Dockerfile.stock" >&2
   exit 1
 fi
 
