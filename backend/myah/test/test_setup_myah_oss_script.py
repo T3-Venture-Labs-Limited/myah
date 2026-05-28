@@ -28,9 +28,6 @@ from pathlib import Path
 
 import pytest
 
-# Public OSS repo layout: test file at backend/myah/test/<this>.py is 3
-# levels deep, so the repo root is parents[3] (not [4] as on internal,
-# where the equivalent path nests under platform-oss/).
 REPO_ROOT = Path(__file__).resolve().parents[3]
 SCRIPT_PATH = REPO_ROOT / 'scripts' / 'setup-myah-oss.sh'
 

@@ -200,8 +200,15 @@ async def test_poll_device_auth_normalises_approved_to_complete():
         is_valid=True,
     )
 
-    # User's default_model is set when they didn't have one.
-    update_user_mock.assert_called_once_with('test-user', {'default_model': 'openai/gpt-5.3-codex'})
+    # User's default (provider, model) pair is set when they didn't have one.
+    # Catalog default is 'openai/gpt-5.3-codex' (vendor-namespaced) and the
+    # URL provider_id is 'openai-codex' — they don't share a common prefix
+    # so the bare-id strip is a no-op and the slash survives in default_model
+    # (legitimate Hermes pass-through; the validator allows '/' in model id).
+    update_user_mock.assert_called_once_with(
+        'test-user',
+        {'default_model': 'openai/gpt-5.3-codex', 'default_provider': 'openai-codex'},
+    )
 
 
 @pytest.mark.asyncio

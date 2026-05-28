@@ -41,6 +41,7 @@ def register_commands(app: typer.Typer) -> None:
     _register_logs(app)
     _register_upgrade(app)
     _register_uninstall(app)
+    _register_quickstart(app)
 
 
 def _register_dev_group(app: typer.Typer) -> None:
@@ -67,10 +68,19 @@ def _register_doctor(app: typer.Typer) -> None:
     """
 
     @app.command(name='doctor', help='Diagnose stack health')
-    def doctor_entry() -> None:
+    def doctor_entry(
+        fix: bool = typer.Option(
+            False, '--fix',
+            help=(
+                'Opt-in: attempt to fix actionable findings (plugin not '
+                'enabled, gateway/dashboard ports unbound). Re-runs the '
+                'checks after each fix.'
+            ),
+        ),
+    ) -> None:
         from myah.cli.doctor import doctor_command  # lazy
 
-        doctor_command()
+        doctor_command(fix=fix)
 
 
 def _register_status(app: typer.Typer) -> None:
@@ -128,6 +138,15 @@ def _register_install(app: typer.Typer) -> None:
             help='Documented intent flag — preserves existing tokens/keys (default behavior; '
             'opposite of --rotate). Mutually exclusive with --rotate.',
         ),
+        skip_start: bool = typer.Option(
+            False,
+            '--skip-start',
+            help=(
+                'After laying down service units, skip the automatic '
+                '`agent up` (launchctl kickstart / systemctl start). '
+                "Use for CI or when you'll start services manually."
+            ),
+        ),
     ) -> None:
         from myah.cli.install import install_command  # lazy
 
@@ -137,6 +156,7 @@ def _register_install(app: typer.Typer) -> None:
             openrouter_key=openrouter_key,
             rotate=rotate,
             keep_data=keep_data,
+            skip_start=skip_start,
         )
 
 
@@ -252,3 +272,20 @@ def _register_uninstall(app: typer.Typer) -> None:
         name='uninstall',
         help='Uninstall the Myah platform + Hermes runtime (composite removal).',
     )(uninstall_command)
+
+
+def _register_quickstart(app: typer.Typer) -> None:
+    """Register `myah quickstart` — composite install + platform up + doctor (C.2).
+
+    Lazy-loaded per the H4 cold-start discipline: importing
+    `myah.cli.quickstart` at module top pulls in `doctor`, `install`,
+    and `platform_` transitively. The lazy import inside this helper
+    keeps `myah --help` off that path until `myah quickstart` is
+    actually invoked.
+    """
+    from myah.cli.quickstart import quickstart_command  # lazy
+
+    app.command(
+        name='quickstart',
+        help='One-command install + platform up + doctor.',
+    )(quickstart_command)

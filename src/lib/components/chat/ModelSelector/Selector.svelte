@@ -71,16 +71,31 @@
 
 	export let pinModelHandler: (modelId: string) => void = () => {};
 
-	// ── Myah T3-932: promote a model to the user's global default ─────────────
+	// ── Myah T3-932 + 2026-05-24: promote a model to the user's global default ──
 	// Called from ModelItem (inline button) and ModelItemMenu (kebab entry).
-	// Optimistically updates the store, then writes to the backend; rolls back
-	// on failure so the badge doesn't lie.
-	const setDefaultHandler = async (modelId: string) => {
-		if (!modelId || modelId === 'myah') return;
+	// Optimistically updates the store, then writes the (provider, model) pair
+	// to the backend; rolls back on failure so the badge doesn't lie.
+	//
+	// The selector keys are composite (`<provider>::<model.id>`) from
+	// `apis/index.ts:ensureSelectionKey`. We split that into the structured
+	// pair the new API expects, and also forward the BARE model id to
+	// patchAgentConfig (Hermes config.yaml's model.default field expects bare).
+	const setDefaultHandler = async (selectionKey: string) => {
+		if (!selectionKey || selectionKey === 'myah') return;
+		const row = items.find((i) => i.value === selectionKey);
+		if (!row) return;
+
+		const provider = row.model?.tags?.[0]?.name;
+		const modelId = row.model?.id;
+		if (!provider || !modelId) {
+			toast.error('Cannot set default — model is missing provider or id');
+			return;
+		}
+
 		const previous = $defaultModel;
-		defaultModel.set(modelId);
+		defaultModel.set({ provider, model: modelId });
 		try {
-			await setUserDefaultModel(localStorage.token, modelId);
+			await setUserDefaultModel(localStorage.token, modelId, provider);
 			// Keep the Hermes container's agent.model in sync so
 			// background tasks (title/tag/follow-up) use the same model.
 			// Fire-and-forget — the platform-side default has already
@@ -88,7 +103,7 @@
 			patchAgentConfig(localStorage.token, { model: modelId }).catch((err) =>
 				console.warn('[model-selector] patchAgentConfig sync failed', err)
 			);
-			const name = items.find((i) => i.value === modelId)?.label ?? modelId;
+			const name = row.label ?? modelId;
 			toast.success($i18n.t('Default model set to {{modelName}}', { modelName: name }));
 		} catch (err) {
 			console.error('[model-selector] setUserDefaultModel failed', err);

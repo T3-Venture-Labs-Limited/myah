@@ -800,6 +800,132 @@ class TestInstallLaunchdPlists:
             assert str(hermes_home_first) not in text
 
 
+def test_install_launchd_plists_kickstarts_each_service(
+    tmp_path, monkeypatch, mocker
+):
+    """Regression for PR #16 post-merge laptop test, Bug 3 (macOS): the
+    launchd dashboard plist sometimes fails to auto-start after
+    `bootstrap` even with `RunAtLoad: true`. Belt-and-suspenders:
+    `kickstart gui/<uid>/<label>` after every bootstrap.
+    """
+    from myah.lib.cli import service_units
+    from myah.lib.cli.shell import ShellResult
+
+    hermes_home = tmp_path / 'hermes'
+    hermes_bin = tmp_path / 'venv' / 'bin' / 'hermes'
+    hermes_bin.parent.mkdir(parents=True)
+    hermes_bin.write_text('#!/bin/sh\n')
+    hermes_bin.chmod(0o755)
+
+    # Stub out the macOS-only filesystem prereqs.
+    monkeypatch.setattr(
+        service_units, '_launch_agents_dir', lambda: tmp_path / 'LaunchAgents'
+    )
+    mocker.patch.object(service_units, 'migrate_legacy_launchagents')
+    mocker.patch.object(service_units, 'stop_stale_hermes_processes')
+
+    # All shell calls succeed.
+    mock_run = mocker.patch.object(service_units, 'run')
+    mock_run.return_value = ShellResult(returncode=0, stdout='', stderr='')
+
+    service_units.install_launchd_plists(str(hermes_bin), hermes_home)
+
+    # For each of the 2 services, the call sequence MUST include:
+    #   bootout (idempotent cleanup) → bootstrap → kickstart
+    # The exact bootout return is don't-care; the order matters.
+    argvs = [c.args[0] for c in mock_run.call_args_list]
+    services = ('dev.myah.hermes-gateway', 'dev.myah.hermes-dashboard')
+    for svc in services:
+        bootstrap_seen = False
+        kickstart_seen = False
+        kickstart_after_bootstrap = False
+        for argv in argvs:
+            if argv[:2] == ['launchctl', 'bootstrap'] and svc in argv[-1]:
+                bootstrap_seen = True
+            elif argv[:2] == ['launchctl', 'kickstart'] and svc in argv[-1]:
+                if bootstrap_seen:
+                    kickstart_after_bootstrap = True
+                kickstart_seen = True
+        assert bootstrap_seen, f'no bootstrap call for {svc}'
+        assert kickstart_seen, f'no kickstart call for {svc}'
+        assert kickstart_after_bootstrap, (
+            f'kickstart for {svc} must come AFTER bootstrap, not before'
+        )
+
+
+# ── remove_service_units ──────────────────────────────────────────────
+
+
+def test_remove_service_units_macos_boots_out_and_deletes_plists(
+    tmp_path, monkeypatch, mocker
+):
+    """Symmetric to install_launchd_plists: bootout each service +
+    delete the plist file. Idempotent — tolerates already-removed."""
+    plist_dir = tmp_path / 'LaunchAgents'
+    plist_dir.mkdir()
+    for label in ('dev.myah.hermes-gateway', 'dev.myah.hermes-dashboard'):
+        (plist_dir / f'{label}.plist').write_text('<plist/>')
+
+    monkeypatch.setattr(service_units, '_launch_agents_dir', lambda: plist_dir)
+    monkeypatch.setattr(service_units.sys, 'platform', 'darwin')
+    mock_run = mocker.patch.object(service_units, 'run')
+    mock_run.return_value = ShellResult(returncode=0, stdout='', stderr='')
+
+    service_units.remove_service_units()
+
+    # Both bootout calls happened.
+    argvs = [c.args[0] for c in mock_run.call_args_list]
+    bootout_targets = [a[-1] for a in argvs if a[:2] == ['launchctl', 'bootout']]
+    assert any('hermes-gateway' in t for t in bootout_targets)
+    assert any('hermes-dashboard' in t for t in bootout_targets)
+    # Both plist files deleted.
+    assert not (plist_dir / 'dev.myah.hermes-gateway.plist').exists()
+    assert not (plist_dir / 'dev.myah.hermes-dashboard.plist').exists()
+
+
+def test_remove_service_units_linux_disables_and_deletes_units(
+    tmp_path, monkeypatch, mocker
+):
+    """Symmetric to install_systemd_user_units: `systemctl --user
+    disable --now` + delete the unit file + daemon-reload."""
+    unit_dir = tmp_path / '.config' / 'systemd' / 'user'
+    unit_dir.mkdir(parents=True)
+    for unit in ('hermes-gateway.service', 'hermes-dashboard.service'):
+        (unit_dir / unit).write_text('[Unit]\n')
+
+    monkeypatch.setattr(service_units, '_systemd_user_dir', lambda: unit_dir)
+    monkeypatch.setattr(service_units.sys, 'platform', 'linux')
+    mock_run = mocker.patch.object(service_units, 'run')
+    mock_run.return_value = ShellResult(returncode=0, stdout='', stderr='')
+
+    service_units.remove_service_units()
+
+    argvs = [c.args[0] for c in mock_run.call_args_list]
+    # disable --now must be called for both units.
+    disable_seen = [a for a in argvs if a[:3] == ['systemctl', '--user', 'disable']]
+    assert len(disable_seen) >= 1, f'no disable call; saw {argvs}'
+    # daemon-reload happened at least once.
+    assert any(a[:3] == ['systemctl', '--user', 'daemon-reload'] for a in argvs)
+    # Unit files removed.
+    assert not (unit_dir / 'hermes-gateway.service').exists()
+    assert not (unit_dir / 'hermes-dashboard.service').exists()
+
+
+def test_remove_service_units_idempotent_when_units_missing(
+    tmp_path, monkeypatch, mocker
+):
+    """No plists / no units → no-op. Never raises."""
+    plist_dir = tmp_path / 'LaunchAgents'  # exists but empty
+    plist_dir.mkdir()
+    monkeypatch.setattr(service_units, '_launch_agents_dir', lambda: plist_dir)
+    monkeypatch.setattr(service_units.sys, 'platform', 'darwin')
+    mock_run = mocker.patch.object(service_units, 'run')
+    mock_run.return_value = ShellResult(returncode=0, stdout='', stderr='')
+
+    # Must NOT raise.
+    service_units.remove_service_units()
+
+
 # ── structural sentinel: heavy libs must stay out of module top ───────
 
 

@@ -777,8 +777,18 @@
 
 					if (sessionUser) {
 						await user.set(sessionUser);
-						// Myah T3-932: hydrate per-user default model from session payload.
-						defaultModel.set(sessionUser?.default_model ?? null);
+						// Myah T3-932 + 2026-05-24: hydrate per-user default (provider, model)
+						// pair from session payload. Both fields are required for a defined
+						// store value; half-pair from a partial response collapses to null
+						// and the chat-default cascade falls back to admin DEFAULT_MODELS.
+						defaultModel.set(
+							sessionUser?.default_model && sessionUser?.default_provider
+								? {
+										provider: sessionUser.default_provider,
+										model: sessionUser.default_model
+									}
+								: null
+						);
 						try {
 							await config.set(await getBackendConfig());
 						} catch (error) {
@@ -790,7 +800,14 @@
 						const retryUser = await getSessionUser(localStorage.token).catch(() => null);
 						if (retryUser) {
 							await user.set(retryUser);
-							defaultModel.set(retryUser?.default_model ?? null);
+							defaultModel.set(
+								retryUser?.default_model && retryUser?.default_provider
+									? {
+											provider: retryUser.default_provider,
+											model: retryUser.default_model
+										}
+									: null
+							);
 						} else {
 							// Definitive failure — remove token and redirect to auth.
 							localStorage.removeItem('token');

@@ -273,7 +273,10 @@ def test_uninstall_continues_platform_cleanup_after_hermes_failure(
     The hermes failure is intentionally swallowed (exit 0 + warning) — the
     main user-observable outcome (platform cleanup) succeeded.
     """
-    # Sequence: docker down ok, hermes uninstall fails.
+    # Sequence: docker down ok, hermes uninstall fails. Stub
+    # remove_service_units so it doesn't pull extra subprocess.run
+    # calls into the side_effect queue.
+    mocker.patch('myah.cli.uninstall.remove_service_units')
     mocker.patch(
         'myah.cli.uninstall.subprocess.run',
         side_effect=[_ok(), _fail(3)],
@@ -306,6 +309,9 @@ def test_uninstall_skips_docker_outside_clone(
         'myah.cli.uninstall.find_repo_root',
         side_effect=RuntimeError('Could not locate repo root.'),
     )
+    # Stub remove_service_units so its launchctl/systemctl calls don't
+    # contaminate run_mock.call_count.
+    mocker.patch('myah.cli.uninstall.remove_service_units')
     run_mock = mocker.patch('myah.cli.uninstall.subprocess.run', return_value=_ok())
 
     result = runner.invoke(app, ['uninstall', '--yes'])
@@ -388,3 +394,84 @@ def test_uninstall_module_does_not_import_heavy_libs_at_top_level() -> None:
     )
     for offender in offenders:
         assert offender not in head, f'cli/uninstall.py top-level imports {offender!r}'
+
+
+# ── service-unit teardown (A.4) ───────────────────────────────────────
+
+
+def test_uninstall_removes_service_units(fake_repo, fake_hermes_bin, mocker):
+    """Symmetric teardown: `myah uninstall` must call remove_service_units
+    so launchd plists / systemd-user units don't survive uninstall.
+    Regression for PR #16 post-merge laptop test, simplification S5.
+    """
+    mocker.patch('myah.cli.uninstall.subprocess.run', return_value=_ok())
+    mock_remove = mocker.patch('myah.cli.uninstall.remove_service_units')
+
+    result = runner.invoke(app, ['uninstall', '--yes'])
+
+    assert result.exit_code == 0, result.stdout
+    mock_remove.assert_called_once()
+
+
+# ── A.5: hermes uninstall TTY-failure graceful recovery ────────────────
+
+
+def test_uninstall_hermes_tty_failure_prints_clear_recovery(
+    fake_repo, fake_hermes_bin, mocker
+):
+    """When `hermes uninstall` fails with the TTY-required signature,
+    print a one-line copy-paste recovery command instead of a generic
+    'returned exit N' warning. Regression for PR #16 H-5 + post-merge
+    laptop test, simplification S6.
+    """
+    tty_failure = subprocess.CompletedProcess(
+        args=[],
+        returncode=1,
+        stdout="Error: 'hermes uninstall' requires an interactive terminal.\n",
+        stderr='',
+    )
+    mocker.patch(
+        'myah.cli.uninstall.subprocess.run',
+        side_effect=[_ok(), tty_failure],  # docker down OK, hermes fails
+    )
+    mocker.patch('myah.cli.uninstall.remove_service_units')
+
+    result = runner.invoke(app, ['uninstall', '--yes'])
+
+    assert result.exit_code == 0, result.stdout
+    # Recovery hint must be precise + copy-paste-ready.
+    assert 'rm -rf ~/.hermes' in result.stdout or '--force-purge-hermes' in result.stdout
+    assert 'interactive terminal' in result.stdout.lower() or 'TTY' in result.stdout
+
+
+def test_uninstall_force_purge_hermes_removes_dir_when_hermes_uninstall_fails(
+    fake_repo, fake_hermes_bin, tmp_path, mocker, monkeypatch
+):
+    """--force-purge-hermes: when `hermes uninstall` fails (TTY or other),
+    fall through to `rm -rf $HERMES_HOME` so the cron-safe form actually
+    tears down. Opt-in only.
+    """
+    fake_hermes_home = tmp_path / 'fake-hermes'
+    fake_hermes_home.mkdir()
+    (fake_hermes_home / 'config.yaml').write_text('# test')
+    monkeypatch.setenv('HERMES_HOME', str(fake_hermes_home))
+
+    tty_failure = subprocess.CompletedProcess(
+        args=[], returncode=1,
+        stdout="Error: 'hermes uninstall' requires an interactive terminal.\n",
+        stderr='',
+    )
+    mocker.patch(
+        'myah.cli.uninstall.subprocess.run',
+        side_effect=[_ok(), tty_failure],
+    )
+    mocker.patch('myah.cli.uninstall.remove_service_units')
+
+    result = runner.invoke(
+        app, ['uninstall', '--yes', '--force-purge-hermes']
+    )
+
+    assert result.exit_code == 0, result.stdout
+    assert not fake_hermes_home.exists(), (
+        f'HERMES_HOME survived --force-purge-hermes: {fake_hermes_home}'
+    )

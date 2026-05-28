@@ -6,7 +6,7 @@
 	import { models as allModels, defaultModel } from '$lib/stores';
 	import { setUserDefaultModel } from '$lib/apis/users';
 	import { patchAgentConfig } from '$lib/apis/agent-config';
-	import { parseSelectionKey, resolveCompositeForLegacyBareId } from '$lib/utils/modelSelection';
+	import { parseSelectionKey } from '$lib/utils/modelSelection';
 	import ProviderPicker from '$lib/components/Providers/ProviderPicker.svelte';
 
 	// Subset of model fields used for selection-key rendering and save logic.
@@ -20,44 +20,51 @@
 
 	const i18n = getContext('i18n');
 
-	// ── Myah T3-932: Default model state ─────────────────────────────────
+	// ── Myah T3-932 + 2026-05-24: Default model (provider, model) pair state ──
 	// Hydrated from the $defaultModel store (session payload). Saving writes
-	// the new user.default_model column AND updates the Hermes container's
-	// agent.model config so background tasks (titles/tags) use the same
-	// model the user picked.
-	let defaultModelId: string = '';
+	// the new (default_provider, default_model) pair to the user row AND
+	// updates the Hermes container's agent.model config so background tasks
+	// (titles/tags) use the same model the user picked.
+	//
+	// The <select> value uses composite selection_key for Svelte iteration +
+	// option identity; we parse it back to (provider, model) on save.
+	let defaultModelOptionValue: string = '';
 
-	// Hydrate from $defaultModel + current models. If $defaultModel is already
-	// composite ('provider::model'), keep it. If bare, resolve to the composite
-	// of the first matching row (helper returns bare unchanged when no match).
-	$: defaultModelId = resolveCompositeForLegacyBareId(
-		$defaultModel ?? '',
-		$allModels as SelectableModel[]
-	);
+	// Hydrate: rebuild the composite option value from the structured
+	// $defaultModel pair so the dropdown's selected option matches what's
+	// persisted. Null store -> empty option ('— Select a default —').
+	$: defaultModelOptionValue = $defaultModel
+		? `${$defaultModel.provider}::${$defaultModel.model}`
+		: '';
 	$: selectModels = ($allModels as SelectableModel[]).filter((m) => m.id !== 'myah');
 	let savingDefault = false;
 
 	async function saveDefaultModelFromSettings() {
-		if (!defaultModelId) {
+		if (!defaultModelOptionValue) {
 			toast.error($i18n.t('Pick a provider model first'));
 			return;
 		}
 		savingDefault = true;
 		const previous = $defaultModel;
-		// Parse so we can send BARE model_id to Hermes (which expects bare) while
-		// persisting the COMPOSITE selection_key in user.default_model so the
-		// provider choice survives reloads and dropdown hydration finds the
-		// correct row. parseSelectionKey returns {provider: null} for legacy
-		// bare ids — those persist as-is.
-		const { modelId } = parseSelectionKey(defaultModelId);
-		defaultModel.set(defaultModelId); // optimistic — composite if composite
+		// Parse the composite back into the structured pair the API expects.
+		// parseSelectionKey returns {provider: null, modelId: '...'} for a
+		// legacy bare id — treat that as an unsavable choice (the user can
+		// re-pick from the dropdown which always emits composite).
+		const { provider, modelId } = parseSelectionKey(defaultModelOptionValue);
+		if (!provider || !modelId) {
+			toast.error($i18n.t('Pick a provider model first'));
+			savingDefault = false;
+			return;
+		}
+		defaultModel.set({ provider, model: modelId }); // optimistic
 		try {
-			// Always two calls: persist (composite or bare) to user.default_model,
-			// then sync the bare modelId to Hermes agent.model so background tasks
-			// (title gen, follow-ups) use the same model. The provider routing for
-			// interactive chats is carried by model.tags[0].name in the chat
-			// payload itself — set by ModelSelector when the user picks a row.
-			await setUserDefaultModel(localStorage.token, defaultModelId);
+			// Persist the pair to user.default_model + user.default_provider,
+			// then sync the bare model id to Hermes agent.model so background
+			// tasks (title gen, follow-ups) use the same model. The provider
+			// routing for interactive chats is carried by model.tags[0].name
+			// in the chat payload itself — set by ModelSelector when the user
+			// picks a row.
+			await setUserDefaultModel(localStorage.token, modelId, provider);
 			await patchAgentConfig(localStorage.token, { model: modelId });
 			toast.success($i18n.t('Default model updated'));
 		} catch (err) {
@@ -86,7 +93,7 @@
 
 			<div class="flex gap-2 items-center">
 				<select
-					bind:value={defaultModelId}
+					bind:value={defaultModelOptionValue}
 					class="flex-1 px-3 py-1.5 rounded-md border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-900 text-sm"
 					aria-label={$i18n.t('Default model')}
 				>
@@ -100,7 +107,7 @@
 				<button
 					class="px-3 py-1.5 rounded-md bg-gray-900 dark:bg-white text-white dark:text-gray-900 text-sm font-medium disabled:opacity-50"
 					on:click={saveDefaultModelFromSettings}
-					disabled={savingDefault || !defaultModelId}
+					disabled={savingDefault || !defaultModelOptionValue}
 				>
 					{savingDefault ? $i18n.t('Saving…') : $i18n.t('Save')}
 				</button>

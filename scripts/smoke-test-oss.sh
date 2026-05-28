@@ -530,6 +530,23 @@ real_chat_smoke
 
 # ──────────────────────────────────────────────────────────────────────────
 
+# T3-1087: OSS outbox row check. This intentionally skips unless the local
+# stack opted into outbox mode; default OSS remains legacy through Phase 1.
+mode=$(grep -E '^MYAH_CRON_DELIVERY_MODE=' .env 2>/dev/null | head -1 | cut -d= -f2- || true)
+if [ "${mode}" = "outbox" ] && command -v sqlite3 >/dev/null 2>&1; then
+    echo "  [7b/7] OSS cron outbox row check..."
+    count=$(sqlite3 backend/data/myah.db \
+        "SELECT count(*) FROM cron_deliveries WHERE created_at > strftime('%s','now')-300;")
+    if [ "${count}" -gt 0 ]; then
+        echo "  OK: ${count} recent outbox row(s)"
+    else
+        echo "  FAIL: no outbox rows in the last 5 minutes" >&2
+        exit 1
+    fi
+else
+    echo "  [7b/7] OSS cron outbox check skipped (mode=${mode:-legacy})"
+fi
+
 # selection_key is the deduplication key used by getModelsUnified on the
 # frontend — regressions here cause duplicate model entries in the UI.
 echo "  [7/7] GET /api/v1/providers/models selection_key assertion..."

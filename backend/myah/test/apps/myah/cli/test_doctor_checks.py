@@ -394,6 +394,26 @@ def test_check_agent_container_env_injection_ok_when_both_present(mocker) -> Non
     assert result.status == CheckStatus.OK
 
 
+def test_check_platform_container_matches_auto_generated_name(mocker) -> None:
+    """Post-A.2 regression: docker-compose no longer hard-codes
+    container_name, so the actual container name is e.g.
+    `myah_platform_1` or `myah-platform-1` (slug varies by compose
+    version). The check_platform_container_running filter must still
+    detect it.
+    """
+    from myah.lib.cli.shell import ShellResult
+
+    mock_run = mocker.patch('myah.lib.cli.doctor_checks.run')
+    mock_run.return_value = ShellResult(
+        returncode=0,
+        # Compose v2 auto-name on the `myah` project dir:
+        stdout='abc123\tmyah-platform-oss\tUp 5 minutes\t127.0.0.1:8080->8080/tcp\tmyah_platform_1\n',
+        stderr='',
+    )
+    result = check_platform_container_running()
+    assert result.status == CheckStatus.OK
+
+
 def test_check_plugin_sha_drift_default_paths_resolve_from_repo_root() -> None:
     """Integration test: default paths must resolve correctly when myah doctor is invoked from the repo root.
 
@@ -408,11 +428,19 @@ def test_check_plugin_sha_drift_default_paths_resolve_from_repo_root() -> None:
     import os
     from pathlib import Path
 
-    # Find the repo root by walking up from this test file
+    # Find the repo root by walking up from this test file. The hosted
+    # monorepo stores the pin in agent/Dockerfile.stock; the public repo is
+    # a flattened platform-oss subtree and stores the same pin in versions.env.
     repo_root = Path(__file__).resolve()
-    while repo_root.parent != repo_root and not (repo_root / 'agent' / 'Dockerfile.stock').exists():
+    while repo_root.parent != repo_root and not (
+        (repo_root / 'agent' / 'Dockerfile.stock').exists()
+        or (repo_root / 'versions.env').exists()
+    ):
         repo_root = repo_root.parent
-    assert (repo_root / 'agent' / 'Dockerfile.stock').exists(), 'repo root with Dockerfile.stock not found'
+    assert (
+        (repo_root / 'agent' / 'Dockerfile.stock').exists()
+        or (repo_root / 'versions.env').exists()
+    ), 'repo root with plugin SHA pin source not found'
 
     # cwd into repo root, then call with defaults
     original_cwd = os.getcwd()

@@ -239,6 +239,7 @@ def install_command(
     openrouter_key: str | None = None,
     rotate: bool = False,
     keep_data: bool = False,
+    skip_start: bool = False,
 ) -> None:
     """Install the Myah OSS stack: tokens, Hermes plugin, config, services, doctor.
 
@@ -257,6 +258,9 @@ def install_command(
         OAuth, JWT secret). Mutually exclusive with ``keep_data``.
       keep_data: Documented intent flag preserving existing tokens/keys
         (the default behavior). Mutually exclusive with ``rotate``.
+      skip_start: After laying down service units, skip the automatic
+        ``agent up`` kickstart. For CI and scripted runs that handle
+        service start manually. No-op when ``service='none'``.
     """
     # Lazy-import Rich so cold-start budget holds.
     from rich.console import Console
@@ -464,22 +468,38 @@ def install_command(
         # Gateway-side: port 8643 / /myah/health proves the platform
         # adapter is actually bound. This is what the platform talks
         # to; if it's not up, chat doesn't work.
-        if verify_gateway_plugin_bound(port=8643, timeout_s=15.0):
+        # 30s timeout: dashboard cold boot on macOS observed at ~15-25s
+        # (plugin discovery + skill scanning + plugin API mounts). The
+        # original 15s timeout fired before the dashboard could bind, see
+        # PR #16 post-merge laptop test, Bug 3.
+        if verify_gateway_plugin_bound(port=8643, timeout_s=30.0):
             console.print('  [green]gateway platform adapter verified (port 8643)[/]')
         else:
             console.print(
-                '  [yellow]gateway platform adapter not verified within 15s — '
+                '  [yellow]gateway platform adapter not verified within 30s — '
                 'check `hermes gateway` logs[/]'
             )
         # Dashboard-side: port 9119 proves the dashboard shim is mounted.
         # Kept because the OSS UI's "Settings" page relies on it.
-        if verify_dashboard_plugin_mounted(web_token, port=9119, timeout_s=15.0):
+        if verify_dashboard_plugin_mounted(web_token, port=9119, timeout_s=30.0):
             console.print('  [green]dashboard plugin mount verified (port 9119)[/]')
         else:
             console.print(
-                '  [yellow]dashboard plugin mount not verified within 15s — '
+                '  [yellow]dashboard plugin mount not verified within 30s — '
                 'check `hermes dashboard` logs[/]'
             )
+
+    # ─── Auto-start the services we just laid down ───────────────────
+    # Idempotent: kickstart on an already-running service is a no-op.
+    # Skipped when --service none (no units) or --skip-start (opt-out).
+    # See PR #16 post-merge laptop test, simplification S1.
+    if chosen_service in ('systemd', 'launchd') and not skip_start:
+        try:
+            _kickstart_services_after_install(chosen_service)
+        except typer.Exit:
+            # Don't abort the install — Phase 8 doctor table will reflect
+            # the failure. Caller can retry `myah agent up`.
+            pass
 
     # ─── Phase 8 — Post-install verification ──────────────────────────
     console.print('[bold cyan]Phase 8:[/] post-install verification')
@@ -512,6 +532,31 @@ def install_command(
     # from setup-myah-oss.sh:885-921. The verification table is enough
     # for now (users can run `myah doctor` for guidance), but a Rich-
     # rendered numbered list of post-install actions would improve UX.
+
+
+def _kickstart_services_after_install(service_name: str) -> None:
+    """Invoke `myah agent up` directly via the Typer commands.
+
+    Imports inside the function body to avoid pulling agent + rich into
+    install.py's module load on the cold path. Service-name parameter
+    is for logging only — the agent commands resolve the OS supervisor.
+    """
+    from myah.cli.agent import agent_up
+    from rich.console import Console
+
+    console = Console()
+    console.print(f'[bold cyan]Auto-start:[/] running `myah agent up` ({service_name})')
+    try:
+        agent_up()
+    except typer.Exit as exit_err:
+        # Match the worst-rc semantics of agent_up — re-raise so the
+        # install exit reflects partial service failures.
+        if exit_err.exit_code:
+            console.print(
+                '[yellow]⚠[/] one or more services failed to start. '
+                'Run [cyan]myah agent up[/] to retry, or `myah doctor` to investigate.'
+            )
+        raise
 
 
 __all__ = ['install_command']

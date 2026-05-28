@@ -66,11 +66,18 @@ export const selectedFolder = writable(null);
 
 export const models: Writable<Model[]> = writable([]);
 
-// Myah T3-932: Per-user default chat model id (e.g. 'anthropic/claude-opus-4-7').
+// Myah T3-932 + 2026-05-24: Per-user default chat (provider, model) pair.
 // null means "no default set" — Chat.svelte falls back to admin DEFAULT_MODELS
 // and then the first available provider model. Hydrated from the session user
 // payload on app boot and updated whenever the user picks "Set as default".
-export const defaultModel: Writable<string | null> = writable(null);
+//
+// Mirrors Hermes upstream's canonical {provider, model} shape — see
+// docs/superpowers/specs/2026-05-24-default-model-canonical-format-design.md.
+export interface DefaultModelChoice {
+	provider: string;
+	model: string;
+}
+export const defaultModel: Writable<DefaultModelChoice | null> = writable(null);
 
 export const skills = writable(null);
 
@@ -431,7 +438,9 @@ export type SessionUser = {
 	name: string;
 	role: string;
 	profile_image_url: string;
-	default_model?: string | null; // Myah T3-932
+	// Myah T3-932 + 2026-05-24: per-user default chat (provider, model) pair.
+	default_model?: string | null;
+	default_provider?: string | null;
 };
 
 // Task stores

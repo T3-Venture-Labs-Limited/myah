@@ -450,12 +450,13 @@ async def fetch_hermes_provider_catalog(user: UserModel) -> list[dict]:
         return []
 
 
-async def fetch_hermes_default_model(user: UserModel) -> str | None:
+async def fetch_hermes_default_model(user: UserModel) -> tuple[str, str] | None:
     """Read the hermes config.yaml default model.
 
-    Returns a string like "opencode-go/mimo-v2.5" (provider/model
-    formatted to match the platform's model_id convention), or None on
-    failure. OSS-only — returns None when not in OSS mode.
+    Returns ``(provider, model)`` as separate strings (e.g.
+    ``("opencode-go", "mimo-v2.5")``) mirroring Hermes upstream's
+    canonical {provider, model} shape, or None on failure. OSS-only —
+    returns None when not in OSS mode.
 
     Calls the plugin's ``GET /myah/v1/admin/config`` endpoint on the
     gateway adapter port (8643 in OSS, per-user-container port in
@@ -503,7 +504,7 @@ async def fetch_hermes_default_model(user: UserModel) -> str | None:
         model = (model_block.get('default') or '').strip()
         if not (provider and model):
             return None
-        return f'{provider}/{model}'
+        return (provider, model)
     except Exception as exc:
         logger.warning(f'OSS default-model fetch: {exc}')
         return None

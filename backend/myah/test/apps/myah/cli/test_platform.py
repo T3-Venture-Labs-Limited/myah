@@ -56,14 +56,20 @@ def fake_env(mocker, tmp_path: Path) -> Path:
 
 
 def test_platform_up_invokes_docker_compose_up_dash_d(fake_env: Path, mocker) -> None:
-    """`myah platform up` invokes `docker compose -f <root>/docker-compose.yml up -d`."""
+    """`myah platform up` invokes `docker compose -f <root>/docker-compose.yml up -d`.
+
+    Now also runs a `docker ps` orphan pre-flight (S3) — empty stdout means
+    no orphan, so the compose-up call still happens. We assert on the last
+    invocation of ``run`` (the compose-up call).
+    """
     run_mock = mocker.patch('myah.cli.platform_.run', return_value=_ok())
 
     result = runner.invoke(app, ['platform', 'up'])
 
     assert result.exit_code == 0, f'stdout: {result.stdout}\nexc: {result.exception}'
-    run_mock.assert_called_once()
-    cmd = run_mock.call_args.args[0]
+    # First call: orphan pre-flight. Last call: compose up.
+    assert run_mock.call_count == 2
+    cmd = run_mock.call_args_list[-1].args[0]
     assert cmd == [
         'docker',
         'compose',
@@ -224,3 +230,56 @@ def test_platform_module_does_not_import_heavy_libs_at_top_level() -> None:
     )
     for offender in offenders:
         assert offender not in head, f'cli/platform_.py top-level imports {offender!r}'
+
+
+# ── orphan-container pre-flight (S3) ───────────────────────────────────
+
+
+def test_platform_up_detects_orphan_container_and_offers_removal(mocker):
+    """Empirical (laptop, pre-A.2): a stale `myah-platform` container from
+    another compose project blocks `myah platform up`. Detect it BEFORE
+    issuing the compose command, surface the conflict, exit cleanly with
+    a remediation hint."""
+    from myah.lib.cli.shell import ShellResult
+
+    # Mock docker ps returning a conflicting container.
+    mock_run = mocker.patch('myah.cli.platform_.run')
+    mock_run.return_value = ShellResult(
+        returncode=0,
+        stdout='c45a7d70f175\tmyah-platform\n',
+        stderr='',
+    )
+    mocker.patch('myah.cli.platform_.find_repo_root', return_value='/tmp/fake-root')
+    mocker.patch('myah.cli.platform_.shutil.which', return_value='/usr/bin/docker')
+
+    result = runner.invoke(app, ['platform', 'up'])
+
+    # Non-zero exit + clear remediation message — don't crash, don't
+    # silently bring down the orphan.
+    assert result.exit_code != 0
+    assert 'orphan' in result.stdout.lower() or 'conflict' in result.stdout.lower()
+    assert '--rm-orphans' in result.stdout or 'docker rm' in result.stdout
+
+
+def test_platform_up_rm_orphans_flag_removes_then_starts(mocker):
+    """--rm-orphans: detect the orphan, `docker rm -f` it, then start."""
+    from myah.lib.cli.shell import ShellResult
+
+    mock_run = mocker.patch('myah.cli.platform_.run')
+    # docker ps → orphan present → docker rm -f → compose up.
+    mock_run.side_effect = [
+        ShellResult(returncode=0, stdout='c45a7d70f175\tmyah-platform\n', stderr=''),  # ps
+        ShellResult(returncode=0, stdout='', stderr=''),  # rm
+        ShellResult(returncode=0, stdout='Started', stderr=''),  # compose up
+    ]
+    mocker.patch('myah.cli.platform_.find_repo_root', return_value='/tmp/fake-root')
+    mocker.patch('myah.cli.platform_.shutil.which', return_value='/usr/bin/docker')
+
+    result = runner.invoke(app, ['platform', 'up', '--rm-orphans'])
+
+    assert result.exit_code == 0, result.stdout
+    # Verify the `docker rm -f` call was made.
+    argvs = [c.args[0] for c in mock_run.call_args_list]
+    assert any(a[:2] == ['docker', 'rm'] and '-f' in a for a in argvs), (
+        f'expected `docker rm -f` call; got argvs: {argvs}'
+    )

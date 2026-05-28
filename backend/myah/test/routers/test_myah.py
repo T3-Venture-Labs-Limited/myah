@@ -173,7 +173,10 @@ def test_whoami_handles_legacy_list_shape(monkeypatch):
 
 def test_whoami_returns_hermes_default_model_in_oss(monkeypatch):
     """OSS regression: /whoami includes the user's hermes config default
-    model so the plugin can sync user.default_model to it.
+    (provider, model) pair so the plugin can sync the user row to it.
+
+    Post-2026-05-24: the pair is split across default_model + default_provider
+    fields mirroring Hermes upstream's canonical {provider, model} shape.
     """
     monkeypatch.setenv('MYAH_AGENT_BEARER_TOKEN', 'tok')
     monkeypatch.setenv('MYAH_DEPLOYMENT_MODE', 'oss')
@@ -186,12 +189,14 @@ def test_whoami_returns_hermes_default_model_in_oss(monkeypatch):
         return_value={'users': [fake_user], 'total': 1},
     ), patch(
         'myah.utils.hermes_web.fetch_hermes_default_model',
-        new=_AsyncReturn('opencode-go/mimo-v2.5'),
+        new=_AsyncReturn(('opencode-go', 'mimo-v2.5')),
     ):
         resp = client.get('/api/v1/myah/whoami', headers={'Authorization': 'Bearer tok'})
 
     assert resp.status_code == 200
-    assert resp.json()['default_model'] == 'opencode-go/mimo-v2.5'
+    body = resp.json()
+    assert body['default_model'] == 'mimo-v2.5'
+    assert body['default_provider'] == 'opencode-go'
 
 
 def test_whoami_default_model_is_none_in_hosted(monkeypatch):
@@ -244,18 +249,26 @@ def test_whoami_default_model_handles_hermes_unreachable(monkeypatch):
 
 
 def test_whoami_oss_syncs_default_model_when_user_default_empty(monkeypatch):
-    """OSS: if user.default_model is None and hermes returns a default,
+    """OSS: if user has no default pair set and hermes returns one,
     the platform should update the user row directly (no JWT needed —
-    the plugin only has the bearer)."""
+    the plugin only has the bearer).
+
+    Post-2026-05-24: writes the structured (provider, model) pair to both
+    default_model and default_provider columns atomically.
+    """
     monkeypatch.setenv('MYAH_AGENT_BEARER_TOKEN', 'tok')
     monkeypatch.setenv('MYAH_DEPLOYMENT_MODE', 'oss')
 
-    fake_user = SimpleNamespace(id='u1', name='Alice', default_model=None)
+    fake_user = SimpleNamespace(id='u1', name='Alice', default_model=None, default_provider=None)
     update_calls = []
 
     def _capture_update(user_id, updates):
         update_calls.append((user_id, updates))
-        return SimpleNamespace(id=user_id, default_model=updates.get('default_model'))
+        return SimpleNamespace(
+            id=user_id,
+            default_model=updates.get('default_model'),
+            default_provider=updates.get('default_provider'),
+        )
 
     client = _make_app()
     with patch(
@@ -266,29 +279,39 @@ def test_whoami_oss_syncs_default_model_when_user_default_empty(monkeypatch):
         side_effect=_capture_update,
     ), patch(
         'myah.utils.hermes_web.fetch_hermes_default_model',
-        new=_AsyncReturn('opencode-go/mimo-v2.5'),
+        new=_AsyncReturn(('opencode-go', 'mimo-v2.5')),
     ):
         resp = client.get('/api/v1/myah/whoami', headers={'Authorization': 'Bearer tok'})
 
     assert resp.status_code == 200
-    assert resp.json()['default_model'] == 'opencode-go/mimo-v2.5'
-    # Verify the update was called with the hermes default
-    assert update_calls == [('u1', {'default_model': 'opencode-go/mimo-v2.5'})]
+    body = resp.json()
+    assert body['default_model'] == 'mimo-v2.5'
+    assert body['default_provider'] == 'opencode-go'
+    # Verify the update was called with the hermes default pair
+    assert update_calls == [
+        ('u1', {'default_provider': 'opencode-go', 'default_model': 'mimo-v2.5'})
+    ]
 
 
 def test_whoami_oss_syncs_default_model_when_user_has_openwebui_default(monkeypatch):
-    """OSS: if user.default_model is the open-webui default 'openai/gpt-4o-mini',
+    """OSS: if user has the legacy Open WebUI default pair ('openai', 'gpt-4o-mini'),
     overwrite it (the user didn't deliberately choose it — open-webui set it
     at signup as the bundled fallback)."""
     monkeypatch.setenv('MYAH_AGENT_BEARER_TOKEN', 'tok')
     monkeypatch.setenv('MYAH_DEPLOYMENT_MODE', 'oss')
 
-    fake_user = SimpleNamespace(id='u1', name='Alice', default_model='openai/gpt-4o-mini')
+    fake_user = SimpleNamespace(
+        id='u1', name='Alice', default_model='gpt-4o-mini', default_provider='openai'
+    )
     update_calls = []
 
     def _capture_update(user_id, updates):
         update_calls.append((user_id, updates))
-        return SimpleNamespace(id=user_id, default_model=updates.get('default_model'))
+        return SimpleNamespace(
+            id=user_id,
+            default_model=updates.get('default_model'),
+            default_provider=updates.get('default_provider'),
+        )
 
     client = _make_app()
     with patch(
@@ -299,16 +322,18 @@ def test_whoami_oss_syncs_default_model_when_user_has_openwebui_default(monkeypa
         side_effect=_capture_update,
     ), patch(
         'myah.utils.hermes_web.fetch_hermes_default_model',
-        new=_AsyncReturn('opencode-go/mimo-v2.5'),
+        new=_AsyncReturn(('opencode-go', 'mimo-v2.5')),
     ):
         resp = client.get('/api/v1/myah/whoami', headers={'Authorization': 'Bearer tok'})
 
     assert resp.status_code == 200
-    assert update_calls == [('u1', {'default_model': 'opencode-go/mimo-v2.5'})]
+    assert update_calls == [
+        ('u1', {'default_provider': 'opencode-go', 'default_model': 'mimo-v2.5'})
+    ]
 
 
 def test_whoami_oss_does_not_clobber_deliberate_user_choice(monkeypatch):
-    """OSS: if user.default_model is anything OTHER than None/gpt-4o-mini,
+    """OSS: if user.default pair is anything OTHER than (None, None)/('openai', 'gpt-4o-mini'),
     treat it as a deliberate choice and do NOT overwrite.
 
     The user may have explicitly switched models in the UI; we shouldn't
@@ -318,7 +343,8 @@ def test_whoami_oss_does_not_clobber_deliberate_user_choice(monkeypatch):
     monkeypatch.setenv('MYAH_DEPLOYMENT_MODE', 'oss')
 
     fake_user = SimpleNamespace(
-        id='u1', name='Alice', default_model='anthropic/claude-opus-4.7'
+        id='u1', name='Alice',
+        default_model='claude-opus-4.7', default_provider='anthropic',
     )
     update_calls = []
 
@@ -331,13 +357,15 @@ def test_whoami_oss_does_not_clobber_deliberate_user_choice(monkeypatch):
         side_effect=lambda *a, **kw: update_calls.append((a, kw)) or fake_user,
     ), patch(
         'myah.utils.hermes_web.fetch_hermes_default_model',
-        new=_AsyncReturn('opencode-go/mimo-v2.5'),
+        new=_AsyncReturn(('opencode-go', 'mimo-v2.5')),
     ):
         resp = client.get('/api/v1/myah/whoami', headers={'Authorization': 'Bearer tok'})
 
     assert resp.status_code == 200
     # Response surfaces hermes default for transparency, but DB is untouched
-    assert resp.json()['default_model'] == 'opencode-go/mimo-v2.5'
+    body = resp.json()
+    assert body['default_model'] == 'mimo-v2.5'
+    assert body['default_provider'] == 'opencode-go'
     assert update_calls == [], 'must not clobber deliberate user choice'
 
 

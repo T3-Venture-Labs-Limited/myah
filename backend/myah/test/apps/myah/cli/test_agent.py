@@ -64,14 +64,17 @@ def macos(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_agent_up_invokes_systemctl_on_linux_when_systemd_present(linux_with_systemd, mocker) -> None:
-    """`myah agent up` on Linux invokes `systemctl --user start` for both units."""
+    """`myah agent up` on Linux invokes `systemctl --user start` for both units.
+
+    Per-service confirmation (Bug 2 fix) adds follow-up `is-active` checks,
+    so we assert on the first (verb) call rather than the last.
+    """
     run_mock = mocker.patch('myah.cli.agent.run', return_value=_ok())
 
     result = runner.invoke(app, ['agent', 'up'])
 
     assert result.exit_code == 0, f'stdout: {result.stdout}\nexc: {result.exception}'
-    run_mock.assert_called_once()
-    cmd = run_mock.call_args.args[0]
+    cmd = run_mock.call_args_list[0].args[0]
     assert cmd == [
         'systemctl',
         '--user',
@@ -87,7 +90,7 @@ def test_agent_down_invokes_systemctl_on_linux(linux_with_systemd, mocker) -> No
     result = runner.invoke(app, ['agent', 'down'])
 
     assert result.exit_code == 0, result.stdout
-    cmd = run_mock.call_args.args[0]
+    cmd = run_mock.call_args_list[0].args[0]
     assert cmd == [
         'systemctl',
         '--user',
@@ -103,7 +106,7 @@ def test_agent_restart_invokes_systemctl_on_linux(linux_with_systemd, mocker) ->
     result = runner.invoke(app, ['agent', 'restart'])
 
     assert result.exit_code == 0, result.stdout
-    cmd = run_mock.call_args.args[0]
+    cmd = run_mock.call_args_list[0].args[0]
     assert cmd == [
         'systemctl',
         '--user',
@@ -371,3 +374,50 @@ def test_top_level_help_lists_agent_group() -> None:
     result = runner.invoke(app, ['--help'])
     assert result.exit_code == 0
     assert 'agent' in result.stdout
+
+
+# ── Bug 2 regression: per-service confirmation output ──────────────────
+
+
+def test_agent_up_emits_one_line_per_service_macos(mocker):
+    """Regression for PR #16 post-merge laptop test, Bug 2: zero output
+    leaves users uncertain whether `myah agent up` worked. Each launchd
+    target should produce one line."""
+    import sys
+
+    from myah.lib.cli.shell import ShellResult
+
+    mocker.patch.object(sys, 'platform', 'darwin')
+    mock_run = mocker.patch('myah.cli.agent.run')
+    mock_run.return_value = ShellResult(returncode=0, stdout='', stderr='')
+
+    result = runner.invoke(app, ['agent', 'up'])
+
+    assert result.exit_code == 0, result.stdout
+    # Each of the 2 services produces one line of feedback.
+    assert 'dev.myah.hermes-gateway' in result.stdout
+    assert 'dev.myah.hermes-dashboard' in result.stdout
+    # Word "started" appears (not "verbose log dump").
+    assert result.stdout.count('started') >= 2 or result.stdout.count('✓') >= 2
+
+
+def test_agent_up_emits_failure_marker_when_a_service_fails(mocker):
+    """A per-service failure should be visible, not hidden."""
+    import sys
+
+    from myah.lib.cli.shell import ShellResult
+
+    mocker.patch.object(sys, 'platform', 'darwin')
+    mock_run = mocker.patch('myah.cli.agent.run')
+    # First service OK, second fails.
+    mock_run.side_effect = [
+        ShellResult(returncode=0, stdout='', stderr=''),
+        ShellResult(returncode=3, stdout='', stderr='boom'),
+    ]
+
+    result = runner.invoke(app, ['agent', 'up'])
+
+    # Failure must surface in stdout AND in exit code.
+    assert result.exit_code != 0
+    assert 'dev.myah.hermes-dashboard' in result.stdout
+    assert '✗' in result.stdout or 'failed' in result.stdout.lower()

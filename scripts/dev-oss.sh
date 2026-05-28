@@ -220,7 +220,7 @@ print_status() {
 # documented failure modes this exercises.
 doctor() {
   local hermes_env="${HERMES_HOME_DIR}/.env"
-  local platform_env="${MYAH_PLATFORM_ENV:-$ROOT/platform-oss/.env}"
+  local platform_env="${MYAH_PLATFORM_ENV:-$ROOT/.env}"
   echo "Myah OSS environment diagnostic:"
 
   # 1. gateway running?
@@ -248,7 +248,7 @@ doctor() {
     echo "  ✓ Platform .env exists ($platform_env)"
   else
     echo "  ✗ Platform .env NOT found at $platform_env"
-    echo "    → Fix: cp $ROOT/platform-oss/.env.example $platform_env"
+    echo "    → Fix: cp $ROOT/.env.example $platform_env"
   fi
 
   # 4. MYAH_PLATFORM_BASE_URL in hermes .env (Task 3.5 gotcha).

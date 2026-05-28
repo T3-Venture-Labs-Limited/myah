@@ -394,6 +394,7 @@ async def create_process(
         # Verify the chat belongs to the requesting user — reuse the same
         # ownership check ``link-chat`` uses.
         from myah.models.chats import Chats
+
         chat = Chats.get_chat_by_id_and_user_id(chat_id, user.id)
         if not chat:
             raise HTTPException(
@@ -957,14 +958,15 @@ async def cron_run_complete_webhook(
     request: Request,
 ):
     """
-    Webhook called by the Hermes scheduler when a cron job finishes.
-    Payload: { user_id, job_id, job_name, response, status, ran_at }
-    Pushes the result to the user's Socket.IO room so the Processes page
-    can show live output without polling.
+    Webhook called by the Hermes scheduler / plugin when a cron job finishes.
 
-    Also injects the cron output as an assistant message in the process's
-    dedicated chat ("Process: {job_name}") so the user sees all cron
-    outputs in the chat history.
+    Behaviour depends on ``myah.env.MYAH_CRON_DELIVERY_MODE`` (T3-1087):
+      - legacy: write directly to chat (pre-Phase-1 behaviour).
+      - shadow: write to cron_deliveries outbox AND to chat. Stamp
+        legacy_delivered_at on the outbox row on legacy-path success.
+        Worker observes but does not deliver.
+      - outbox: write to cron_deliveries outbox only. Worker delivers
+        on its next tick.
     """
     auth = request.headers.get('Authorization', '')
     if not CRON_WEBHOOK_SECRET or auth != f'Bearer {CRON_WEBHOOK_SECRET}':
@@ -987,65 +989,125 @@ async def cron_run_complete_webhook(
     if not user_id or not job_id:
         raise HTTPException(status_code=400, detail='Missing user_id or job_id')
 
+    # Per plan-review C-E: read the mode via the helper, not via a
+    # module-level constant import. This re-reads os.environ each call
+    # so monkeypatch.setenv in tests has bite.
+    from myah.env import get_cron_delivery_mode
+    from myah.models.cron_deliveries import CronDeliveries
+    from myah.utils.cron_outbox_metrics import emit_row_inserted_breadcrumb
+
+    mode = get_cron_delivery_mode()
     logger.info(
         f'Cron webhook received: job_id={job_id} job_name={job_name} '
-        f'chat_id={chat_id!r} status={status} user_id={user_id}'
+        f'chat_id={chat_id!r} status={status} user_id={user_id} mode={mode}'
     )
 
-    delivered = await _inject_cron_output_to_chat(
-        user_id, job_name, response, status, ran_at, tool_calls_log, chat_id=chat_id
-    )
+    # In shadow + outbox modes: insert outbox row first. Idempotent on
+    # (job_id, ran_at_iso) — duplicate POST returns the existing row id.
+    # In outbox mode, if INSERT fails (DB locked, schema mismatch, etc.)
+    # we log + breadcrumb but do NOT fall back to legacy direct-write —
+    # the failure will be retried by the next webhook POST (cron tool's
+    # idempotent file convention guarantees same ran_at_iso). Per ADR-2.
+    outbox_row_id: str | None = None
+    if mode in ('shadow', 'outbox') and ran_at:
+        try:
+            outbox_row_id = CronDeliveries.insert_idempotent(
+                {
+                    'user_id': user_id,
+                    'job_id': job_id,
+                    'chat_id': chat_id,
+                    'ran_at_iso': ran_at,
+                    'content': response,
+                    'metadata_json': json.dumps(
+                        {
+                            'job_name': job_name,
+                            'status': status,
+                            'tool_calls_log': tool_calls_log,
+                        }
+                    ),
+                }
+            )
+            emit_row_inserted_breadcrumb(row_id=outbox_row_id, job_id=job_id)
+        except Exception as exc:
+            # Never let an outbox write failure break the legacy path.
+            logger.error(f'cron_outbox: insert failed for job={job_id}: {exc}')
+            try:
+                import sentry_sdk
+
+                sentry_sdk.add_breadcrumb(
+                    category='cron_outbox',
+                    level='error',
+                    message=f'insert_idempotent failed for {job_id}',
+                    data={'job_id': job_id, 'error': str(exc)},
+                )
+            except Exception:
+                pass
+
+    # Legacy direct-write path: active in legacy + shadow modes.
+    delivered = False
+    if mode in ('legacy', 'shadow'):
+        delivered = await _inject_cron_output_to_chat(
+            user_id,
+            job_name,
+            response,
+            status,
+            ran_at,
+            tool_calls_log,
+            chat_id=chat_id,
+        )
+        if outbox_row_id and mode == 'shadow':
+            # Per plan-review C-D: stamp `legacy_delivered_at` UNCONDITIONALLY
+            # after the legacy call returns, regardless of whether delivery
+            # succeeded. The column semantic is "the handler ran the legacy
+            # path" — drift (parity gap) = "handler never ran the legacy
+            # path at all" (legacy_delivered_at IS NULL). A legacy failure
+            # for permanent reasons (chat deleted) is recoverable from logs
+            # but is NOT drift relative to the handler doing its job.
+            try:
+                CronDeliveries.stamp_legacy_delivered_at(outbox_row_id)
+            except Exception as exc:
+                logger.warning(f'cron_outbox: stamp_legacy_delivered_at failed: {exc}')
 
     from myah.socket.main import sio
 
-    if delivered:
-        await sio.emit(
-            'process:run-complete',
-            {
-                'job_id': job_id,
-                'job_name': job_name,
-                'chat_id': chat_id,
-                'response': response,
-                'status': status,
-                'ran_at': ran_at,
-            },
-            room=f'user:{user_id}',
-        )
-    else:
-        # Delivery failed — notify the frontend so it can show the user a
-        # warning rather than leaving them wondering why the task ran silently.
-        await sio.emit(
-            'process:delivery-failed',
-            {
-                'job_id': job_id,
-                'job_name': job_name,
-                'chat_id': chat_id,
-                'ran_at': ran_at,
-            },
-            room=f'user:{user_id}',
-        )
-
-    # Emit AG-UI events for any render_* tool calls in this cron run
-    if tool_calls_log and delivered:
-        from myah.utils.agui_adapter import events_from_tool_calls_log
-
-        agui_events = events_from_tool_calls_log(tool_calls_log, message_id='')
-        for agui_event in agui_events:
+    # Socket emit + AG-UI events: only when the legacy path delivered (so
+    # in outbox mode, these are deferred to the worker).
+    if mode in ('legacy', 'shadow'):
+        if delivered:
             await sio.emit(
-                'events',
+                'process:run-complete',
                 {
-                    # chat_id is None here — cron runs aren't tied to an active chat session.
-                    # The frontend handles agui:events by user room, not by chat_id.
-                    'chat_id': None,
-                    'data': {'type': 'agui:event', 'data': agui_event},
+                    'job_id': job_id,
+                    'job_name': job_name,
+                    'chat_id': chat_id,
+                    'response': response,
+                    'status': status,
+                    'ran_at': ran_at,
                 },
                 room=f'user:{user_id}',
             )
+        else:
+            await sio.emit(
+                'process:delivery-failed',
+                {'job_id': job_id, 'job_name': job_name, 'chat_id': chat_id, 'ran_at': ran_at},
+                room=f'user:{user_id}',
+            )
+
+        if tool_calls_log and delivered:
+            from myah.utils.agui_adapter import events_from_tool_calls_log
+
+            agui_events = events_from_tool_calls_log(tool_calls_log, message_id='')
+            for agui_event in agui_events:
+                await sio.emit(
+                    'events',
+                    {'chat_id': None, 'data': {'type': 'agui:event', 'data': agui_event}},
+                    room=f'user:{user_id}',
+                )
 
     logger.info(
-        f'Cron webhook: job {job_id} for user {user_id} → {"delivered to chat" if delivered else "DELIVERY FAILED"}'
+        f'Cron webhook: job {job_id} for user {user_id} → mode={mode} outbox_row={outbox_row_id} delivered={delivered}'
     )
-    return {'ok': True}
+    return {'ok': True, 'received': True, 'outbox_row_id': outbox_row_id}
 
 
 def _build_output_items_from_messages(
@@ -1201,6 +1263,8 @@ async def _inject_cron_output_to_chat(
     ran_at: str,
     tool_calls_log: list[dict] | None = None,
     chat_id: str = '',
+    msg_id: str | None = None,
+    suppress_chat_lookup_sentry: bool = False,
 ) -> bool:
     """Inject cron output into the originating chat.
 
@@ -1241,29 +1305,30 @@ async def _inject_cron_output_to_chat(
                 f'Cron delivery failed: no chat found for job "{job_name}" (job_id implied by '
                 f'chat_id={chat_id or "(empty)"!r}). Output will not be visible to the user.'
             )
-            try:
-                import sentry_sdk
+            if not suppress_chat_lookup_sentry:
+                try:
+                    import sentry_sdk
 
-                sentry_sdk.capture_message(
-                    f'Cron delivery failed: no chat for job "{job_name}"',
-                    level='error',
-                    extras={
-                        'job_name': job_name,
-                        'chat_id': chat_id,
-                        'user_id': user_id,
-                        'status': status,
-                        'ran_at': ran_at,
-                    },
-                )
-            except Exception:
-                pass
+                    sentry_sdk.capture_message(
+                        f'Cron delivery failed: no chat for job "{job_name}"',
+                        level='error',
+                        extras={
+                            'job_name': job_name,
+                            'chat_id': chat_id,
+                            'user_id': user_id,
+                            'status': status,
+                            'ran_at': ran_at,
+                        },
+                    )
+                except Exception:
+                    pass
             return False
 
         history = process_chat.chat.get('history', {})
         messages = history.get('messages', {})
         current_id = history.get('currentId')
 
-        msg_id = str(uuid.uuid4())
+        msg_id = msg_id or str(uuid.uuid4())
         status_prefix = '⚠️ ' if status == 'error' else ''
 
         if tool_calls_log:
