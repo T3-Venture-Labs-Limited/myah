@@ -70,6 +70,8 @@ jobs:
             echo "✗ HERMES_SHA or MYAH_PLUGIN_SHA missing from versions.env" >&2
             exit 1
           fi
+          [[ "$HERMES_SHA" =~ ^[a-f0-9]{40}$ ]] || { echo "✗ HERMES_SHA not 40-char hex: '$HERMES_SHA'" >&2; exit 1; }
+          [[ "$MYAH_PLUGIN_SHA" =~ ^[a-f0-9]{40}$ ]] || { echo "✗ MYAH_PLUGIN_SHA not 40-char hex: '$MYAH_PLUGIN_SHA'" >&2; exit 1; }
           # Install upstream hermes-agent at the pinned SHA.
           /tmp/hermes-venv/bin/pip install "hermes-agent @ git+https://github.com/NousResearch/Hermes-Agent@${HERMES_SHA}"
           # Install the Myah plugin from its public GitHub repo at the

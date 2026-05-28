@@ -8,6 +8,7 @@ Source of truth: docs/oss-launch/processes-py-gate-classification.md
 from __future__ import annotations
 
 import datetime as dt
+from collections.abc import Callable
 from unittest.mock import patch
 
 import pytest
@@ -58,8 +59,11 @@ def oss_app(monkeypatch):
 
 
 @pytest.fixture
-def oss_client(oss_app) -> TestClient:
-    return TestClient(oss_app)
+def oss_client(
+    oss_app: FastAPI,
+    test_client_factory: Callable[[FastAPI], TestClient],
+) -> TestClient:
+    return test_client_factory(oss_app)
 
 
 def _call(client: TestClient, method: str, path: str, body: dict | None):

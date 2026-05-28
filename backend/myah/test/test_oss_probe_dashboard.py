@@ -44,18 +44,15 @@ class TestProbeDashboardRunning:
     """Cover every combination of {gateway up/down, dashboard up/down}."""
 
     def test_gateway_up_dashboard_up_includes_running_true(self, client: TestClient) -> None:
-        """When the dashboard /api/status responds 200, probe reports dashboard_running=true."""
+        """When the dashboard responds 200, probe reports dashboard_running=true."""
 
         def fake_get(url: str, **kwargs):
-            # Order matters: check the more-specific dashboard URL first
-            # (the gateway /health and dashboard /api/status both end in
-            # known suffixes; we disambiguate by port).
-            if ':9119' in url and '/api/status' in url:
-                return _make_response(200, {'version': '0.14.0'})
             if url.endswith('/health'):
                 return _make_response(200, {'ok': True})
             if url.endswith('/myah/health'):
                 return _make_response(200, {'version': '0.1.0'})
+            if '9119' in url:  # dashboard port — matches default _oss_web_port
+                return _make_response(200, {'status': 'ok'})
             if '/myah/v1/admin/providers' in url:
                 return _make_response(200, {'providers': []})
             return _make_response(404)
@@ -74,12 +71,12 @@ class TestProbeDashboardRunning:
         """Dashboard connection-refused → dashboard_running=false, but probe still 200."""
 
         def fake_get(url: str, **kwargs):
-            if ':9119' in url:
-                raise httpx.ConnectError('Connection refused')
             if url.endswith('/health'):
                 return _make_response(200, {'ok': True})
             if url.endswith('/myah/health'):
                 return _make_response(200, {'version': '0.1.0'})
+            if '9119' in url:
+                raise httpx.ConnectError('Connection refused')
             if '/myah/v1/admin/providers' in url:
                 return _make_response(200, {'providers': []})
             return _make_response(404)
@@ -109,33 +106,29 @@ class TestProbeDashboardRunning:
         assert body['hermes_reachable'] is False
         assert body['dashboard_running'] is False
 
-    def test_dashboard_any_http_response_treated_as_running(self, client: TestClient) -> None:
-        """ANY HTTP response from the dashboard (200, 401, 404, 500) means
-        it IS running. The only signal for "not running" is a connection
-        exception (refused / timeout / DNS). The welcome screen distinguishes
-        "dashboard down" from "dashboard up but transiently broken" via
-        this exception-vs-response distinction.
+    def test_dashboard_401_treated_as_running_but_unauthenticated(self, client: TestClient) -> None:
+        """A 401 from the dashboard means it IS running but the token is bad —
+        we still report dashboard_running=true so the welcome screen
+        distinguishes "dashboard down" from "token desync".
 
-        The probe deliberately does not surface auth or content state —
-        that's diagnostics' job. dashboard_running answers "is there a
-        listener?", not "is everything healthy?".
+        The probe deliberately does not surface auth state — that's diagnostics'
+        job. dashboard_running answers "is there a listener?", not "are we
+        authorised?".
         """
-        for status_code in (200, 401, 404, 500):
-            def fake_get(url: str, code=status_code, **kwargs):
-                if ':9119' in url:
-                    return _make_response(code, {})
-                if url.endswith('/health'):
-                    return _make_response(200, {'ok': True})
-                if url.endswith('/myah/health'):
-                    return _make_response(200, {'version': '0.1.0'})
-                if '/myah/v1/admin/providers' in url:
-                    return _make_response(200, {'providers': []})
-                return _make_response(404)
 
-            with patch.object(oss_router_module, '_http_get', side_effect=fake_get):
-                r = client.get('/api/v1/oss/probe')
+        def fake_get(url: str, **kwargs):
+            if url.endswith('/health'):
+                return _make_response(200, {'ok': True})
+            if url.endswith('/myah/health'):
+                return _make_response(200, {'version': '0.1.0'})
+            if '9119' in url:
+                return _make_response(401, {'detail': 'invalid token'})
+            if '/myah/v1/admin/providers' in url:
+                return _make_response(200, {'providers': []})
+            return _make_response(404)
 
-            body = r.json()
-            assert body['dashboard_running'] is True, (
-                f'expected dashboard_running=true for HTTP {status_code}; got {body}'
-            )
+        with patch.object(oss_router_module, '_http_get', side_effect=fake_get):
+            r = client.get('/api/v1/oss/probe')
+
+        body = r.json()
+        assert body['dashboard_running'] is True

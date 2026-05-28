@@ -35,6 +35,7 @@ is intentionally named ``platform_app`` to avoid colliding with stdlib
 from __future__ import annotations
 
 import shutil
+from pathlib import Path
 
 import typer
 
@@ -90,17 +91,94 @@ def _preflight_or_exit() -> list[str]:
         )
         raise typer.Exit(code=2) from None
 
-    compose_file = repo_root / 'docker-compose.yml'
+    # Defensive Path() wrap — find_repo_root returns Path in production,
+    # but tests for the orphan pre-flight (S3) mock it to return a str.
+    compose_file = Path(repo_root) / 'docker-compose.yml'
     # Bare 'docker' in argv: subprocess does PATH resolution, and we
     # already verified docker is on PATH via shutil.which() above.
     # Same idiom every docker-compose script in the repo uses.
     return ['docker', 'compose', '-f', str(compose_file)]
 
 
+def _check_for_orphan_container() -> str | None:
+    """Return the orphan container ID if a stale `myah-platform`
+    container exists outside the current compose project, else None.
+
+    Detects the pre-A.2 hard-coded-container-name case. Docker's
+    `name=` filter is a regex; anchor with `^...$` so we match the
+    EXACT pre-A.2 name and not the new compose-generated names like
+    `myah-platform-1` or `myah_platform_1` (which would have been
+    created by THIS compose project and are not "orphans").
+    """
+    result = run([
+        'docker', 'ps', '-a',
+        '--filter', 'name=^myah-platform$',  # anchored — exact pre-A.2 name only
+        '--format', '{{.ID}}\t{{.Names}}',
+    ])
+    if result.returncode != 0 or not result.stdout.strip():
+        return None
+    # Iterate lines defensively: filter regex anchors should guarantee a
+    # single match, but be tolerant of edge cases.
+    for line in result.stdout.strip().splitlines():
+        parts = line.split('\t')
+        if len(parts) >= 2 and parts[1] == 'myah-platform':
+            return parts[0]
+    return None
+
+
 @platform_app.command('up')
-def platform_up() -> None:
-    """Start the platform container (detached)."""
+def platform_up(
+    rm_orphans: bool = typer.Option(
+        False, '--rm-orphans',
+        help=(
+            'If a stale `myah-platform` container from a previous '
+            'install layout exists, force-remove it before starting. '
+            'Symptom: `Conflict. The container name "/myah-platform" '
+            'is already in use`. See PR #16 post-merge laptop test, '
+            'simplification S3.'
+        ),
+    ),
+) -> None:
+    """Start the platform container (detached).
+
+    Note for direct (non-Typer) callers: when invoking this function
+    directly from Python (e.g. ``quickstart_command``), pass
+    ``rm_orphans=True`` explicitly. Typer's default-resolution happens
+    only when the function is dispatched through the Typer app; direct
+    calls receive the raw ``OptionInfo`` sentinel (which is truthy under
+    ``if rm_orphans:`` — yes, this is a subtle quirk).
+    """
     base = _preflight_or_exit()
+
+    # Pre-A.2 orphan detection.
+    orphan_id = _check_for_orphan_container()
+    if orphan_id is not None:
+        from rich.console import Console
+        console = Console()
+        if rm_orphans:
+            console.print(
+                f'[yellow]⚠[/] removing stale myah-platform container '
+                f'[dim]{orphan_id[:12]}[/] before starting.'
+            )
+            rm_result = run(['docker', 'rm', '-f', orphan_id])
+            if rm_result.returncode != 0:
+                console.print(
+                    f'[red]✗[/] failed to remove orphan: '
+                    f'[dim]{rm_result.stderr.strip()}[/]'
+                )
+                raise typer.Exit(code=rm_result.returncode)
+        else:
+            console.print(
+                f'[red]✗[/] orphan myah-platform container detected '
+                f'(id: [dim]{orphan_id[:12]}[/])\n'
+                '[dim]This is the pre-A.2 hard-coded container name '
+                'from an older Myah install. To remove and continue:[/]\n'
+                f'  [cyan]docker rm -f {orphan_id[:12]}[/]\n'
+                '[dim]Or re-run with[/] [cyan]myah platform up --rm-orphans[/]'
+                ' [dim]to do it automatically.[/]'
+            )
+            raise typer.Exit(code=125)  # docker's "container conflict" code
+
     emit_result_or_exit(run([*base, 'up', '-d']))
 
 

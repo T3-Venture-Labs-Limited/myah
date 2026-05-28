@@ -7,7 +7,7 @@ authors = [
 maintainers = [
     { name = "T3 Venture Labs Limited", email = "hello@myah.dev" }
 ]
-license = "AGPL-3.0-or-later"
+license = { file = "LICENSE" }
 dependencies = [
     "fastapi==0.135.1",
     "uvicorn[standard]==0.41.0",
@@ -58,9 +58,9 @@ dependencies = [
     "typer>=0.12.0",
 
     # Rich was historically transitive via Typer. Pinned explicitly because
-    # `myah status` and `myah doctor` (Slice 1 of the DevX + OSS CLI
-    # initiative) render Rich tables; a future Typer upgrade that drops
-    # Rich must not silently break us.
+    # `myah status` and `myah doctor` (Slice 1 tasks 1.5/1.6 of the DevX +
+    # OSS CLI initiative) render Rich tables; a future Typer upgrade that
+    # drops Rich must not silently break us.
     "rich>=13.0",
 
     "mcp==1.26.0",
@@ -94,6 +94,7 @@ dependencies = [
     # composio + opentelemetry-instrumentation-* + opentelemetry-exporter-*
     # moved to platform-hosted/pyproject.toml.
 ]
+readme = "README.md"
 requires-python = ">= 3.11"
 dynamic = ["version"]
 classifiers = [
@@ -112,6 +113,10 @@ postgres = [
 dev = [
     "pytest~=8.3.2",
     "pytest-docker~=3.2.5",
+    # Async test support for FastAPI routes, streaming, and cron paths.
+    "pytest-asyncio>=1.0.0",
+    # Randomizes test order to reveal hidden test pollution.
+    "pytest-randomly>=3.15.0",
     # Provides the `mocker` fixture used by the CLI test suite (Slice 1+ of
     # the DevX + OSS CLI initiative). Without it, every test that requests
     # `mocker` fails at collection with `fixture 'mocker' not found`.
@@ -171,6 +176,7 @@ ignore-words-list = 'ans'
 [dependency-groups]
 dev = [
     "pytest-asyncio>=1.0.0",
+    "pytest-mock>=3.14.0",
     "ruff>=0.15.5",
 ]
 
@@ -181,6 +187,8 @@ dev = [
 # the typed contract module (`shared.contract.*`) resolves from tests.
 pythonpath = ["backend", "."]
 asyncio_mode = "strict"
+# Match pytest-asyncio's future default explicitly to avoid deprecation noise.
+asyncio_default_fixture_loop_scope = "function"
 markers = [
     "slow: opt-in integration tests that touch the real environment (subprocess, docker, network); excluded from the default run",
 ]

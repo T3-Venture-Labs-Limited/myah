@@ -678,3 +678,40 @@ class TestRegisterPluginWithGateway:
             mock_run.return_value = _ok(stderr='Plugin myah already installed.\n')
             hermes_install.register_plugin_with_gateway(hermes_bin)
         assert mock_run.call_count == 2
+
+    def test_idempotent_when_install_reports_already_exists(self, tmp_path: Path) -> None:
+        """Re-run case: `hermes plugins install` exits non-zero with "already exists"
+        in stdout. The wrapper must treat that as success, still run enable, and
+        NOT raise. Regression for PR #16 post-merge laptop test (Bug 1).
+
+        Simulates what real ``run()`` does: when called with ``check=True`` and
+        the subprocess returns non-zero, it raises ``ShellError``. The fix
+        must call ``run(check=False)`` for the install step and inspect
+        ``stdout`` for the already-exists sentinel before re-raising.
+        """
+        hermes_bin = tmp_path / 'venv' / 'bin' / 'hermes'
+        already_exists_stdout = (
+            'Cloning https://github.com/T3-Venture-Labs-Limited/myah-hermes-plugin.git...\n'
+            "Error: Plugin 'myah' already exists. Use force reinstall or run "
+            '`hermes plugins update myah`.\n'
+        )
+        already_exists_result = _fail(returncode=1, stdout=already_exists_stdout, stderr='')
+
+        def fake_run(cmd, *, check=False, env=None, **_kwargs):
+            # Mirror the real ``run()`` contract: check=True raises ShellError
+            # on non-zero. The fix is required to pass check=False on the
+            # install step so this branch is NOT taken.
+            if cmd[1:3] == ['plugins', 'install']:
+                if check:
+                    raise ShellError(cmd, already_exists_result)
+                return already_exists_result
+            # plugins enable
+            return _ok()
+
+        with patch.object(hermes_install, 'run', side_effect=fake_run) as mock_run:
+            # Must NOT raise.
+            hermes_install.register_plugin_with_gateway(hermes_bin)
+        # Both subprocess calls happened — install was attempted, enable still ran.
+        assert mock_run.call_count == 2
+        enable_cmd = mock_run.call_args_list[1].args[0]
+        assert enable_cmd[1:] == ['plugins', 'enable', 'myah']

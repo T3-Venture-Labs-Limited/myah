@@ -304,8 +304,14 @@ export const updateUserSettings = async (token: string, settings: object) => {
 // Reads/writes the `default_model` column on the user row. The session payload
 // already includes it on app boot so getUserDefaultModel is mainly for
 // refreshes; setUserDefaultModel is called by the selector's "Set as default"
-// button/menu and the Settings > Agent > Model field. Pass null to clear.
-export const getUserDefaultModel = async (token: string): Promise<string | null> => {
+// button/menu and the Settings > Agent > Model field. Pass both nulls to clear.
+
+export interface UserDefaultModelPair {
+	default_model: string | null;
+	default_provider: string | null;
+}
+
+export const getUserDefaultModel = async (token: string): Promise<UserDefaultModelPair> => {
 	let error = null;
 	const res = await fetch(`${MYAH_API_BASE_URL}/users/user/default-model`, {
 		method: 'GET',
@@ -328,13 +334,17 @@ export const getUserDefaultModel = async (token: string): Promise<string | null>
 		throw error;
 	}
 
-	return res?.default_model ?? null;
+	return {
+		default_model: res?.default_model ?? null,
+		default_provider: res?.default_provider ?? null
+	};
 };
 
 export const setUserDefaultModel = async (
 	token: string,
-	modelId: string | null
-): Promise<string | null> => {
+	modelId: string | null,
+	providerId: string | null
+): Promise<UserDefaultModelPair> => {
 	let error = null;
 	const res = await fetch(`${MYAH_API_BASE_URL}/users/user/default-model`, {
 		method: 'POST',
@@ -342,7 +352,7 @@ export const setUserDefaultModel = async (
 			'Content-Type': 'application/json',
 			Authorization: `Bearer ${token}`
 		},
-		body: JSON.stringify({ model_id: modelId })
+		body: JSON.stringify({ model_id: modelId, provider_id: providerId })
 	})
 		.then(async (res) => {
 			if (!res.ok) throw await res.json();
@@ -358,7 +368,10 @@ export const setUserDefaultModel = async (
 		throw error;
 	}
 
-	return res?.default_model ?? null;
+	return {
+		default_model: res?.default_model ?? null,
+		default_provider: res?.default_provider ?? null
+	};
 };
 // ──────────────────────────────────────────────────────────────────────────────
 

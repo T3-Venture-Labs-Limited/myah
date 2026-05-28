@@ -11,6 +11,7 @@ This document covers **every command** the CLI exposes, with synopsis, flags, be
 - [Conventions](#conventions)
 - [Installation](#installation)
 - [Top-level commands (OSS users)](#top-level-commands-oss-users)
+  - [`myah quickstart`](#myah-quickstart)
   - [`myah install`](#myah-install)
   - [`myah doctor`](#myah-doctor)
   - [`myah status`](#myah-status)
@@ -86,6 +87,37 @@ The production container's `CMD` is `myah serve` — `myah` is the binary baked 
 
 # Top-level commands (OSS users)
 
+## `myah quickstart`
+
+**Class:** Composite — one-command first-run for OSS users.
+
+Equivalent to running:
+
+```bash
+myah install [...] && myah platform up && myah doctor
+```
+
+### Synopsis
+
+```bash
+myah quickstart [--non-interactive] [--service systemd|launchd|none]
+                [--openrouter-key KEY] [--rotate]
+```
+
+### Behavior
+
+| Step | What runs                                                  | Failure mode                                                                       |
+| ---- | ---------------------------------------------------------- | ---------------------------------------------------------------------------------- |
+| 1/3  | `myah install` (with `--service` defaulting to OS pick)    | Short-circuit; quickstart exits 1.                                                 |
+| 2/3  | `myah platform up`                                         | Continue to step 3 so doctor surfaces the cause; exit code propagated.             |
+| 3/3  | `myah doctor`                                              | Doctor's exit code becomes the final exit code unless step 2 already failed.       |
+
+Print:
+* "Step N/3:" headers before each phase.
+* On success: `✓ Quickstart complete. Open http://localhost:8080`.
+
+---
+
 ## `myah install`
 
 **Class:** Composite. Replaces the legacy 922-line `setup-myah-oss.sh`.
@@ -107,6 +139,7 @@ myah install [OPTIONS]
 | `--openrouter-key KEY`        | Pre-sets `OPENROUTER_API_KEY` in the Hermes `.env`. Avoids the interactive provider-credential prompt.                                                  |
 | `--rotate`                    | Regenerate **all** tokens (bearer slots, adapter auth, API server key, OAuth Fernet key, JWT secret, session token). Mutually exclusive with `--keep-data`. |
 | `--keep-data`                 | Documented-intent flag — preserves existing tokens/data (this is the default behavior; use the flag to declare intent in scripts).                       |
+| `--skip-start`                | After laying down service units, skip the automatic `agent up` (launchctl kickstart / systemctl start). Use for CI or when you'll start services manually. No-op when `--service none`. |
 
 ### What it does — 8 phases
 
@@ -116,7 +149,7 @@ myah install [OPTIONS]
 4. **MYAH_SECRET_KEY** — Adopts legacy `WEBUI_SECRET_KEY` if present (Open WebUI migration path), else generates a fresh JWT secret. With `--rotate`, *always* generates fresh — the legacy adoption is bypassed (see Slice 4 fix commit).
 5. **HERMES_WEB_SESSION_TOKEN** — 2-slot alignment between platform and Hermes `.env`.
 6. **Plugin install** — Detects Hermes venv → bootstraps `pip` if missing → installs the myah-hermes-plugin at the SHA pinned in `agent/Dockerfile.stock:183` → materializes the dashboard shim → verifies the mount via `hermes plugins list`.
-7. **Hermes config merge** — PyYAML deep-merge: ensures `gateway.platforms.myah.enabled: true`. Type-mismatch handling warns and overwrites (matches bash `yq` behavior).
+7. **Hermes config merge + auto-start** — PyYAML deep-merge: ensures `gateway.platforms.myah.enabled: true`. Type-mismatch handling warns and overwrites (matches bash `yq` behavior). When `--service {systemd,launchd}` is in effect, Phase 7 also auto-kickstarts the freshly-laid-down units (equivalent to running `myah agent up`) so the next user step is a working stack. Pass `--skip-start` to opt out (CI, scripted callers that start services manually).
 8. **Service units + verification** — Installs systemd-user / launchd plists / nothing per `--service`. Final Rich table from `post_install_doctor_run`. **Exits 1 on any FAIL.**
 
 ### Examples
@@ -152,10 +185,16 @@ Diagnose stack health. Runs `hermes doctor` and appends Myah-specific checks (pl
 ### Synopsis
 
 ```bash
-myah doctor
+myah doctor [--fix]
 ```
 
-No flags. Always exits `1` if any check returns FAIL.
+Read-only by default. Exits `1` if any check returns FAIL.
+
+### Flags
+
+| Flag    | Purpose |
+| ------- | ------- |
+| `--fix` | Opt-in self-healing. After rendering the initial report, attempt a remediation for each actionable (FAIL/WARN) finding, then re-render the table. Currently fixes: plugin not enabled (runs `hermes plugins enable myah` + `myah agent restart`), Hermes gateway/dashboard port unbound (runs `myah agent restart`), `myah-platform` container down (runs `myah platform up`). Always exits `0` regardless of post-fix state — the rendered tables are what the user reads. Destructive remediations (wiping `~/.hermes`, rotating tokens) are out of scope and require their own subcommand. |
 
 ### Example
 
@@ -450,21 +489,26 @@ If `hermes uninstall` fails (e.g. partial install state), the platform-side clea
 
 ### Known limitation: `hermes uninstall` needs a TTY
 
-Hermes 0.14.0's `hermes uninstall` rejects non-TTY invocations with `Error: 'hermes uninstall' requires an interactive terminal.` even when `--yes` is passed. `myah uninstall --yes` therefore:
+Hermes 0.14.0's `hermes uninstall` rejects non-TTY invocations with
+`Error: 'hermes uninstall' requires an interactive terminal.` even
+when `--yes` is passed. `myah uninstall --yes` therefore:
 
-* still tears down the platform container + volume (and removes the platform `.env` unless `--keep-config`);
-* prints a yellow warning that `~/.hermes/` was not removed;
+* tears down the platform container + volume + service units + platform `.env`;
+* prints a clear recovery hint when the TTY failure is detected;
 * exits 0 (the platform side completed successfully).
 
-To finish the teardown manually:
+Two recovery paths:
 
 ```bash
-hermes uninstall --full --yes   # run from an interactive terminal
-# or, if you just want the directory gone:
-rm -rf ~/.hermes
+# Option 1: finish manually from a TTY
+hermes uninstall --full --yes
+
+# Option 2: re-run with --force-purge-hermes for cron-safe full teardown
+myah uninstall --yes --force-purge-hermes
 ```
 
-Upstream tracking issue: <https://github.com/NousResearch/Hermes-Agent/issues> (will link once filed).
+`--force-purge-hermes` is mutually exclusive with `--keep-data` /
+`--keep-config` — it removes everything.
 
 ### Examples
 
@@ -875,7 +919,6 @@ These are documented in the spec but not yet implemented; they're tracked in the
 
 | Gap                                              | Workaround                                                      | Tracked at                            |
 | ------------------------------------------------ | --------------------------------------------------------------- | ------------------------------------- |
-| `myah version` not implemented (spec listed it)  | `pip show myah` or `git -C <repo> describe --tags`               | T3-1084 follow-up                     |
 | `pip install -U myah` in `myah upgrade`          | `git pull && pip install -e .`                                  | `cli/upgrade.py:105` TODO marker      |
 | Auto-restart on `myah dev mode` switch           | Run `myah dev restart` manually                                  | `cli/dev/mode.py:76` TODO marker      |
 | Auto-install composio + honcho on hosted-mode switch | Run `pip install composio honcho-ai` in the worktree venv       | `cli/dev/mode.py:148` TODO marker     |

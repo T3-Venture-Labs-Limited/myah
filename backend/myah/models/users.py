@@ -72,11 +72,17 @@ class User(Base):
     info = Column(JSON, nullable=True)
     settings = Column(JSON, nullable=True)
 
-    # ── Myah: per-user default chat model (T3-932) ────────────────────────────
-    # Model id (e.g. 'anthropic/claude-opus-4-7') applied to new chats by
-    # default. Nullable — falls back to admin DEFAULT_MODELS or first available
-    # provider model when unset.
+    # ── Myah: per-user default chat (provider, model) pair (T3-932 + 2026-05-24) ──
+    # The pair mirrors Hermes upstream's {provider, model} convention at every
+    # boundary (config.yaml model block, /v1/runs body, plugin session override).
+    # Both columns nullable; the both-or-neither invariant is enforced by the
+    # Pydantic validator on UserModel.
+    # `default_model` stores the BARE model id (e.g. 'gpt-4o-mini'). Legitimate
+    # vendor-namespaced ids may contain '/' (e.g. 'anthropic/claude-opus-4.6' on
+    # OpenRouter — Hermes passes them through verbatim); '::' is forbidden
+    # (Myah's composite separator is UI-only).
     default_model = Column(String, nullable=True)
+    default_provider = Column(String, nullable=True)
     # ─────────────────────────────────────────────────────────────────────────
 
     oauth = Column(JSON, nullable=True)
@@ -112,8 +118,9 @@ class UserModel(BaseModel):
     info: Optional[dict] = None
     settings: Optional[UserSettings] = None
 
-    # ── Myah: per-user default chat model (T3-932) ────────────────────────────
+    # ── Myah: per-user default chat (provider, model) pair (T3-932 + 2026-05-24) ──
     default_model: Optional[str] = None
+    default_provider: Optional[str] = None
     # ─────────────────────────────────────────────────────────────────────────
 
     oauth: Optional[dict] = None
@@ -129,6 +136,33 @@ class UserModel(BaseModel):
     def set_profile_image_url(self):
         if not self.profile_image_url:
             self.profile_image_url = f'/api/v1/users/{self.id}/profile/image'
+        return self
+
+    @model_validator(mode='after')
+    def _validate_default_pair(self):
+        """Enforce the (default_provider, default_model) invariant.
+
+        - Both fields must be set OR both must be null (half-pair is rejected).
+        - default_model must NOT contain '::' (Myah's UI-only composite marker).
+          It MAY contain '/' (vendor-namespaced model ids are Hermes pass-through:
+          e.g. 'anthropic/claude-opus-4.6' is the legitimate id when going
+          through OpenRouter).
+        - default_provider must NOT contain '/' or '::' — bare provider ids only.
+
+        See `docs/superpowers/specs/2026-05-24-default-model-canonical-format-design.md`.
+        """
+        if (self.default_model is None) != (self.default_provider is None):
+            raise ValueError(
+                'default_model and default_provider must both be set or both be null'
+            )
+        if self.default_model is not None and '::' in self.default_model:
+            raise ValueError("default_model must be a bare model id (no '::' composite)")
+        if self.default_provider is not None and (
+            '::' in self.default_provider or '/' in self.default_provider
+        ):
+            raise ValueError(
+                "default_provider must be a bare provider id (no '/' or '::' separator)"
+            )
         return self
 
 

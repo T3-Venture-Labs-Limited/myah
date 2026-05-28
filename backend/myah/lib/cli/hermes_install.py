@@ -416,6 +416,12 @@ def register_plugin_with_gateway(
     users to do this manually; ``myah install`` should not leave the
     same paper-cut on the floor. See PR #16 review C-3.
 
+    Idempotent: re-runs against an already-installed plugin are a no-op
+    on the install step (the wrapper still runs ``plugins enable myah``,
+    which is itself idempotent). Detects "already exists" by stdout
+    content; falls back to raising :class:`ShellError` for any other
+    non-zero exit. See PR #16 review C-3 + post-merge laptop Bug 1.
+
     Args:
       hermes_bin: Absolute path to the ``hermes`` console script
         (typically ``<venv>/bin/hermes``). Use
@@ -430,19 +436,31 @@ def register_plugin_with_gateway(
         plugin; override only for fork testing.
 
     Raises:
-      ShellError: when ``hermes plugins install`` or ``hermes plugins
-        enable`` returns non-zero. The install command surfaces this
-        as a Phase 5b failure with a stack trace and exits 1.
+      ShellError: when ``hermes plugins install`` returns non-zero for
+        any reason other than already-installed, or when ``hermes
+        plugins enable`` returns non-zero. The install command surfaces
+        this as a Phase 5b failure with a stack trace and exits 1.
     """
     install_env: dict[str, str] = {**os.environ}
     if adapter_auth_key:
         install_env['MYAH_ADAPTER_AUTH_KEY'] = adapter_auth_key
 
-    run(
+    install_result = run(
         [str(hermes_bin), 'plugins', 'install', repo],
-        check=True,
+        check=False,
         env=install_env,
     )
+    if install_result.returncode != 0:
+        # Hermes 0.14.0 exits non-zero with "Plugin 'myah' already exists"
+        # on re-install. Treat as success — the plugin IS installed.
+        if 'already exists' in install_result.stdout.lower():
+            pass  # idempotent re-run
+        else:
+            raise ShellError(
+                [str(hermes_bin), 'plugins', 'install', repo],
+                install_result,
+            )
+
     run(
         [str(hermes_bin), 'plugins', 'enable', 'myah'],
         check=True,

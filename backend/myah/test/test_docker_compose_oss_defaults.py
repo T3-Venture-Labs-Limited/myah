@@ -62,12 +62,11 @@ def test_docker_compose_has_build_stanza(compose: dict) -> None:
         'installs can build the image locally on first compose up. '
         'See docs/oss-launch/vm-testing-followups.md (D1).'
     )
-    # build.context must point at platform-oss/ (where the Dockerfile lives).
+    # build.context must point at the public repo root (the flattened
+    # platform-oss/ subtree where the Dockerfile lives).
     context = build['context'].rstrip('/')
-    assert context == 'platform-oss', (
-        f"services.platform.build.context must be 'platform-oss', got {context!r}"
-    )
+    assert context == '.', f"services.platform.build.context must be '.', got {context!r}"
     # And the Dockerfile it references must actually exist.
     dockerfile = build.get('dockerfile', 'Dockerfile')
-    df_path = _repo_root() / context / dockerfile
+    df_path = _repo_root() / dockerfile
     assert df_path.exists(), f'build.dockerfile points at non-existent file: {df_path}'

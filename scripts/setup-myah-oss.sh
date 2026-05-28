@@ -509,14 +509,19 @@ if ! "$HERMES_PY" -m pip --version >/dev/null 2>&1; then
   fi
 fi
 
-# Resolve the plugin SHA from agent/Dockerfile.stock (the canonical source
-# inside this internal monorepo). The public mirror reads the same SHA
-# from versions.env at its repo root — both must stay in sync.
-# Both the production agent image and the OSS install use the same pin so
-# upgrades stay coordinated.
-PLUGIN_SHA="$(grep -E '^ARG MYAH_PLUGIN_SHA=' "$ROOT/agent/Dockerfile.stock" | cut -d= -f2)"
+# Resolve the plugin SHA from the layout's canonical source. The internal
+# monorepo stores it in agent/Dockerfile.stock; the public mirror stores the
+# same value in versions.env because it does not ship the agent/ tree.
+if [[ -f "$ROOT/agent/Dockerfile.stock" ]]; then
+  PLUGIN_SHA="$(grep -E '^ARG MYAH_PLUGIN_SHA=' "$ROOT/agent/Dockerfile.stock" | cut -d= -f2)"
+elif [[ -f "$ROOT/versions.env" ]]; then
+  # shellcheck source=/dev/null
+  PLUGIN_SHA="$(grep -E '^MYAH_PLUGIN_SHA=' "$ROOT/versions.env" | cut -d= -f2)"
+else
+  PLUGIN_SHA=""
+fi
 if [[ -z "$PLUGIN_SHA" ]]; then
-  echo "✗ Could not find MYAH_PLUGIN_SHA in $ROOT/agent/Dockerfile.stock" >&2
+  echo "✗ Could not find MYAH_PLUGIN_SHA in $ROOT/agent/Dockerfile.stock or $ROOT/versions.env" >&2
   exit 1
 fi
 

@@ -108,7 +108,11 @@ def create_session_response(request: Request, user, db, response: Response = Non
         'role': user.role,
         'profile_image_url': f'/api/v1/users/{user.id}/profile/image',
         'permissions': user_permissions,
-        'default_model': getattr(user, 'default_model', None),  # Myah T3-932
+        # ── Myah: per-user default chat (provider, model) pair ─────────────────
+        # See docs/superpowers/specs/2026-05-24-default-model-canonical-format-design.md.
+        'default_model': getattr(user, 'default_model', None),
+        'default_provider': getattr(user, 'default_provider', None),
+        # ──────────────────────────────────────────────────────────────────────
     }
 
 
@@ -120,11 +124,12 @@ def create_session_response(request: Request, user, db, response: Response = Non
 class SessionUserResponse(Token, UserProfileImageResponse):
     expires_at: Optional[int] = None
     permissions: Optional[dict] = None
-    # ── Myah: per-user default chat model (T3-932) ────────────────────────
+    # ── Myah: per-user default chat (provider, model) pair (T3-932 + 2026-05-24) ──
     # Included in every session payload so the frontend can hydrate the
     # `defaultModel` store on app boot without an extra round-trip.
     default_model: Optional[str] = None
-    # ──────────────────────────────────────────────────────────────────────
+    default_provider: Optional[str] = None
+    # ──────────────────────────────────────────────────────────────────────────
 
 
 class SessionUserInfoResponse(SessionUserResponse, UserStatus):
@@ -186,7 +191,9 @@ async def get_session_user(
         'status_message': user.status_message,
         'status_expires_at': user.status_expires_at,
         'permissions': user_permissions,
-        'default_model': getattr(user, 'default_model', None),  # Myah T3-932
+        # Myah: per-user default chat (provider, model) pair (T3-932 + 2026-05-24).
+        'default_model': getattr(user, 'default_model', None),
+        'default_provider': getattr(user, 'default_provider', None),
     }
 
 

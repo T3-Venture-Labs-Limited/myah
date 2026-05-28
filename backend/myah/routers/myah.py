@@ -28,7 +28,11 @@ class WhoAmIResponse(BaseModel):
     user_id: str
     user_name: str
     deployment_mode: str  # 'hosted' or 'oss' — informational only
-    default_model: str | None = None  # OSS: hermes config.yaml's model.default (provider/model)
+    # The (provider, model) pair from hermes config.yaml's model block (OSS only).
+    # Mirrors Hermes upstream's canonical {provider, model} shape — see
+    # `docs/superpowers/specs/2026-05-24-default-model-canonical-format-design.md`.
+    default_model: str | None = None
+    default_provider: str | None = None
 
 
 @router.get('/whoami', response_model=WhoAmIResponse)
@@ -153,38 +157,46 @@ async def whoami(request: Request) -> WhoAmIResponse:
     #
     # Best-effort — failures log and return default_model=None; never block
     # /whoami because the plugin needs the user_id even when the sync fails.
-    default_model = None
+    default_pair: tuple[str, str] | None = None
     if deployment_mode == 'oss':
         try:
             from myah.utils.hermes_web import fetch_hermes_default_model
-            default_model = await fetch_hermes_default_model(first_user)
+            default_pair = await fetch_hermes_default_model(first_user)
         except Exception:
             logger.exception('/whoami: failed to read hermes default model')
 
         # Sync to platform DB only when:
-        #   - hermes returned a non-empty default_model AND
-        #   - the user's current default_model is empty (None) OR matches the
-        #     open-webui default ('openai/gpt-4o-mini'). The latter check
-        #     guards against clobbering a deliberate user choice.
-        if default_model:
-            current = getattr(first_user, 'default_model', None) or ''
-            _OPEN_WEBUI_DEFAULT = 'openai/gpt-4o-mini'
-            if not current or current == _OPEN_WEBUI_DEFAULT:
+        #   - hermes returned a non-empty (provider, model) pair AND
+        #   - the user's current default pair is empty OR matches the
+        #     inherited Open WebUI default ('openai', 'gpt-4o-mini'). The
+        #     latter check guards against clobbering a deliberate user choice.
+        _OPEN_WEBUI_DEFAULTS = {('openai', 'gpt-4o-mini')}
+        if default_pair:
+            current_pair = (
+                getattr(first_user, 'default_provider', None),
+                getattr(first_user, 'default_model', None),
+            )
+            if (not current_pair[1]) or current_pair in _OPEN_WEBUI_DEFAULTS:
                 try:
                     Users.update_user_by_id(
-                        first_user.id, {'default_model': default_model}
+                        first_user.id,
+                        {
+                            'default_provider': default_pair[0],
+                            'default_model': default_pair[1],
+                        },
                     )
                     logger.info(
-                        f'/whoami: synced user.default_model {current!r} -> {default_model!r} '
+                        f'/whoami: synced user default pair {current_pair!r} -> {default_pair!r} '
                         f'from hermes config'
                     )
                 except Exception:
-                    logger.exception('/whoami: failed to sync user.default_model')
+                    logger.exception('/whoami: failed to sync user default pair')
     # ───────────────────────────────────────────────────────────────
 
     return WhoAmIResponse(
         user_id=first_user.id,
         user_name=user_name,
         deployment_mode=deployment_mode,
-        default_model=default_model,
+        default_model=default_pair[1] if default_pair else None,
+        default_provider=default_pair[0] if default_pair else None,
     )

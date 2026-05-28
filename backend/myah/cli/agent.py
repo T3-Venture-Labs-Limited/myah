@@ -97,22 +97,74 @@ def _no_supervisor_exit() -> None:
     raise typer.Exit(code=2)
 
 
-def _systemctl(verb: str) -> None:
-    """Invoke `systemctl --user <verb>` against the Myah-installed units."""
-    emit_result_or_exit(run(['systemctl', '--user', verb, *_SYSTEMD_UNITS]))
+# Past-tense → infinitive map. Avoids the `rstrip("ed")` footgun where
+# "stopped".rstrip("ed") returns "stopp" (rstrip strips trailing chars
+# in the set, not a suffix).
+_INFINITIVE_FOR_VERB = {
+    'started': 'start',
+    'stopped': 'stop',
+    'restarted': 'restart',
+    'updated': 'update',  # generic fallback verb
+}
 
 
-def _launchctl_each(make_argv: Callable[[str], list[str]]) -> None:
-    """Run a launchctl invocation per service; abort on first non-zero exit.
+def _print_service_result(service: str, verb: str, success: bool, stderr: str = '') -> None:
+    """Emit a one-line Rich confirmation for a service lifecycle action.
 
-    `make_argv` takes a service label and returns the argv list to
-    invoke. `emit_result_or_exit` raises `typer.Exit` on non-zero, so
-    the loop naturally short-circuits at the first failing service —
-    matching the original explicit-loop behavior (first non-zero
-    returncode wins, no aggregation across services).
+    `verb` is the user-facing past-tense verb ('started', 'stopped',
+    'restarted'). On failure, print the truncated stderr for context.
+    Regression for PR #16 post-merge laptop test, Bug 2.
     """
+    from rich.console import Console
+
+    console = Console()
+    if success:
+        console.print(f'  [green]✓[/] {verb} [cyan]{service}[/]')
+    else:
+        infinitive = _INFINITIVE_FOR_VERB.get(verb, verb)
+        msg = f'  [red]✗[/] failed to {infinitive} [cyan]{service}[/]'
+        if stderr:
+            tail = stderr.strip().splitlines()[-1] if stderr.strip() else ''
+            if tail:
+                msg += f' [dim]({tail[:120]})[/]'
+        console.print(msg)
+
+
+def _systemctl(verb: str, *, verb_label: str = 'updated') -> None:
+    """Invoke `systemctl --user <verb>` against the Myah-installed units,
+    then print a per-unit confirmation by re-checking `systemctl is-active`."""
+    result = run(['systemctl', '--user', verb, *_SYSTEMD_UNITS])
+    # Confirm per-unit state.
+    for unit in _SYSTEMD_UNITS:
+        active = run(['systemctl', '--user', 'is-active', unit])
+        success = active.returncode == 0 and active.stdout.strip() == 'active'
+        # 'stop' is a successful confirmation when is-active reports inactive.
+        if verb == 'stop':
+            success = active.returncode != 0 or active.stdout.strip() != 'active'
+        _print_service_result(unit, verb_label, success=success, stderr=result.stderr)
+    if result.returncode != 0:
+        raise typer.Exit(code=result.returncode)
+
+
+def _launchctl_each(
+    make_argv: Callable[[str], list[str]],
+    *,
+    verb: str = 'updated',
+) -> None:
+    """Run a launchctl invocation per service. Prints confirmation per
+    service; aggregates exit code (worst rc wins). Replaces the prior
+    fail-fast `emit_result_or_exit` behavior to surface partial success.
+    """
+    worst_rc = 0
     for service in _LAUNCHD_SERVICES:
-        emit_result_or_exit(run(make_argv(service)))
+        result = run(make_argv(service))
+        if result.returncode != 0:
+            worst_rc = max(worst_rc, result.returncode)
+            _print_service_result(service, verb, success=False, stderr=result.stderr)
+        else:
+            _print_service_result(service, verb, success=True)
+    if worst_rc != 0:
+        raise typer.Exit(code=worst_rc)
 
 
 def _launchd_target(service: str) -> str:
@@ -124,9 +176,12 @@ def _launchd_target(service: str) -> str:
 def agent_up() -> None:
     """Start the Hermes gateway + dashboard via the OS supervisor."""
     if _on_macos():
-        _launchctl_each(lambda s: ['launchctl', 'kickstart', _launchd_target(s)])
+        _launchctl_each(
+            lambda s: ['launchctl', 'kickstart', _launchd_target(s)],
+            verb='started',
+        )
     elif _has_systemd():
-        _systemctl('start')
+        _systemctl('start', verb_label='started')
     else:
         _no_supervisor_exit()
 
@@ -135,9 +190,12 @@ def agent_up() -> None:
 def agent_down() -> None:
     """Stop the Hermes gateway + dashboard via the OS supervisor."""
     if _on_macos():
-        _launchctl_each(lambda s: ['launchctl', 'bootout', _launchd_target(s)])
+        _launchctl_each(
+            lambda s: ['launchctl', 'bootout', _launchd_target(s)],
+            verb='stopped',
+        )
     elif _has_systemd():
-        _systemctl('stop')
+        _systemctl('stop', verb_label='stopped')
     else:
         _no_supervisor_exit()
 
@@ -147,9 +205,12 @@ def agent_restart() -> None:
     """Restart the Hermes gateway + dashboard via the OS supervisor."""
     if _on_macos():
         # `launchctl kickstart -k` forces a restart of an already-running service.
-        _launchctl_each(lambda s: ['launchctl', 'kickstart', '-k', _launchd_target(s)])
+        _launchctl_each(
+            lambda s: ['launchctl', 'kickstart', '-k', _launchd_target(s)],
+            verb='restarted',
+        )
     elif _has_systemd():
-        _systemctl('restart')
+        _systemctl('restart', verb_label='restarted')
     else:
         _no_supervisor_exit()
 

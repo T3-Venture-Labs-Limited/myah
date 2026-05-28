@@ -7,7 +7,9 @@ from typing import Annotated
 import typer
 import uvicorn
 
-app = typer.Typer()
+app = typer.Typer(
+    context_settings={'help_option_names': ['-h', '--help']},
+)
 
 KEY_FILE = Path.cwd() / '.myah_secret_key'
 LEGACY_KEY_FILE = Path.cwd() / '.webui_secret_key'
@@ -184,6 +186,32 @@ def _migrate_legacy_db_filename(data_dir: Path | None = None, echo=typer.echo) -
             sibling.rename(target)
         except OSError as exc:
             echo(f'Warning: failed to rename SQLite sibling {sibling} → {target}: {exc}')
+
+
+@app.callback(invoke_without_command=True)
+def root(
+    ctx: typer.Context,
+    version: Annotated[
+        bool | None,
+        typer.Option(
+            '--version', '-v',
+            callback=version_callback,
+            is_eager=True,
+            help='Show the Myah version and exit.',
+        ),
+    ] = None,
+) -> None:
+    """Myah CLI root callback — wires `--version`/`-v` at the top level.
+
+    Other options handled at the per-command level. Empty `ctx.invoked_subcommand`
+    falls through to the help text.
+    """
+    if version:
+        # version_callback already exits via typer.Exit().
+        return
+    if ctx.invoked_subcommand is None:
+        # No subcommand → print help instead of doing nothing silently.
+        typer.echo(ctx.get_help())
 
 
 @app.command()

@@ -65,7 +65,6 @@ export default defineConfig({
 		environment: 'jsdom',
 		globals: true,
 		setupFiles: ['./src/test-setup.ts'],
-		// Restrict to unit/component tests; cypress lives in cypress/.
 		include: ['src/**/*.test.ts', 'src/**/*.test.svelte.ts']
 	}
 });

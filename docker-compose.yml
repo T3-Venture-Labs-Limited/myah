@@ -1,88 +1,85 @@
-# Myah OSS — single-tenant docker-compose for self-hosted installs.
+# Myah — self-hosted single-tenant docker-compose.
 #
-# This is the OSS-canonical compose file. It ships at the root of the
-# public T3-Venture-Labs-Limited/myah repo (via the platform-oss/ →
-# repo-root subtree extraction). Hosted's parallel root-level
-# docker-compose.yml exists for hosted-side development convenience —
-# the two files differ only in their build context (this one uses
-# ``.`` because we're already inside ``platform-oss/``; hosted's uses
-# ``platform-oss`` because we're one level above).
-#
-# Bring-your-own-Hermes constraint: this stack does NOT bundle the
-# Hermes agent. The user installs Hermes on the host:
+# This compose stack is for OSS / self-hosted deployments. It runs ONLY
+# the Myah platform (SvelteKit frontend + FastAPI backend in one image).
+# You run Hermes Agent yourself on the HOST machine with:
 #
 #   curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh | bash
 #   hermes plugins install T3-Venture-Labs-Limited/myah-hermes-plugin
-#   ./scripts/setup-myah-oss.sh          # generates secrets in BOTH .envs
-#                                        # and enables the myah platform
-#                                        # in ~/.hermes/config.yaml
-#   hermes gateway run                   # or `gateway install && gateway start`
+#   cp .env.example ~/.hermes/.env  &&  edit ~/.hermes/.env
+#   hermes gateway start
 #
-# Then bring up this stack:
+# Then start the platform:
 #
+#   cp .env.example .env  &&  edit .env  (set MYAH_AGENT_BEARER_TOKEN to
+#                                         the same value as in
+#                                         ~/.hermes/.env)
 #   docker compose up -d
 #   open http://localhost:8080
 #
-# Architecture (single-user, no per-user agent containers):
+# Architecture (single-tenant — no per-user agent containers):
 #
 #       ┌──────────┐         ┌────────────┐         ┌──────────────┐
 #       │ browser  │ ◀────▶  │  platform  │ ◀────▶  │ hermes (host) │
-#       │  :8080   │         │   :8080    │         │   :8642 api  │
-#       │          │         │ (container)│         │   :8643 myah │
-#       └──────────┘         └────────────┘         │   :9119 web │
+#       │  :5173   │         │   :8080    │         │   :8642      │
+#       │          │         │ (this svc) │         │   :8643      │
+#       └──────────┘         └────────────┘         │   :9119      │
 #                                ▲                  └──────────────┘
 #                                │
 #                            host.docker.internal
-#                            (or 172.17.0.1 on Linux without Docker Desktop)
+#                            (or 172.17.0.1 on Linux)
 #
-# OSS mode is selected via MYAH_DEPLOYMENT_MODE=oss below. The platform
-# skips per-user-container spawning and routes every chat/admin/proxy
-# call to the single host-side hermes gateway.
+# OSS mode is selected via MYAH_DEPLOYMENT_MODE=oss in .env. The
+# platform skips per-user-container spawning and forwards all chat /
+# admin / proxy requests to the host-side hermes gateway via the
+# MYAH_HERMES_*_PORT env vars.
+#
+# This compose stack does NOT bundle Hermes Agent — that's the BYO
+# (bring-your-own) constraint: users install Hermes themselves so they
+# can run any model, configure any memory backend, etc. Myah is just
+# another platform their Hermes connects to (alongside Telegram,
+# Discord, Slack, etc.).
 
 services:
   platform:
-    # Default: pull the published OSS image from GHCR. The ``:latest``
-    # tag follows the most recent tagged release on the public repo —
-    # for reproducible installs, pin a specific version, e.g.:
-    #   export MYAH_PLATFORM_IMAGE=ghcr.io/t3-venture-labs-limited/myah-platform-oss:0.1.0-beta.1
-    # Available tags: https://github.com/T3-Venture-Labs-Limited/myah/pkgs/container/myah-platform-oss
+    # OSS default: build locally on first `docker compose up`. The image
+    # tag ``myah/platform:latest`` is a local-only convention (mirrors
+    # the hosted-prod pattern in docker-compose.prod.yaml) — it is NOT
+    # pulled from a registry. Compose checks the local Docker daemon
+    # for the tag first; if absent, it falls back to ``build:`` below.
     #
-    # To build from source instead (e.g. you've modified the code),
-    # set MYAH_PLATFORM_IMAGE to a local-only tag and `docker compose build`:
-    #   export MYAH_PLATFORM_IMAGE=myah/platform:dev
-    #   docker compose build
-    #   docker compose up -d
-    image: ${MYAH_PLATFORM_IMAGE:-ghcr.io/t3-venture-labs-limited/myah-platform-oss:latest}
+    # Override via MYAH_PLATFORM_IMAGE for users with a pre-published
+    # image (e.g. ``MYAH_PLATFORM_IMAGE=ghcr.io/your-org/myah:v0.1.0``)
+    # — this lets you skip the local build entirely.
+    image: ${MYAH_PLATFORM_IMAGE:-myah/platform:latest}
+    # First-run build path: when the image above isn't already on the
+    # local daemon, compose builds it from ./Dockerfile and
+    # tags it with the value of ``image:``. Subsequent ``docker compose
+    # up`` calls reuse the cached image. To force a rebuild after
+    # pulling new source, run ``docker compose build platform``.
     build:
-      # OSS root IS platform-oss/'s content (per subtree extraction),
-      # so the build context is the directory next to this file. The
-      # build: stanza is here for the source-modification workflow above;
-      # `docker compose up` does NOT trigger a build by default when the
-      # image: tag resolves on the registry.
       context: .
       dockerfile: Dockerfile
-    container_name: myah-platform
+    # NOTE: container_name intentionally omitted — compose auto-generates
+    # <project>_platform_1 (scoped to the working directory) so multiple
+    # Myah installs on the same daemon don't collide. See PR #16 post-merge
+    # laptop test, Bug 4.
     ports:
-      # Bind to 127.0.0.1 only — prevents accidental LAN exposure on
-      # multi-machine networks. To expose to the LAN, change to
-      # ``0.0.0.0:8080:8080`` AND re-enable auth by setting
-      # MYAH_AUTH=true (also strongly recommended: rotate
-      # MYAH_SECRET_KEY via ``./scripts/setup-myah-oss.sh --rotate``).
+      # Bind to localhost only — prevents accidental LAN exposure of the
+      # platform on multi-machine networks. To expose on the LAN, change to
+      # '0.0.0.0:8080:8080' AND re-enable auth by setting MYAH_AUTH=true
+      # (also recommended: set a strong MYAH_SECRET_KEY).
+      # See `docs/oss-vs-hosted.md` -> Network access for the full procedure.
       - '127.0.0.1:8080:8080'
     volumes:
       - platform_data:/app/backend/data
     env_file: .env
     environment:
-      # ── OSS-mode invariants — never override in .env ─────────────
+      # ── OSS-mode invariants (do NOT override in .env) ─────────────
       # MYAH_DEPLOYMENT_MODE=oss tells the backend to skip per-user
       # container spawning. is_oss_mode() in
-      # backend/myah/utils/hermes_web.py reads this. Setting this
-      # in the compose ``environment:`` block (rather than via .env)
-      # makes it a hard contract — switching it would try to spawn
-      # per-user agent containers (which depend on honcho/composio/
-      # the hosted overlay) and immediately crash. Hardcoded.
+      # backend/myah/utils/hermes_web.py reads this.
       MYAH_DEPLOYMENT_MODE: oss
-      # ── OSS-mode secure default, OVERRIDABLE via .env ─────────────
       # Single-user OSS — no login screen, no sign-up. The
       # oss_seed_user Alembic migration inserts the anonymous admin
       # on first boot.
@@ -90,16 +87,18 @@ services:
       # ``${MYAH_AUTH:-false}`` — defaults to ``false`` (single-user)
       # but reads .env so users who flip the port binding to
       # 0.0.0.0:8080:8080 (LAN-exposed) can ALSO set MYAH_AUTH=true
-      # in .env to actually re-enable auth. The previous hardcoded
-      # ``'false'`` silently overrode .env, which meant a user could
-      # think they enabled auth while still serving an open relay on
-      # their LAN. See README → Network access for the full procedure.
+      # in .env to actually re-enable auth. A previous version
+      # hardcoded ``'false'`` here, which silently overrode .env —
+      # meaning a user could think they enabled auth while still
+      # serving an open relay on their LAN.
       MYAH_AUTH: ${MYAH_AUTH:-false}
-      # Hermes-side port wiring. Defaults match the canonical
-      # ``hermes gateway run`` layout:
-      #   8642 — Hermes core api_server (/v1/runs, /health, /api/jobs)
-      #   8643 — Myah plugin standalone runner (/myah/health, /myah/v1/*)
-      #   9119 — ``hermes dashboard`` (web UI — separate process)
+      # On Linux without Docker Desktop, host.docker.internal does not
+      # auto-resolve. extra_hosts below adds it. On macOS/Windows it's
+      # already set.
+      # Default ports match upstream's ``hermes gateway start``:
+      #   8642 — gateway API server
+      #   8643 — standalone Myah aiohttp runner (registered via plugin)
+      #   9119 — hermes dashboard (web UI)
       # Override only if you ran hermes on non-default ports.
       MYAH_HERMES_CHAT_PORT: ${MYAH_HERMES_CHAT_PORT:-8642}
       # NOTE: this variable is being renamed to MYAH_GATEWAY_PORT to
@@ -108,37 +107,41 @@ services:
       # order.
       MYAH_HERMES_GATEWAY_PORT: ${MYAH_HERMES_GATEWAY_PORT:-${MYAH_GATEWAY_PORT:-8643}}
       MYAH_HERMES_WEB_PORT: ${MYAH_HERMES_WEB_PORT:-9119}
-      # _detect_agent_host() in hermes_web.py falls back to
-      # ``localhost`` on misconfigured Linux. Setting host.docker.internal
-      # explicitly + the extra_hosts entry below covers Linux properly.
+      # The platform reaches the host-side hermes gateway via
+      # host.docker.internal. _detect_agent_host() in hermes_web.py
+      # falls back to localhost on misconfigured Linux — extra_hosts
+      # below covers Linux properly.
       MYAH_AGENT_HOST: host.docker.internal
     extra_hosts:
-      # Linux compatibility. Docker Desktop sets this automatically on
-      # macOS and Windows. On native Linux the host's bridge gateway
-      # (typically 172.17.0.1) is exposed under the ``host-gateway``
-      # alias and bound to the host.docker.internal hostname so the
-      # platform container can reach the host-side hermes gateway.
+      # Linux compatibility — Docker Desktop sets this automatically on
+      # macOS and Windows. On native Linux the user must add it
+      # explicitly. ``host-gateway`` is a Docker Engine alias for the
+      # host's bridge gateway IP (typically 172.17.0.1).
       - 'host.docker.internal:host-gateway'
     restart: unless-stopped
     healthcheck:
-      # Mirrors the Dockerfile HEALTHCHECK at Dockerfile:131. CMD-SHELL is
-      # required because the check pipes curl through jq to validate the
-      # response body ({"status": true} from /health). curl and jq are
-      # installed in the image; wget is not.
+      # Mirrors the Dockerfile HEALTHCHECK at Dockerfile:131.
+      # CMD-SHELL is required because the check pipes curl through jq to
+      # validate the response body (``{"status": true}`` from
+      # ``backend/myah/main.py``'s ``/health`` handler) — a plain CMD
+      # array cannot express a shell pipeline. ``curl`` and ``jq`` are
+      # both installed in the image (Dockerfile line ~91); ``wget`` is
+      # NOT installed, which is why the previous OWUI-inherited
+      # ``CMD wget --spider`` form failed with ``exec: "wget":
+      # executable file not found in $PATH`` and caused the platform
+      # container to be reported ``unhealthy`` forever.
       test: ['CMD-SHELL', 'curl --silent --fail http://localhost:8080/health | jq -ne "input.status == true" || exit 1']
       interval: 30s
       timeout: 10s
       retries: 3
       # Generous start_period: first boot runs Alembic migrations
       # (including oss_seed_user) and that can take 30-40s on slow
-      # SD-card-backed VMs.
+      # VMs — was 60s, bumped to 90s after VM-testing.
       start_period: 90s
 
 volumes:
   # SQLite database, uploaded files, and cached configs. Survives
-  # container restarts and image upgrades. Back up with:
-  #   docker run --rm \
-  #     -v myah_platform_data:/data \
-  #     -v "$PWD":/backup busybox \
-  #     tar czf /backup/myah-backup.tar.gz -C /data .
+  # container restarts and image upgrades. Backup with `docker run --rm
+  # -v myah_platform_data:/data -v $PWD:/backup busybox tar czf
+  # /backup/myah-backup.tar.gz -C /data .`
   platform_data:

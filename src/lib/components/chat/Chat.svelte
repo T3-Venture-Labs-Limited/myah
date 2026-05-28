@@ -923,14 +923,20 @@
 				// Set from folder model IDs
 				selectedModels = $selectedFolder?.data?.model_ids;
 			} else if ($defaultModel) {
-				// Myah T3-932: per-user default model wins for new chats.
-				// Takes precedence over sessionStorage (last-used model) so
-				// that setting a default is a real preference, not a "suggest"
-				// that gets overridden by the previous chat's model.
-				// Any lingering sessionStorage value is cleared to prevent it
-				// from resurfacing on a later page load.
-				selectedModels = [$defaultModel];
-				sessionStorage.removeItem('selectedModels');
+				// Myah T3-932 + 2026-05-24: per-user default (provider, model) pair
+				// wins for new chats. The structured pair routes through the right
+				// credential pool even when duplicate model ids exist across
+				// providers (T3-1031 disambiguation case). Find the matching
+				// $models row by both fields; fall through if neither matches.
+				const match = $models.find(
+					(m) =>
+						m.id === $defaultModel.model &&
+						m.tags?.[0]?.name === $defaultModel.provider
+				);
+				if (match) {
+					selectedModels = [match.selection_key ?? match.id];
+					sessionStorage.removeItem('selectedModels');
+				}
 			} else if (sessionStorage.selectedModels) {
 				// Carry the last-used model forward when no explicit default
 				// is set (convenience for users who haven't pinned one).
@@ -944,16 +950,26 @@
 				selectedModels = defaultModels;
 			}
 
-			// Unavailable & hidden models filtering
-			selectedModels = selectedModels.filter((modelId) => availableModels.includes(modelId));
+			// Unavailable & hidden models filtering — accept both bare id and
+			// composite selection_key so composite picks aren't dropped as
+			// "unavailable".
+			selectedModels = selectedModels.filter((modelId) =>
+				$models.some((m) => m.id === modelId || m.selection_key === modelId)
+			);
 		}
 
 		// Ensure at least one model is selected
 		if (selectedModels.length === 0 || (selectedModels.length === 1 && selectedModels[0] === '')) {
 			if (availableModels.length > 0) {
-				// Myah T3-932: fallback priority — per-user default, then admin, then first.
-				if ($defaultModel && availableModels.includes($defaultModel)) {
-					selectedModels = [$defaultModel];
+				// Myah T3-932 + 2026-05-24: fallback priority — per-user default
+				// pair, then admin, then first.
+				if ($defaultModel) {
+					const match = $models.find(
+						(m) =>
+							m.id === $defaultModel.model &&
+							m.tags?.[0]?.name === $defaultModel.provider
+					);
+					if (match) selectedModels = [match.selection_key ?? match.id];
 				} else if (defaultModels && defaultModels.length > 0) {
 					selectedModels = defaultModels.filter((modelId) => availableModels.includes(modelId));
 				}

@@ -16,7 +16,8 @@ def test_doctor_invokes_without_crash(mocker) -> None:
     ok = lambda name: CheckResult(name=name, status=CheckStatus.OK, message='all good')
     mocker.patch('myah.cli.doctor.check_hermes_binary_on_path', return_value=ok('hermes binary'))
     mocker.patch('myah.cli.doctor.check_hermes_plugin_installed', return_value=ok('plugin'))
-    mocker.patch('myah.cli.doctor.check_port_for_service', return_value=ok('port'))
+    # probe_required_ports now drives port checks (replaces check_port_for_service)
+    mocker.patch('myah.cli.doctor.probe_required_ports', return_value=[ok('port 8642'), ok('port 8643')])
     mocker.patch('myah.cli.doctor.check_platform_container_running', return_value=ok('container'))
     mocker.patch('myah.cli.doctor.check_plugin_sha_drift', return_value=ok('sha'))
     mocker.patch('myah.cli.doctor.check_agent_container_env_injection', return_value=ok('agent env'))
@@ -33,10 +34,13 @@ def test_doctor_renders_table(mocker) -> None:
         'myah.cli.doctor.check_hermes_binary_on_path',
         return_value=CheckResult(name='hermes binary', status=CheckStatus.OK, message='found at /usr/local/bin/hermes'),
     )
+    mocker.patch(
+        'myah.cli.doctor.probe_required_ports',
+        return_value=[CheckResult(name='port 8642', status=CheckStatus.OK, message='ok')],
+    )
     # Mock the others to OK too
     for name in [
         'check_hermes_plugin_installed',
-        'check_port_for_service',
         'check_platform_container_running',
         'check_plugin_sha_drift',
         'check_agent_container_env_injection',
@@ -59,9 +63,12 @@ def test_doctor_exit_code_1_on_any_fail(mocker) -> None:
         'myah.cli.doctor.check_hermes_binary_on_path',
         return_value=CheckResult(name='hermes binary', status=CheckStatus.FAIL, message='not found'),
     )
+    mocker.patch(
+        'myah.cli.doctor.probe_required_ports',
+        return_value=[CheckResult(name='port 8642', status=CheckStatus.OK, message='ok')],
+    )
     for name in [
         'check_hermes_plugin_installed',
-        'check_port_for_service',
         'check_platform_container_running',
         'check_plugin_sha_drift',
         'check_agent_container_env_injection',
@@ -83,10 +90,13 @@ def test_doctor_exit_code_0_when_only_warns(mocker) -> None:
         'myah.cli.doctor.check_platform_container_running',
         return_value=CheckResult(name='container', status=CheckStatus.WARN, message='not running'),
     )
+    mocker.patch(
+        'myah.cli.doctor.probe_required_ports',
+        return_value=[CheckResult(name='port 8642', status=CheckStatus.OK, message='ok')],
+    )
     for name in [
         'check_hermes_binary_on_path',
         'check_hermes_plugin_installed',
-        'check_port_for_service',
         'check_plugin_sha_drift',
         'check_agent_container_env_injection',
     ]:

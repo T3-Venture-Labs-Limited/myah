@@ -14,11 +14,7 @@ export default defineWorkspace([
 			// + setupFiles. The include glob here narrows the project to
 			// everything EXCEPT the svelte/server suite.
 			include: ['src/**/*.test.ts', 'src/**/*.test.svelte.ts'],
-			exclude: [
-				'src/lib/components/generative-ui/__tests__/**',
-				'node_modules/**',
-				'cypress/**'
-			]
+			exclude: ['src/lib/components/generative-ui/__tests__/**', 'node_modules/**']
 		}
 	},
 

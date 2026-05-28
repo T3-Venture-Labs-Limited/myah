@@ -415,29 +415,47 @@ async def get_user_active_status_by_id(
     }
 
 
-# ── Myah: per-user default chat model (T3-932) ────────────────────────────────
-# Applied to every new chat unless overridden by folder config, URL param, or
-# explicit selection. Stored on the user row as a plain string so the
-# selector, Chat.svelte, and Settings can all read/write through the same
-# authoritative source.
+# ── Myah: per-user default chat (provider, model) pair (T3-932 + 2026-05-24) ──
+# The pair mirrors Hermes upstream's canonical {provider, model} shape at
+# every persistence and runtime boundary. Stored as two columns on the user
+# row; the pair invariant (both-or-neither) is enforced at the API boundary
+# here (422 on half-pair) and durably by the UserModel Pydantic validator.
 class DefaultModelForm(BaseModel):
     model_id: Optional[str] = None
+    provider_id: Optional[str] = None
 
 
 @router.get('/user/default-model')
 async def get_user_default_model(user=Depends(get_verified_user)):
-    """Return the caller's default chat model id (nullable)."""
+    """Return the caller's default chat (provider, model) pair (both nullable)."""
     fresh = Users.get_user_by_id(user.id)
-    return {'default_model': fresh.default_model if fresh else None}
+    return {
+        'default_model': fresh.default_model if fresh else None,
+        'default_provider': fresh.default_provider if fresh else None,
+    }
 
 
 @router.post('/user/default-model')
 async def set_user_default_model(form_data: DefaultModelForm, user=Depends(get_verified_user)):
-    """Set (or clear with null) the caller's default chat model."""
-    updated = Users.update_user_by_id(user.id, {'default_model': form_data.model_id})
+    """Set (or clear with both-null) the caller's default chat (provider, model) pair."""
+    # Both-or-neither invariant: caught at the API boundary so the user sees
+    # an actionable 422 rather than a 500 from the Pydantic validator further
+    # down the stack.
+    if (form_data.model_id is None) != (form_data.provider_id is None):
+        raise HTTPException(
+            status_code=422,
+            detail='model_id and provider_id must both be set or both be null',
+        )
+    updated = Users.update_user_by_id(
+        user.id,
+        {'default_model': form_data.model_id, 'default_provider': form_data.provider_id},
+    )
     if not updated:
         raise HTTPException(status_code=404, detail=ERROR_MESSAGES.USER_NOT_FOUND)
-    return {'default_model': updated.default_model}
+    return {
+        'default_model': updated.default_model,
+        'default_provider': updated.default_provider,
+    }
 
 
 # ──────────────────────────────────────────────────────────────────────────────

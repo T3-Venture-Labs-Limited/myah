@@ -13,6 +13,7 @@ export const MYAH_API_BASE_URL = `${MYAH_BASE_URL}/api/v1`;
 
 export const OPENAI_API_BASE_URL = `${MYAH_BASE_URL}/openai`;
 export const IMAGES_API_BASE_URL = `${MYAH_BASE_URL}/api/v1/images`;
+export const INTEGRATIONS_DIRECTORY_URL = 'https://myah.dev/integrations';
 
 // The version changes, but the promise must not. Let what
 // was built here keep its word across every release.

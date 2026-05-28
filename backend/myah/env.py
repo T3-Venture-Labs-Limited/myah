@@ -530,7 +530,9 @@ MYAH_SESSION_COOKIE_SECURE = (
 )
 WEBUI_SESSION_COOKIE_SECURE = MYAH_SESSION_COOKIE_SECURE  # legacy alias
 
-MYAH_AUTH_COOKIE_SAME_SITE = _env('MYAH_AUTH_COOKIE_SAME_SITE', 'WEBUI_AUTH_COOKIE_SAME_SITE', MYAH_SESSION_COOKIE_SAME_SITE)
+MYAH_AUTH_COOKIE_SAME_SITE = _env(
+    'MYAH_AUTH_COOKIE_SAME_SITE', 'WEBUI_AUTH_COOKIE_SAME_SITE', MYAH_SESSION_COOKIE_SAME_SITE
+)
 WEBUI_AUTH_COOKIE_SAME_SITE = MYAH_AUTH_COOKIE_SAME_SITE  # legacy alias
 
 MYAH_AUTH_COOKIE_SECURE = (
@@ -828,6 +830,43 @@ OTEL_METRICS_BASIC_AUTH_USERNAME = os.environ.get('OTEL_METRICS_BASIC_AUTH_USERN
 OTEL_METRICS_BASIC_AUTH_PASSWORD = os.environ.get('OTEL_METRICS_BASIC_AUTH_PASSWORD', OTEL_BASIC_AUTH_PASSWORD)
 OTEL_LOGS_BASIC_AUTH_USERNAME = os.environ.get('OTEL_LOGS_BASIC_AUTH_USERNAME', OTEL_BASIC_AUTH_USERNAME)
 OTEL_LOGS_BASIC_AUTH_PASSWORD = os.environ.get('OTEL_LOGS_BASIC_AUTH_PASSWORD', OTEL_BASIC_AUTH_PASSWORD)
+
+# ─── Cron delivery mode ──────────────────────────────────────────────
+# Controls the cron output delivery path. Phase 1 of T3-1087 (the
+# cron-delivery-outbox spec) introduces a database-backed outbox; this
+# selects which path is active per request:
+#
+#   legacy  — direct write to chat via _inject_cron_output_to_chat
+#             (Phase 0 / pre-outbox behaviour). Outbox table is unused.
+#   shadow  — write to outbox AND legacy path. Legacy is source of truth.
+#             Worker observes and emits parity metrics but does NOT
+#             deliver.
+#   outbox  — write to outbox only. Worker is the sole deliverer.
+#             Legacy direct-write path is bypassed.
+#
+# Implemented as a FUNCTION (not module-level constant) so callers re-
+# read os.environ each invocation. This makes the value monkeypatchable
+# in tests (per plan-review C-E: a module-level constant captured at
+# import time means tests that monkeypatch the env var must also reload
+# every importing module, which is fragile and order-dependent).
+_VALID_CRON_DELIVERY_MODES = {'legacy', 'shadow', 'outbox'}
+
+
+def get_cron_delivery_mode() -> str:
+    """Return the active cron delivery mode: legacy | shadow | outbox.
+
+    Falls back to 'legacy' (with WARNING log) on unrecognised values
+    so a misconfigured flag never crashes the platform.
+    """
+    raw = os.environ.get('MYAH_CRON_DELIVERY_MODE', 'legacy').strip().lower()
+    if raw not in _VALID_CRON_DELIVERY_MODES:
+        log.warning(
+            f'MYAH_CRON_DELIVERY_MODE={raw!r} is not one of '
+            f'{sorted(_VALID_CRON_DELIVERY_MODES)}; falling back to legacy.'
+        )
+        return 'legacy'
+    return raw
+
 
 OTEL_OTLP_SPAN_EXPORTER = os.environ.get('OTEL_OTLP_SPAN_EXPORTER', 'grpc').lower()  # grpc or http
 

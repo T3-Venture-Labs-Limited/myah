@@ -638,6 +638,25 @@ def test_module_does_not_import_heavy_libs_at_top_level() -> None:
         assert offender not in head, f'install.py top-level uses {offender!r}'
 
 
+def test_install_uses_thirty_second_timeouts_for_mount_verification(
+    install_env, all_lib_mocks
+) -> None:
+    """Regression for PR #16 post-merge laptop test, Bug 3: the dashboard
+    cold boot on macOS takes longer than 15s. Both probes should use 30s.
+    """
+    result = runner.invoke(app, ['install', '--non-interactive', '--service', 'systemd'])
+    assert result.exit_code == 0, result.stdout
+
+    gw_kwargs = all_lib_mocks['verify_gateway_plugin_bound'].call_args.kwargs
+    dash_kwargs = all_lib_mocks['verify_dashboard_plugin_mounted'].call_args.kwargs
+    assert gw_kwargs.get('timeout_s') == 30.0, (
+        f'gateway probe timeout expected 30.0, got {gw_kwargs}'
+    )
+    assert dash_kwargs.get('timeout_s') == 30.0, (
+        f'dashboard probe timeout expected 30.0, got {dash_kwargs}'
+    )
+
+
 def test_install_command_help_works() -> None:
     """`myah install --help` prints help without crashing."""
     result = runner.invoke(app, ['install', '--help'])
@@ -647,3 +666,38 @@ def test_install_command_help_works() -> None:
     assert '--non-interactive' in result.stdout
     assert '--service' in result.stdout
     assert '--rotate' in result.stdout
+
+
+# ── Task C.1: auto-kickstart services after Phase 7 ──────────────────
+
+
+def test_install_runs_agent_up_at_end_of_phase_7(install_env, all_lib_mocks, mocker):
+    """Regression for PR #16 post-merge laptop test, simplification S1:
+    install should auto-kickstart the services it just laid down so the
+    next user step doesn't have to be `myah agent up`."""
+    mock_agent_up = mocker.patch('myah.cli.install._kickstart_services_after_install')
+
+    result = runner.invoke(app, ['install', '--non-interactive', '--service', 'systemd'])
+    assert result.exit_code == 0, result.stdout
+    mock_agent_up.assert_called_once()
+
+
+def test_install_skip_start_flag_does_not_run_agent_up(install_env, all_lib_mocks, mocker):
+    """CI / scripted callers that don't want services started can opt out."""
+    mock_agent_up = mocker.patch('myah.cli.install._kickstart_services_after_install')
+
+    result = runner.invoke(
+        app,
+        ['install', '--non-interactive', '--service', 'systemd', '--skip-start'],
+    )
+    assert result.exit_code == 0, result.stdout
+    mock_agent_up.assert_not_called()
+
+
+def test_install_with_service_none_does_not_run_agent_up(install_env, all_lib_mocks, mocker):
+    """No service units installed → nothing to kickstart."""
+    mock_agent_up = mocker.patch('myah.cli.install._kickstart_services_after_install')
+
+    result = runner.invoke(app, ['install', '--non-interactive', '--service', 'none'])
+    assert result.exit_code == 0, result.stdout
+    mock_agent_up.assert_not_called()

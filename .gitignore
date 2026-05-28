@@ -32,10 +32,13 @@ static/pyodide/*
 # Distribution / packaging
 .Python
 build/*
-# Force-include the placeholder so `force-include = { build = "myah/frontend" }`
-# in pyproject.toml passes hatchling's validation on Node-less installs
-# (MYAH_SKIP_HATCH_NPM=1). See docs/superpowers/specs/2026-05-22-devx-oss-cli-spike-findings.md
-# Investigation B for the full rationale.
+# Keep build/.gitkeep tracked so hatchling's
+# force-include = { build = "myah/frontend" } in pyproject.toml passes
+# pre-build validation when the SvelteKit frontend hasn't been built
+# yet (per-worktree venv installs with MYAH_SKIP_HATCH_NPM=1). See
+# platform-oss/hatch_build.py and
+# docs/superpowers/specs/2026-05-22-devx-oss-cli-spike-findings.md
+# Investigation B.
 !build/.gitkeep
 develop-eggs/
 dist/

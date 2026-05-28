@@ -118,7 +118,6 @@ _ALLOWLIST: frozenset[str] = frozenset({
     'platform-oss/src/lib/types/contract.ts',
     'platform-oss/shared/contract/output_items.py',
     'platform-oss/src/lib/stores/index.ts',
-    'platform-oss/src/routes/(app)/+layout.svelte',
     # Test-file comment explicitly describing inherited OWUI behavior.
     'platform-oss/backend/myah/test/test_no_submodule_references.py',
     # This very test file — it must enumerate the patterns it searches for,
@@ -140,7 +139,7 @@ _ALLOWLIST: frozenset[str] = frozenset({
 # set this to N.
 #
 # End state: ``0`` — at which point the test can be promoted to required CI.
-BASELINE_OFFENDING_FILES: int = 21
+BASELINE_OFFENDING_FILES: int = 20
 
 
 def _is_in_scope(rel_path: str) -> bool:

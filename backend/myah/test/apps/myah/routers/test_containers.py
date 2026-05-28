@@ -173,7 +173,7 @@ def _load_containers_module():
     sys.modules['myah.routers.containers'] = module
     spec.loader.exec_module(module)
 
-    # Expose test handles
+    # Expose test handles.
     module._test_aux_call = aux_call_mock
     module._test_users_get = users_get
     module._test_containers_db = containers_db
@@ -182,10 +182,51 @@ def _load_containers_module():
 
 @pytest.fixture
 def containers_mod():
+    """Load the containers router with stubs, then restore sys.modules.
+
+    This file mixes stub-loader tests with reload-based tests. Once
+    pytest-randomly changes the test order, leaving the stub module installed can
+    make later `importlib.reload(containers)` calls fail because the imported
+    package attribute and sys.modules entry no longer agree.
+    """
+    stub_keys = [
+        'docker',
+        'docker.errors',
+        'httpx',
+        'myah.internal.db',
+        'myah.constants',
+        'myah.models.containers',
+        'myah.models.users',
+        'myah.services.honcho',
+        'myah.utils.auth',
+        'myah.utils.agent_proxy',
+        'myah.utils.hermes_web',
+        'myah.config',
+        'myah.utils.telemetry',
+        'myah.utils.telemetry.myah_metrics',
+        'myah.routers.containers',
+    ]
+    saved = {key: sys.modules[key] for key in stub_keys if key in sys.modules}
+    routers_pkg = sys.modules.get('myah.routers')
+    had_router_attr = hasattr(routers_pkg, 'containers') if routers_pkg is not None else False
+    saved_router_attr = getattr(routers_pkg, 'containers', None) if had_router_attr else None
+
     mod = _load_containers_module()
     mod._test_aux_call.reset_mock()
     mod._test_users_get.reset_mock()
-    return mod
+    try:
+        yield mod
+    finally:
+        for key in stub_keys:
+            if key in saved:
+                sys.modules[key] = saved[key]
+            else:
+                sys.modules.pop(key, None)
+        if routers_pkg is not None:
+            if had_router_attr:
+                setattr(routers_pkg, 'containers', saved_router_attr)
+            elif getattr(routers_pkg, 'containers', None) is mod:
+                delattr(routers_pkg, 'containers')
 
 
 def _fake_user(user_id='user-abc'):

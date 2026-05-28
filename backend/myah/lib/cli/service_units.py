@@ -27,6 +27,7 @@ import datetime as dt
 import importlib.resources
 import os
 import shutil
+import sys
 import time
 from pathlib import Path
 
@@ -388,7 +389,76 @@ def install_launchd_plists(hermes_bin: str, hermes_home: Path) -> None:
                 logger.error(f'failed to bootstrap or load launchd plist {plist_path}')
                 raise
 
+        # Bootstrap registers the plist with launchd. RunAtLoad: true in the
+        # plist SHOULD start the service immediately, but on some macOS
+        # versions or with stale state from a prior install, it doesn't
+        # reliably. Explicitly kickstart each service so the user gets a
+        # running gateway + dashboard from a single `myah install`.
+        # Belt-and-suspenders; idempotent — kickstart on an already-running
+        # service is a no-op. See PR #16 post-merge laptop test, Bug 3.
+        kickstart = run(['launchctl', 'kickstart', f'gui/{uid}/{service}'])
+        if kickstart.returncode != 0:
+            # Non-fatal: bootstrap may already have kickstarted via
+            # RunAtLoad. Log and continue — the verify step below will
+            # catch a truly-failed start.
+            logger.warning(
+                f'launchctl kickstart {service} returned exit {kickstart.returncode}'
+                f' (stderr: {kickstart.stderr.strip()!r}) — bootstrap may have'
+                f' kickstarted already; verification will confirm.'
+            )
+
     logger.info('launchd plists installed: dev.myah.hermes-{gateway,dashboard}')
+
+
+def remove_service_units() -> None:
+    """Tear down the service-supervision units `myah install` laid down.
+
+    Symmetric to :func:`install_launchd_plists` (macOS) and
+    :func:`install_systemd_user_units` (Linux). Idempotent — tolerates
+    already-removed plists / units / bootout-fail-because-already-gone.
+
+    macOS:
+      - ``launchctl bootout gui/$UID/<label>`` (silent on failure)
+      - ``rm -f ~/Library/LaunchAgents/<label>.plist``
+
+    Linux (systemd-user):
+      - ``systemctl --user disable --now <unit>`` (silent on failure)
+      - ``rm -f ~/.config/systemd/user/<unit>``
+      - ``systemctl --user daemon-reload``
+
+    Other platforms: no-op (matches `myah install --service none`).
+
+    See PR #16 post-merge laptop test, simplification S5.
+    """
+    if sys.platform == 'darwin':
+        plist_dir = _launch_agents_dir()
+        uid = os.getuid()
+        for label in ('dev.myah.hermes-gateway', 'dev.myah.hermes-dashboard'):
+            run(['launchctl', 'bootout', f'gui/{uid}/{label}'])  # silent
+            plist_path = plist_dir / f'{label}.plist'
+            try:
+                plist_path.unlink(missing_ok=True)
+                logger.info(f'removed launchd plist {plist_path}')
+            except OSError as exc:
+                logger.warning(f'failed to remove {plist_path}: {exc}')
+    elif sys.platform.startswith('linux'):
+        unit_dir = _systemd_user_dir()  # existing helper — DO NOT add a parallel one
+        units = ('hermes-gateway.service', 'hermes-dashboard.service')
+        # disable --now stops + removes the WantedBy symlinks in one call.
+        run(['systemctl', '--user', 'disable', '--now', *units])  # silent
+        for unit in units:
+            unit_path = unit_dir / unit
+            try:
+                unit_path.unlink(missing_ok=True)
+                logger.info(f'removed systemd-user unit {unit_path}')
+            except OSError as exc:
+                logger.warning(f'failed to remove {unit_path}: {exc}')
+        # Re-scan so systemctl forgets the unit immediately.
+        run(['systemctl', '--user', 'daemon-reload'])
+    else:
+        logger.info(
+            f'remove_service_units: unsupported platform {sys.platform!r}, no-op'
+        )
 
 
 __all__ = [
@@ -396,6 +466,7 @@ __all__ = [
     'install_systemd_user_units',
     'migrate_legacy_launchagents',
     'migrate_legacy_systemd_units',
+    'remove_service_units',
     'render_template',
     'stop_stale_hermes_processes',
 ]

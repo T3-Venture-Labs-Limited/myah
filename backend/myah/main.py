@@ -95,7 +95,7 @@ from myah.routers import oss as oss_router_module
 from myah.utils.hermes_web import is_oss_mode as _is_oss_mode
 
 if not _is_oss_mode():
-    from myah.routers import agent_memory, integrations
+    from myah.routers import admin_cron_deliveries, agent_memory, integrations
 
 
 from sqlalchemy.orm import Session
@@ -402,6 +402,23 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(periodic_usage_pool_cleanup())
     asyncio.create_task(periodic_session_pool_cleanup())
 
+    # Cron delivery outbox worker (T3-1087). Only runs in shadow + outbox modes;
+    # legacy skips registration so OSS-default users see zero new background tasks.
+    # Mode is read via get_cron_delivery_mode() (function call, not module-level
+    # constant — per plan-review C-E).
+    from myah.env import get_cron_delivery_mode
+    from myah.utils.cron_outbox_lifespan import register_outbox_worker_if_enabled
+
+    register_outbox_worker_if_enabled(app, get_cron_delivery_mode())
+
+    # Cron outbox cleanup task — same gate as the worker (per plan-review C-E:
+    # call get_cron_delivery_mode() each time so monkeypatched env vars in tests
+    # take effect; don't bind a module-level constant).
+    if get_cron_delivery_mode() in ('shadow', 'outbox'):
+        from myah.utils.cron_outbox_cleanup import periodic_cron_outbox_cleanup
+
+        asyncio.create_task(periodic_cron_outbox_cleanup())
+
     if app.state.config.ENABLE_BASE_MODELS_CACHE:
         try:
             await get_all_models(
@@ -562,6 +579,14 @@ async def lifespan(app: FastAPI):
     app.state.startup_complete = True
 
     yield
+
+    # Cron outbox worker — graceful shutdown.
+    if hasattr(app.state, 'cron_outbox_worker'):
+        app.state.cron_outbox_worker.stop()
+        try:
+            await asyncio.wait_for(app.state.cron_outbox_worker_task, timeout=5.0)
+        except (TimeoutError, asyncio.CancelledError):
+            app.state.cron_outbox_worker_task.cancel()
 
     if os.environ.get('LANGFUSE_SECRET_KEY'):
         try:
@@ -942,6 +967,7 @@ app.include_router(agent_sessions.router, prefix='/api/v1/agent', tags=['agent-s
 # top of this file — agent_memory is only imported in the hosted build.
 if not _is_oss_mode():
     app.include_router(agent_memory.router, prefix='/api/v1/agent/memory', tags=['agent-memory'])
+    app.include_router(admin_cron_deliveries.router)
 
 app.include_router(hermes_media.router, prefix='/api/v1/hermes/media', tags=['hermes_media'])
 app.include_router(myah_router_module.router, prefix='/api/v1/myah', tags=['myah'])
@@ -1073,7 +1099,6 @@ def get_model_profile_image(id: str, user=Depends(get_verified_user)):
                 return RedirectResponse(url=model.meta.profile_image_url)
 
     return RedirectResponse(url='/static/favicon.png')
-
 
 
 @app.post('/api/chat/completions')
@@ -1895,32 +1920,32 @@ async def oauth_login_callback(
 @app.get('/manifest.json')
 async def get_manifest_json():
     return {
-            'name': app.state.WEBUI_NAME,
-            'short_name': app.state.WEBUI_NAME,
-            'description': f'{app.state.WEBUI_NAME} is an open, extensible, user-friendly interface for AI that adapts to your workflow.',
-            'start_url': '/',
-            'display': 'standalone',
-            'background_color': '#343541',
-            'icons': [
-                {
-                    'src': '/static/logo.png',
-                    'type': 'image/png',
-                    'sizes': '500x500',
-                    'purpose': 'any',
-                },
-                {
-                    'src': '/static/logo.png',
-                    'type': 'image/png',
-                    'sizes': '500x500',
-                    'purpose': 'maskable',
-                },
-            ],
-            'share_target': {
-                'action': '/',
-                'method': 'GET',
-                'params': {'text': 'shared'},
+        'name': app.state.WEBUI_NAME,
+        'short_name': app.state.WEBUI_NAME,
+        'description': f'{app.state.WEBUI_NAME} is an open, extensible, user-friendly interface for AI that adapts to your workflow.',
+        'start_url': '/',
+        'display': 'standalone',
+        'background_color': '#343541',
+        'icons': [
+            {
+                'src': '/static/logo.png',
+                'type': 'image/png',
+                'sizes': '500x500',
+                'purpose': 'any',
             },
-        }
+            {
+                'src': '/static/logo.png',
+                'type': 'image/png',
+                'sizes': '500x500',
+                'purpose': 'maskable',
+            },
+        ],
+        'share_target': {
+            'action': '/',
+            'method': 'GET',
+            'params': {'text': 'shared'},
+        },
+    }
 
 
 @app.get('/opensearch.xml')
@@ -2022,6 +2047,8 @@ async def serve_cache_file(
 )
 async def api_not_found(path: str) -> None:
     raise HTTPException(status_code=404, detail='Not Found')
+
+
 # ────────────────────────────────────────────────────────────────────────────
 
 

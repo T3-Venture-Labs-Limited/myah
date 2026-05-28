@@ -24,7 +24,12 @@
 
 	export let onClose: Function = () => {};
 
-	$: isDefault = $defaultModel === model?.id;
+	// Compare the structured pair (post 2026-05-24) against this model's
+	// (provider, id) — bare id alone is not unique when multiple providers
+	// expose the same model id (the original T3-1031 disambiguation case).
+	$: isDefault =
+		$defaultModel?.model === model?.id &&
+		$defaultModel?.provider === model?.tags?.[0]?.name;
 </script>
 
 <Dropdown

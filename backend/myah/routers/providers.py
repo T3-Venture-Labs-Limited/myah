@@ -261,10 +261,22 @@ async def connect_credential(
         is_valid=True,
     )
 
-    # Set default_model if not already set
+    # Set default (provider, model) pair if not already set. Derive a BARE
+    # model id from the catalog's (often-slash) value — the provider is the
+    # URL path parameter `provider_id`, so strip any matching prefix and
+    # persist the bare model id alongside the explicit provider.
+    bare_default_model = default_model
+    if '/' in bare_default_model and bare_default_model.startswith(f'{provider_id}/'):
+        bare_default_model = bare_default_model[len(provider_id) + 1:]
     current_user = Users.get_user_by_id(user.id)
-    if current_user and not getattr(current_user, 'default_model', None):
-        Users.update_user_by_id(user.id, {'default_model': default_model})
+    if current_user and not (
+        getattr(current_user, 'default_model', None)
+        and getattr(current_user, 'default_provider', None)
+    ):
+        Users.update_user_by_id(
+            user.id,
+            {'default_model': bare_default_model, 'default_provider': provider_id},
+        )
 
     return {
         'provider_id': provider_id,
@@ -403,9 +415,19 @@ async def poll_device_auth(
             key_last_four='',
             is_valid=True,
         )
+        # Derive bare model id (same shape as the connect_credential site).
+        bare_default_model = default_model
+        if '/' in bare_default_model and bare_default_model.startswith(f'{provider_id}/'):
+            bare_default_model = bare_default_model[len(provider_id) + 1:]
         current_user = Users.get_user_by_id(user.id)
-        if current_user and not getattr(current_user, 'default_model', None):
-            Users.update_user_by_id(user.id, {'default_model': default_model})
+        if current_user and not (
+            getattr(current_user, 'default_model', None)
+            and getattr(current_user, 'default_provider', None)
+        ):
+            Users.update_user_by_id(
+                user.id,
+                {'default_model': bare_default_model, 'default_provider': provider_id},
+            )
 
         data['default_model'] = default_model
 
@@ -446,8 +468,22 @@ async def set_active_provider(
     # deploys where the agent image is older than the platform.
     await _sync_agent_active_provider(user, body.provider_id)
 
-    Users.update_user_by_id(user.id, {'default_model': model_id})
-    return {'provider_id': body.provider_id, 'model': model_id}
+    # Normalize to bare model id before persistence. Accept three legacy
+    # input shapes during the transition window so an older frontend can't
+    # 422 us against the new validator:
+    #   bare 'gpt-4o-mini'           → keep as-is
+    #   slash 'openai/gpt-4o-mini'   → strip leading 'openai/'
+    #   composite 'openai::gpt-4o'   → strip leading 'openai::'
+    bare_model_id = model_id
+    if bare_model_id.startswith(f'{body.provider_id}::'):
+        bare_model_id = bare_model_id[len(body.provider_id) + 2:]
+    elif bare_model_id.startswith(f'{body.provider_id}/'):
+        bare_model_id = bare_model_id[len(body.provider_id) + 1:]
+    Users.update_user_by_id(
+        user.id,
+        {'default_model': bare_model_id, 'default_provider': body.provider_id},
+    )
+    return {'provider_id': body.provider_id, 'model': bare_model_id}
 
 
 @router.get('/models')

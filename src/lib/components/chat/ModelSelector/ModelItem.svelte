@@ -27,7 +27,12 @@
 
 	export let onClick: () => void = () => {};
 
-	$: isDefault = $defaultModel === item.value;
+	// Compare the structured pair (post 2026-05-24) against this row's
+	// (provider, model.id). Picker's selection_key is composite but
+	// $defaultModel is now a structured {provider, model} object.
+	$: isDefault =
+		$defaultModel?.model === item.model?.id &&
+		$defaultModel?.provider === item.model?.tags?.[0]?.name;
 
 	const copyLinkHandler = async (model) => {
 		const baseUrl = window.location.origin;
