@@ -83,10 +83,16 @@ def _fail(code: int = 1) -> subprocess.CompletedProcess:
 # ── default: everything removed ────────────────────────────────────────
 
 
-def test_uninstall_default_removes_everything(
+def test_uninstall_default_preserves_existing_hermes_agent(
     fake_repo: Path, fake_hermes_bin: Path, mocker
 ) -> None:
-    """Default `--yes`: docker compose down -v + hermes uninstall --full --yes + remove .env."""
+    """Default `--yes`: docker compose down -v + hermes uninstall --yes + remove .env.
+
+    Myah OSS is bring-your-own-Hermes, so the default uninstall must not pass
+    `--full` to Hermes. Users often install Myah against an existing Hermes
+    profile with real providers, chats, and tasks; deleting that agent is a bad
+    OSS footgun.
+    """
     run_mock = mocker.patch('myah.cli.uninstall.subprocess.run', return_value=_ok())
     env_path = fake_repo / 'platform-oss' / '.env'
     assert env_path.is_file()
@@ -112,11 +118,11 @@ def test_uninstall_default_removes_everything(
         '-v',
     ]
 
-    # hermes uninstall --full --yes
+    # hermes uninstall --yes, but never --full by default.
     hermes_idx = next(
         i for i, c in enumerate(calls) if c[0] == str(fake_hermes_bin) and 'uninstall' in c
     )
-    assert '--full' in calls[hermes_idx]
+    assert '--full' not in calls[hermes_idx]
     assert '--yes' in calls[hermes_idx]
 
     # platform-oss/.env removed
@@ -129,7 +135,7 @@ def test_uninstall_default_removes_everything(
 def test_uninstall_keep_data_preserves_volume_and_hermes_state(
     fake_repo: Path, fake_hermes_bin: Path, mocker
 ) -> None:
-    """`--keep-data`: no `-v` on docker down; no `--full` on hermes uninstall."""
+    """`--keep-data`: no `-v` on docker down; Hermes state is still preserved."""
     run_mock = mocker.patch('myah.cli.uninstall.subprocess.run', return_value=_ok())
 
     result = runner.invoke(app, ['uninstall', '--keep-data', '--yes'])

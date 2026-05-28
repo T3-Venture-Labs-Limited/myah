@@ -37,6 +37,8 @@ class TestGetTemplateText:
         text = service_units._get_template_text(name)
         assert '__HERMES_BIN__' in text
         assert '__HERMES_HOME__' in text
+        if name in ('hermes-dashboard.service.in', 'dev.myah.hermes-dashboard.plist.in'):
+            assert '__HERMES_WEB_SESSION_TOKEN__' in text
 
     def test_unknown_template_raises_file_not_found(self) -> None:
         with pytest.raises(FileNotFoundError):
@@ -61,17 +63,24 @@ class TestRenderTemplate:
     def test_launchd_plist_substitutes_all_marker_positions(self, tmp_path: Path) -> None:
         """The plist has __HERMES_HOME__ in multiple positions including
         StandardOutPath + StandardErrorPath. Verify ALL are substituted,
-        not just the first."""
+        not just the first. Dashboard units also embed the web-session token
+        because launchd does not source <hermes_home>/.env.
+        """
+        hermes_home = tmp_path / '.hermes'
+        hermes_home.mkdir()
+        (hermes_home / '.env').write_text('HERMES_WEB_SESSION_TOKEN=tok-123\n')
         rendered = service_units.render_template(
-            'dev.myah.hermes-gateway.plist.in',
+            'dev.myah.hermes-dashboard.plist.in',
             hermes_bin='/usr/local/bin/hermes',
-            hermes_home=tmp_path / '.hermes',
+            hermes_home=hermes_home,
         )
         assert '__HERMES_BIN__' not in rendered
         assert '__HERMES_HOME__' not in rendered
+        assert '__HERMES_WEB_SESSION_TOKEN__' not in rendered
+        assert 'tok-123' in rendered
         # plist references HOME at minimum 3 times: EnvironmentVariables,
         # StandardOutPath, StandardErrorPath. Count substituted occurrences.
-        assert rendered.count(str(tmp_path / '.hermes')) >= 3
+        assert rendered.count(str(hermes_home)) >= 3
 
     def test_empty_hermes_bin_raises_value_error(self, tmp_path: Path) -> None:
         with pytest.raises(ValueError, match='hermes_bin'):
@@ -656,6 +665,8 @@ class TestInstallLaunchdPlists:
             assert '__HERMES_BIN__' not in text
             assert '__HERMES_HOME__' not in text
             assert '/usr/local/bin/hermes' in text
+            if service == 'dev.myah.hermes-dashboard':
+                assert 'HERMES_WEB_SESSION_TOKEN' in text
 
             # bootout-then-bootstrap call pair per service.
             assert any(
