@@ -13,12 +13,11 @@ instead of remembering the sequence:
   2.5. ``remove_service_units()`` — symmetric teardown of the launchd
      plists / systemd-user units that ``myah install`` laid down.
      Idempotent; no-op on platforms where nothing was installed.
-  3. ``hermes uninstall [--full] --yes`` — removes the Hermes runtime
-     and (with ``--full``) its data + config. Hermes treats data and
-     config as one bundle, so the ``--keep-data`` and ``--keep-config``
-     flags are partially redundant at the Hermes layer: either one
-     drops ``--full`` and Hermes preserves both. They differ at the
-     Myah platform layer (docker volume vs platform .env).
+  3. ``hermes uninstall --yes`` — unregisters/stops Hermes services while
+     preserving the user's existing Hermes runtime, config, providers, and
+     chat/task data. ``myah install`` is bring-your-own-Hermes; it must not
+     destroy a pre-existing agent by default. Opt-in nuke is available via
+     ``--force-purge-hermes`` (see flag help).
   4. Remove the platform ``.env`` unless ``--keep-config``. The path
      is layout-aware via ``find_platform_env_path`` — monorepo writes
      to ``<root>/platform-oss/.env``; public mirror writes to
@@ -57,16 +56,12 @@ def uninstall_command(
     keep_data: bool = typer.Option(
         False,
         '--keep-data',
-        help='Preserve the platform SQLite volume and Hermes data. '
-        'NOTE: Hermes treats data + config as one bundle, so this also '
-        'prevents `--full` removal of Hermes state.',
+        help='Preserve the platform SQLite volume. Hermes runtime/data is preserved by default.',
     ),
     keep_config: bool = typer.Option(
         False,
         '--keep-config',
-        help='Preserve platform `.env` and Hermes config. '
-        'NOTE: Hermes treats data + config as one bundle, so this also '
-        'prevents `--full` removal of Hermes state.',
+        help='Preserve platform `.env`. Hermes config is preserved by default.',
     ),
     yes: bool = typer.Option(
         False,
@@ -101,11 +96,15 @@ def uninstall_command(
         )
         raise typer.Exit(code=2)
 
-    # Hermes treats data + config as one bundle — `--full` removes both
-    # together. If the user wants to keep either one, we have to drop
-    # `--full` and live with Hermes preserving both. Documented in the
-    # docstring + the help text above.
-    hermes_full = not (keep_data or keep_config)
+    # Myah OSS is bring-your-own-Hermes. A plain `myah uninstall` should tear
+    # down Myah's platform and unregister/stop Hermes services, but it must not
+    # call `hermes uninstall --full`: that would delete the user's existing
+    # Hermes runtime/config/providers/chat history even when Myah did not create
+    # that agent. The opt-in nuke path is `--force-purge-hermes`, which runs
+    # `rm -rf $HERMES_HOME` directly after the soft hermes uninstall — it does
+    # not need `--full` to do its job. Keep the flag variable for the
+    # confirmation/argv plumbing, but default it to safe-preserve behavior.
+    hermes_full = False
 
     # Step 1 — confirm (unless --yes).
     if not yes:

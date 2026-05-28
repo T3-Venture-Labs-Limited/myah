@@ -20,6 +20,8 @@
     <dict>
         <key>HERMES_HOME</key>
         <string>__HERMES_HOME__</string>
+        <key>HERMES_WEB_SESSION_TOKEN</key>
+        <string>__HERMES_WEB_SESSION_TOKEN__</string>
     </dict>
     <key>RunAtLoad</key>
     <true/>

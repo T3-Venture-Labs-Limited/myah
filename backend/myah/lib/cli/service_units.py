@@ -33,6 +33,7 @@ from pathlib import Path
 
 from loguru import logger
 
+from myah.lib.cli.env_loader import parse_env_file
 from myah.lib.cli.shell import ShellError, run
 
 # Process patterns to clean up before handing over to systemctl/launchctl.
@@ -120,7 +121,26 @@ def render_template(template_name: str, *, hermes_bin: str, hermes_home: Path) -
     """
     _validate_hermes_bin(hermes_bin)
     text = _get_template_text(template_name)
-    return text.replace('__HERMES_BIN__', hermes_bin).replace('__HERMES_HOME__', str(hermes_home))
+    web_token = _read_hermes_web_session_token(hermes_home)
+    return (
+        text.replace('__HERMES_BIN__', hermes_bin)
+        .replace('__HERMES_HOME__', str(hermes_home))
+        .replace('__HERMES_WEB_SESSION_TOKEN__', web_token)
+    )
+
+
+def _read_hermes_web_session_token(hermes_home: Path) -> str:
+    """Read the dashboard bearer token from ``<hermes_home>/.env``.
+
+    ``launchd`` and ``systemd`` do not source ``.env`` files. The dashboard
+    process reads ``HERMES_WEB_SESSION_TOKEN`` from its process environment at
+    startup, so the rendered service files must carry the token explicitly.
+    Otherwise the platform container sends ``Authorization: Bearer`` while the
+    dashboard expects an empty/different token, and every
+    ``/api/plugins/myah-admin/*`` call returns 401. That is exactly the OSS
+    symptom where providers are visible but the model picker is empty.
+    """
+    return parse_env_file(hermes_home / '.env').get('HERMES_WEB_SESSION_TOKEN', '')
 
 
 def _pgrep_kill_pass(signal: str, *, count: bool) -> int:
