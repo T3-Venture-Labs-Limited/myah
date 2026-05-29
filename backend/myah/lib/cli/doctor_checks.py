@@ -183,16 +183,14 @@ def check_platform_container_running() -> CheckResult:
     - daemon up, container present → OK
     """
     try:
-        result = run(
-            [
-                'docker',
-                'ps',
-                '--filter',
-                'name=myah-platform',
-                '--format',
-                '{{.ID}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}\t{{.Names}}',
-            ]
-        )
+        result = run([
+            'docker',
+            'ps',
+            '--filter',
+            'label=com.docker.compose.service=platform',
+            '--format',
+            '{{.ID}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}\t{{.Names}}',
+        ])
     except FileNotFoundError:
         return CheckResult(
             name='myah-platform container',
@@ -208,7 +206,7 @@ def check_platform_container_running() -> CheckResult:
                 f'{result.stderr.strip() or "unknown error"}'
             ),
         )
-    if 'myah-platform' in result.stdout:
+    if result.stdout.strip():
         return CheckResult(
             name='myah-platform container',
             status=CheckStatus.OK,
@@ -337,6 +335,12 @@ def check_agent_container_env_injection(
             message='docker binary not found; cannot inspect agent container env.',
         )
     if result.returncode != 0:
+        if _oss_platform_container_running():
+            return CheckResult(
+                name='agent container env injection',
+                status=CheckStatus.OK,
+                message='OSS mode uses host Hermes; no per-user agent container env injection is required',
+            )
         # Container not running or doesn't exist — caller will see this as a
         # separate WARN from check_platform_container_running. Not our domain.
         return CheckResult(
@@ -369,6 +373,26 @@ def check_agent_container_env_injection(
         status=CheckStatus.OK,
         message='MYAH_PLATFORM_BASE_URL and MYAH_PLATFORM_BEARER both present',
     )
+
+
+def _oss_platform_container_running() -> bool:
+    """Return True when the compose platform container is running in OSS mode."""
+    result = run(['docker', 'ps', '--filter', 'label=com.docker.compose.service=platform', '-q'])
+    if result.returncode != 0 or not result.stdout.strip():
+        return False
+    container_id = result.stdout.splitlines()[0].strip()
+    if not container_id:
+        return False
+    env_result = run([
+        'docker',
+        'inspect',
+        container_id,
+        '--format',
+        '{{range .Config.Env}}{{println .}}{{end}}',
+    ])
+    if env_result.returncode != 0:
+        return False
+    return any(line == 'MYAH_DEPLOYMENT_MODE=oss' for line in env_result.stdout.splitlines())
 
 
 # The doctor checks above answer "is the running stack healthy?" — they

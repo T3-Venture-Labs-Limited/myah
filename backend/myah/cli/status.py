@@ -47,7 +47,7 @@ def _platform_container_running() -> bool:
     'nothing here at all' (red). Tolerant of docker absence — a failed
     `docker ps` simply means we cannot prove the container is up.
     """
-    result = run(['docker', 'ps', '--filter', 'name=myah-platform', '-q'])
+    result = run(['docker', 'ps', '--filter', 'label=com.docker.compose.service=platform', '-q'])
     return result.returncode == 0 and bool(result.stdout.strip())
 
 

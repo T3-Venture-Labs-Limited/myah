@@ -37,6 +37,8 @@ def test_quickstart_runs_install_then_platform_up_then_doctor(all_quickstart_moc
     all_quickstart_mocks['install'].assert_called_once()
     all_quickstart_mocks['platform_up'].assert_called_once()
     all_quickstart_mocks['doctor'].assert_called_once()
+    assert 'What this does' in result.stdout
+    assert 'Open http://localhost:8080' in result.stdout
 
 
 def test_quickstart_forwards_openrouter_key_to_install(all_quickstart_mocks):

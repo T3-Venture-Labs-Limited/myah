@@ -236,3 +236,49 @@ def test_aggregator_returns_list_of_check_results(monkeypatch: pytest.MonkeyPatc
 
     assert isinstance(results, list)
     assert all(isinstance(r, CheckResult) for r in results)
+
+
+def test_platform_container_running_accepts_compose_generated_names(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Public OSS compose names containers like `myah-oss-platform-1`.
+
+    The doctor must not look only for the old hard-coded `myah-platform`
+    name, otherwise a healthy compose stack reports a false WARN.
+    """
+    from myah.lib.cli import doctor_checks
+    from myah.lib.cli.shell import ShellResult
+
+    monkeypatch.setattr(
+        doctor_checks,
+        'run',
+        lambda _cmd: ShellResult(
+            returncode=0,
+            stdout='abc123\tmyah/platform:latest\tUp 5 minutes\t127.0.0.1:8080->8080/tcp\tmyah-oss-platform-1\n',
+            stderr='',
+        ),
+    )
+
+    result = doctor_checks.check_platform_container_running()
+
+    assert result.status == CheckStatus.OK
+
+
+def test_agent_env_injection_is_ok_for_oss_mode_without_agent_container(monkeypatch: pytest.MonkeyPatch) -> None:
+    """OSS mode uses host Hermes, not per-user `myah-agent-*` containers."""
+    from myah.lib.cli import doctor_checks
+    from myah.lib.cli.shell import ShellResult
+
+    def fake_run(cmd: list[str]) -> ShellResult:
+        if cmd[:3] == ['docker', 'exec', 'myah-agent-00000000-0000-0000-0000-000000000001']:
+            return ShellResult(returncode=1, stdout='', stderr='No such container')
+        if cmd[:5] == ['docker', 'ps', '--filter', 'label=com.docker.compose.service=platform', '-q']:
+            return ShellResult(returncode=0, stdout='platform123\n', stderr='')
+        if cmd[:2] == ['docker', 'inspect']:
+            return ShellResult(returncode=0, stdout='MYAH_DEPLOYMENT_MODE=oss\n', stderr='')
+        return ShellResult(returncode=1, stdout='', stderr='unexpected')
+
+    monkeypatch.setattr(doctor_checks, 'run', fake_run)
+
+    result = doctor_checks.check_agent_container_env_injection()
+
+    assert result.status == CheckStatus.OK
+    assert 'OSS mode' in result.message
