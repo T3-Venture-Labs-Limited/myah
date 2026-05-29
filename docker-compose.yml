@@ -70,7 +70,7 @@ services:
       # '0.0.0.0:8080:8080' AND re-enable auth by setting MYAH_AUTH=true
       # (also recommended: set a strong MYAH_SECRET_KEY).
       # See `docs/oss-vs-hosted.md` -> Network access for the full procedure.
-      - '127.0.0.1:8080:8080'
+      - '${MYAH_PLATFORM_BIND:-127.0.0.1}:8080:8080'
     volumes:
       - platform_data:/app/backend/data
     env_file: .env

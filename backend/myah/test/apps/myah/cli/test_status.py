@@ -30,6 +30,22 @@ def test_status_lists_known_services(mocker) -> None:
     assert 'dashboard' in result.stdout.lower()
 
 
+def test_status_platform_container_detection_accepts_compose_generated_name(mocker) -> None:
+    """Status should detect `myah-oss-platform-1`, not only `myah-platform`."""
+    from myah.lib.cli.shell import ShellResult
+
+    run_mock = mocker.patch(
+        'myah.cli.status.run',
+        return_value=ShellResult(returncode=0, stdout='abc123\n', stderr=''),
+    )
+
+    from myah.cli.status import _platform_container_running
+
+    assert _platform_container_running() is True
+    cmd = run_mock.call_args.args[0]
+    assert 'label=com.docker.compose.service=platform' in cmd
+
+
 def test_status_shows_ports(mocker) -> None:
     """Status output includes the port numbers for each service."""
     from myah.lib.cli.shell import ShellResult

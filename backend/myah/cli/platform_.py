@@ -34,6 +34,7 @@ is intentionally named ``platform_app`` to avoid colliding with stdlib
 
 from __future__ import annotations
 
+import os
 import shutil
 from pathlib import Path
 
@@ -138,6 +139,20 @@ def platform_up(
             'simplification S3.'
         ),
     ),
+    bind: str = typer.Option(
+        None,
+        '--bind',
+        help=(
+            'Host interface for the platform port binding. Default is '
+            '127.0.0.1 for local-only access. Use 0.0.0.0 for '
+            'Tailscale/LAN access; enable auth first on untrusted networks.'
+        ),
+    ),
+    expose: bool = typer.Option(
+        False,
+        '--expose',
+        help='Shortcut for --bind 0.0.0.0 so Myah is reachable over Tailscale/LAN.',
+    ),
 ) -> None:
     """Start the platform container (detached).
 
@@ -149,6 +164,18 @@ def platform_up(
     ``if rm_orphans:`` — yes, this is a subtle quirk).
     """
     base = _preflight_or_exit()
+    bind_host = '0.0.0.0' if expose else bind
+    compose_env = None
+    if bind_host:
+        if bind_host not in {'127.0.0.1', 'localhost', '0.0.0.0'}:
+            from rich.console import Console
+
+            Console().print(
+                '[red]✗[/] unsupported --bind value. Use '
+                '[cyan]127.0.0.1[/] for local-only or [cyan]0.0.0.0[/] for Tailscale/LAN.'
+            )
+            raise typer.Exit(code=2)
+        compose_env = {**os.environ, 'MYAH_PLATFORM_BIND': bind_host}
 
     # Pre-A.2 orphan detection.
     orphan_id = _check_for_orphan_container()
@@ -179,7 +206,10 @@ def platform_up(
             )
             raise typer.Exit(code=125)  # docker's "container conflict" code
 
-    emit_result_or_exit(run([*base, 'up', '-d']))
+    if compose_env is not None:
+        emit_result_or_exit(run([*base, 'up', '-d'], env=compose_env))
+    else:
+        emit_result_or_exit(run([*base, 'up', '-d']))
 
 
 @platform_app.command('down')

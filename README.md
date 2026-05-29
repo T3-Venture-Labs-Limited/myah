@@ -42,6 +42,14 @@ open http://localhost:8080  # macOS
 # or visit http://localhost:8080 in your browser
 ```
 
+If you prefer one command after installing the CLI, use:
+
+```bash
+myah quickstart
+```
+
+`myah quickstart` prints the phases it is running, starts the platform, and finishes with `myah doctor` so failures include a health table instead of leaving you guessing.
+
 That is the normal path. After the first run, day-to-day startup is just:
 
 ```bash
@@ -96,6 +104,17 @@ On Linux this uses systemd-user. On macOS this uses launchd. These are installed
 
 Starts the Myah web app container with Docker Compose.
 
+By default this is local-only and publishes `127.0.0.1:8080->8080`, so `http://localhost:8080` works on the same machine but `http://<tailscale-ip>:8080` does not.
+
+For trusted Tailscale/LAN access:
+
+```bash
+myah platform up --expose
+# same as: myah platform up --bind 0.0.0.0
+```
+
+Then open `http://<your-tailscale-ip>:8080` from another device.
+
 The app is available at:
 
 ```text
@@ -139,6 +158,22 @@ By default:
 
 - Myah binds to `127.0.0.1:8080`, so it is only reachable from your machine.
 - The Hermes dashboard binds to `0.0.0.0:9119` so the Docker container can reach it.
+
+To use Myah from another device over Tailscale:
+
+```bash
+tailscale ip -4
+myah platform up --expose
+open http://<tailscale-ip>:8080
+```
+
+If it still does not open, verify the publish address:
+
+```bash
+docker ps --filter label=com.docker.compose.service=platform --format '{{.Names}}  {{.Ports}}'
+```
+
+You want to see `0.0.0.0:8080->8080/tcp` for remote access. If you see `127.0.0.1:8080->8080/tcp`, the platform is intentionally local-only; run `myah platform up --expose` again.
 
 That means port `9119` may be reachable from your LAN. On an untrusted network, block port `9119` from non-local traffic with your firewall.
 
@@ -191,6 +226,7 @@ Common fixes:
 | Symptom | Try |
 |---|---|
 | Blank page on first load | `myah logs platform -n 100` then `myah doctor` |
+| `http://<tailscale-ip>:8080` does not open but `localhost:8080` works | The platform is probably published to loopback only. Run `myah platform up --expose`, then verify Docker shows `0.0.0.0:8080->8080/tcp`. |
 | `myah status` says a component is stopped but the app works | An older Hermes process may own the port. Run `pkill -f "hermes gateway" && pkill -f "hermes dashboard" && myah agent up`. |
 | Settings page is empty | Check the dashboard: `curl -s -o /dev/null -w '%{http_code}\n' http://localhost:9119/`. Any HTTP code means it is running. Then run `myah agent restart`. |
 | Provider key in `~/.hermes/.env` is not detected | Run `myah env set --scope hermes OPENROUTER_API_KEY sk-or-v1-...` then `myah agent restart`. |

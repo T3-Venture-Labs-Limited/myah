@@ -80,6 +80,33 @@ def test_platform_up_invokes_docker_compose_up_dash_d(fake_env: Path, mocker) ->
     ]
 
 
+def test_platform_up_bind_option_sets_compose_port_binding_env(fake_env: Path, mocker) -> None:
+    """`myah platform up --bind 0.0.0.0` exposes the platform beyond localhost.
+
+    The compose file reads MYAH_PLATFORM_BIND in its port mapping. The CLI
+    should pass that env var only for this command, so users do not need to
+    hand-edit docker-compose.yml just to access Myah over Tailscale/LAN.
+    """
+    run_mock = mocker.patch('myah.cli.platform_.run', return_value=_ok())
+
+    result = runner.invoke(app, ['platform', 'up', '--bind', '0.0.0.0'])
+
+    assert result.exit_code == 0, result.stdout
+    compose_call = run_mock.call_args_list[-1]
+    assert compose_call.kwargs['env']['MYAH_PLATFORM_BIND'] == '0.0.0.0'
+
+
+def test_platform_up_expose_alias_sets_public_bind(fake_env: Path, mocker) -> None:
+    """`--expose` is the easy-mode alias for remote/Tailscale access."""
+    run_mock = mocker.patch('myah.cli.platform_.run', return_value=_ok())
+
+    result = runner.invoke(app, ['platform', 'up', '--expose'])
+
+    assert result.exit_code == 0, result.stdout
+    compose_call = run_mock.call_args_list[-1]
+    assert compose_call.kwargs['env']['MYAH_PLATFORM_BIND'] == '0.0.0.0'
+
+
 def test_platform_down_invokes_docker_compose_down(fake_env: Path, mocker) -> None:
     """`myah platform down` invokes `docker compose -f <root>/docker-compose.yml down`.
 

@@ -278,7 +278,7 @@ Controls the Myah FastAPI platform container. **Not a Hermes wrapper** — this 
 ### Synopsis
 
 ```bash
-myah platform up
+myah platform up [--bind 127.0.0.1|0.0.0.0] [--expose]
 myah platform down
 myah platform restart
 ```
@@ -287,7 +287,7 @@ myah platform restart
 
 | Subcommand | Purpose                                                                                                              |
 | ---------- | -------------------------------------------------------------------------------------------------------------------- |
-| `up`       | `docker compose up -d` — always detached.                                                                            |
+| `up`       | `docker compose up -d` — always detached. Defaults to local-only `127.0.0.1:8080`. Use `--expose` for Tailscale/LAN. |
 | `down`     | `docker compose down` — **does NOT pass `-v`** (preserves the SQLite volume; SQLite-data-loss footgun guard).            |
 | `restart`  | `docker compose restart`.                                                                                            |
 
@@ -297,6 +297,10 @@ myah platform restart
 # After myah install, bring up the platform
 myah platform up
 
+# Expose the web UI over trusted Tailscale/LAN
+myah platform up --expose
+# equivalent: myah platform up --bind 0.0.0.0
+
 # Pull a fresh image then restart
 docker compose pull && myah platform restart
 ```
@@ -304,6 +308,7 @@ docker compose pull && myah platform restart
 ### Notes
 
 - The `-v` omission on `down` is **intentional** — see `cli/platform_.py:109-113`. If you really want to nuke the data volume, use `docker compose -f docker-compose.yml down -v` directly. `myah uninstall --rotate` is the supported path for full teardown.
+- `myah platform up --expose` publishes the platform as `0.0.0.0:8080->8080/tcp`; this is convenient for Tailscale but should only be used on trusted networks. The default remains `127.0.0.1` so a fresh OSS install is not LAN-exposed by accident.
 
 ---
 

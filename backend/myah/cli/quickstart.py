@@ -69,6 +69,13 @@ def quickstart_command(
     console = Console()
 
     chosen_service = service or _default_service_for_platform()
+    console.print(
+        '[bold]What this does:[/] connect Myah to your existing Hermes install, '
+        'start the Myah Docker container, then run health checks.'
+    )
+    console.print(
+        f'[dim]Service manager: {chosen_service}; platform URL: http://localhost:8080[/]'
+    )
 
     # ─── Step 1/3: install ────────────────────────────────────────────
     console.print('[bold cyan]Step 1/3:[/] myah install')
