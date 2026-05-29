@@ -29,6 +29,39 @@ router = APIRouter()
 _catalog_cache: dict | None = None
 _catalog_lock = asyncio.Lock()
 
+# In-process unified-models cache. TTL = 30s. Purpose: the fan-out to each
+# connected provider's /api/plugins/myah-admin/providers/<pid>/models is bound
+# by the slowest provider's latency (e.g. Copilot ~2.5s observed). A 30s TTL
+# means rapid page navigations after the first load skip the fan-out entirely.
+#
+# Key shape: (user_id, deployment_mode, provider_ids_tuple). The provider tuple
+# preserves order because get_unified_models's output order is part of the
+# #188 contract (DB providers first, then CLI/catalog providers). Including
+# the resolved provider set in the key means CLI-side mutations (e.g.
+# `hermes config set …`) cause an automatic cache miss on the next call —
+# without that, OSS users could see stale providers for up to 30s because the
+# CLI bypasses every platform credential endpoint that calls
+# _invalidate_unified_models_cache.
+import time as _time
+
+_UnifiedCacheKey = tuple[str, str, tuple[str, ...]]
+_unified_models_cache: dict[_UnifiedCacheKey, tuple[float, list]] = {}
+_unified_models_ttl_seconds = 30.0
+
+
+def _invalidate_unified_models_cache(user_id: str | None = None) -> None:
+    """Drop unified-models cache for a user (or all users when user_id is None).
+
+    Because the cache key is a composite (user_id, mode, providers), clearing
+    a single user means evicting every entry whose first tuple element matches.
+    """
+    if user_id is None:
+        _unified_models_cache.clear()
+        return
+    stale_keys = [k for k in _unified_models_cache if k[0] == user_id]
+    for k in stale_keys:
+        _unified_models_cache.pop(k, None)
+
 
 async def _load_catalog(user) -> dict:
     """Fetch catalog from the user's container; cache in-process.
@@ -278,6 +311,8 @@ async def connect_credential(
             {'default_model': bare_default_model, 'default_provider': provider_id},
         )
 
+    _invalidate_unified_models_cache(user.id)
+
     return {
         'provider_id': provider_id,
         'default_model': default_model,
@@ -298,6 +333,7 @@ async def delete_credential(
         f'/api/plugins/myah-admin/providers/{provider_id}/credential/{entry_id}',
     )
     _invalidate_catalog_cache()
+    _invalidate_unified_models_cache(user.id)
     return result
 
 
@@ -314,6 +350,7 @@ async def delete_all_credentials(
     )
     UserProviderStatuses.delete(user.id, provider_id)
     _invalidate_catalog_cache()
+    _invalidate_unified_models_cache(user.id)
     return result
 
 
@@ -430,6 +467,7 @@ async def poll_device_auth(
             )
 
         data['default_model'] = default_model
+        _invalidate_unified_models_cache(user.id)
 
     return data
 
@@ -488,18 +526,29 @@ async def set_active_provider(
 
 @router.get('/models')
 async def get_unified_models(user=Depends(get_verified_user)):
-    """Fan-out to each connected provider's model list."""
+    """Fan-out to each connected provider's model list.
+
+    Performance: per-provider fetches run concurrently via asyncio.gather
+    instead of sequentially. With N providers, total wall time drops from
+    sum(provider_latency) to max(provider_latency).
+
+    Composite identity (T3-1031 Phase 1 foundation): the same model id
+    can be offered by multiple providers (e.g. 'anthropic/claude-opus-4.7'
+    from both Nous and OpenRouter). Every variant is returned as its own
+    entry with `tags: [{name: provider_id}]` and a unique `selection_key`
+    of `f"{provider_id}::{model_id}"`. The frontend uses `selection_key`
+    as the Svelte each-block key so duplicates render as separate rows,
+    each with the correct provider tag (driving the per-row logo).
+
+    Per-provider Hermes calls are timed for diagnostic logging — useful
+    for spotting a single slow provider that drags total latency up to
+    its tail.
+    """
+    from myah.utils.hermes_web import is_oss_mode
+
     statuses = UserProviderStatuses.list_for_user(user.id)
     valid_providers = [s.provider_id for s in statuses if s.is_valid]
 
-    # ── Myah OSS: union with hermes catalog ─────────────────────────
-    # CLI-configured providers (`hermes config set …`) never reach the
-    # platform's UserProviderStatuses table. Union them in so the
-    # picker's fan-out covers them too. Previously this branch only
-    # fired when the DB was empty, which left a foot-gun: onboarding
-    # even one provider via the UI disengaged the fallback forever and
-    # every CLI-configured provider disappeared from the dropdown.
-    # See _oss_union_with_hermes_catalog (hosted: no-op).
     before = len(valid_providers)
     valid_providers = await _oss_union_with_hermes_catalog(user, valid_providers)
     if len(valid_providers) > before:
@@ -507,10 +556,20 @@ async def get_unified_models(user=Depends(get_verified_user)):
             f'OSS: unioned {len(valid_providers) - before} hermes-catalog providers '
             f'into fan-out (total {len(valid_providers)}) for user {user.id}'
         )
-    # ────────────────────────────────────────────────────────────────
 
-    all_models = []
-    for pid in valid_providers:
+    cache_key: _UnifiedCacheKey = (
+        user.id,
+        'oss' if is_oss_mode() else 'hosted',
+        tuple(valid_providers),
+    )
+    cached = _unified_models_cache.get(cache_key)
+    if cached is not None:
+        ts, models = cached
+        if _time.time() - ts < _unified_models_ttl_seconds:
+            return models
+
+    async def _fetch_one(pid: str):
+        t0 = _time.perf_counter()
         try:
             models = await web_call_or_raise(
                 user,
@@ -518,16 +577,34 @@ async def get_unified_models(user=Depends(get_verified_user)):
                 f'/api/plugins/myah-admin/providers/{pid}/models',
             )
         except Exception as exc:
-            logger.warning(f'Failed to fetch models for provider {pid}: {exc}')
-            continue
+            elapsed = (_time.perf_counter() - t0) * 1000
+            logger.warning(
+                f'Failed to fetch models for provider {pid} after {elapsed:.0f}ms: {exc}'
+            )
+            return pid, []
 
+        elapsed = (_time.perf_counter() - t0) * 1000
         if not isinstance(models, list):
-            logger.warning(f'Provider {pid} returned non-list model payload: {type(models).__name__!r}')
-            continue
+            logger.warning(
+                f'Provider {pid} returned non-list model payload after {elapsed:.0f}ms: '
+                f'{type(models).__name__!r}'
+            )
+            return pid, []
 
+        logger.info(f'provider {pid}: {len(models)} models in {elapsed:.0f}ms')
+        return pid, models
+
+    results = await asyncio.gather(*[_fetch_one(pid) for pid in valid_providers])
+
+    all_models: list[dict] = []
+    for pid, models in results:
         for m in models:
+            mid = m.get('id')
+            if not mid:
+                continue
             m['tags'] = [{'name': pid}]
             m['selection_key'] = f'{pid}::{m["id"]}'
             all_models.append(m)
 
+    _unified_models_cache[cache_key] = (_time.time(), all_models)
     return all_models

@@ -3,9 +3,10 @@
 
 	import { getContext, tick } from 'svelte';
 	import { mobile, settings, user, defaultModel } from '$lib/stores';
-	import { MYAH_API_BASE_URL, MYAH_BASE_URL } from '$lib/constants';
+	import { MYAH_BASE_URL } from '$lib/constants';
 
 	import Tooltip from '$lib/components/common/Tooltip.svelte';
+	import { getProviderMetaOrFallback, resolveLogoProvider } from '$lib/utils/providerRegistry';
 	import { copyToClipboard, sanitizeResponseContent } from '$lib/utils';
 	import Check from '$lib/components/icons/Check.svelte';
 	import ModelItemMenu from './ModelItemMenu.svelte';
@@ -82,27 +83,28 @@
 		<div class="flex items-center gap-2">
 			<div class="flex items-center min-w-fit">
 				<Tooltip content={$user?.role === 'admin' ? (item?.value ?? '') : ''} placement="top-start">
-					<img
-						src={`${MYAH_API_BASE_URL}/models/model/profile/image?id=${item.model.id}&lang=${$i18n.language}`}
-						alt={$i18n.t('{{modelName}} profile image', { modelName: item.label })}
-						class="rounded-full size-5 flex items-center"
-						loading="lazy"
-						on:error={(e) => {
-							e.currentTarget.src = '/favicon.png';
-						}}
-					/>
+					<span
+						class="size-5 rounded-lg bg-white shadow-sm ring-1 ring-gray-200 flex items-center justify-center overflow-hidden shrink-0"
+					>
+						<img
+							src={getProviderMetaOrFallback(
+								resolveLogoProvider(item.model?.id, item.model?.tags?.[0]?.name)
+							).logoUrl}
+							alt={$i18n.t('{{modelName}} profile image', { modelName: item.label })}
+							class="size-4 object-contain"
+							loading="eager"
+							decoding="async"
+							on:error={(e) => {
+								e.currentTarget.src = '/favicon.png';
+							}}
+						/>
+					</span>
 				</Tooltip>
 			</div>
 
 			<div class="flex items-center gap-1.5">
 				<Tooltip content={`${item.label} (${item.value})`} placement="top-start">
-					<div class="line-clamp-1">
-						{item.label}{#if item.model?.tags?.[0]?.name}
-							<span class="text-xs text-gray-500 dark:text-gray-400 ml-1"
-								>— {item.model.tags[0].name}</span
-							>
-						{/if}
-					</div>
+					<div class="line-clamp-1">{item.label}</div>
 				</Tooltip>
 
 				<!-- Myah T3-932: Default model badge -->

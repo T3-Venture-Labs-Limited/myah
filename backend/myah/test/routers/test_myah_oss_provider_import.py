@@ -17,6 +17,23 @@ def _fake_user():
     return SimpleNamespace(id='test-user-oss')
 
 
+@pytest.fixture(autouse=True)
+def _clear_unified_models_cache():
+    """Reset the module-level _unified_models_cache between tests.
+
+    providers.py keeps an in-process cache with a 30s TTL — far longer
+    than the test suite runs. Without this fixture, tests sharing the
+    same `_fake_user()` id would cross-contaminate via cache hits and
+    bypass their own mocked state. See `get_unified_models` for the
+    cache contract (keyed on user.id + deployment mode + provider tuple).
+    """
+    from myah.routers import providers
+
+    providers._unified_models_cache.clear()
+    yield
+    providers._unified_models_cache.clear()
+
+
 @pytest.mark.asyncio
 async def test_get_unified_models_oss_mode_uses_hermes_catalog(monkeypatch):
     """When MYAH_DEPLOYMENT_MODE=oss and platform DB has no
@@ -400,3 +417,70 @@ async def test_get_status_oss_empty_catalog_returns_empty(monkeypatch):
         result = await get_status(user=_fake_user())
 
     assert result == []
+
+
+@pytest.mark.asyncio
+async def test_get_unified_models_cache_invalidates_on_provider_set_change(monkeypatch):
+    """Regression: the unified-models cache must miss when the resolved
+    provider set changes between calls — even without a platform-side
+    credential mutation.
+
+    Scenario this guards against:
+        1. OSS user opens model picker — /models call 1 caches the
+           current catalog state (just openrouter configured).
+        2. User runs `hermes config set anthropic.api_key=…` in their
+           terminal. That writes directly to ~/.hermes/{auth.json,.env},
+           bypassing every platform credential endpoint. No
+           _invalidate_unified_models_cache() runs.
+        3. User refreshes the picker — /models call 2.
+
+    Expected: call 2 sees both openrouter AND anthropic.
+    Regression (the bug this test exists to catch): a cache keyed only
+    on user.id returns call 1's stale openrouter-only list for up to
+    30 seconds, silently bypassing the #188 union contract.
+    """
+    monkeypatch.setenv('MYAH_DEPLOYMENT_MODE', 'oss')
+
+    catalog_state = {
+        'providers': [{'id': 'openrouter', 'has_credential': True}],
+    }
+
+    async def fake_catalog_fetch(user):
+        return list(catalog_state['providers'])
+
+    async def fake_web_call(user, method, path):
+        for p in ('openrouter', 'anthropic'):
+            if path.endswith(f'/{p}/models'):
+                return [{'id': f'{p}/model-1', 'name': f'{p} m1'}]
+        return []
+
+    with (
+        patch(
+            'myah.routers.providers.UserProviderStatuses.list_for_user',
+            return_value=[],
+        ),
+        patch(
+            'myah.utils.hermes_web.fetch_hermes_provider_catalog',
+            side_effect=fake_catalog_fetch,
+        ),
+        patch(
+            'myah.routers.providers.web_call_or_raise',
+            new=AsyncMock(side_effect=fake_web_call),
+        ),
+    ):
+        from myah.routers.providers import get_unified_models
+
+        result_1 = await get_unified_models(user=_fake_user())
+        tags_1 = {m['tags'][0]['name'] for m in result_1}
+        assert tags_1 == {'openrouter'}, f'call 1: expected openrouter only, got {tags_1}'
+
+        catalog_state['providers'].append(
+            {'id': 'anthropic', 'has_credential': True}
+        )
+
+        result_2 = await get_unified_models(user=_fake_user())
+        tags_2 = {m['tags'][0]['name'] for m in result_2}
+        assert tags_2 == {'openrouter', 'anthropic'}, (
+            f'call 2: expected both providers after CLI mutation, got {tags_2} — '
+            'cache served stale state (regression: user-id-only cache key)'
+        )
