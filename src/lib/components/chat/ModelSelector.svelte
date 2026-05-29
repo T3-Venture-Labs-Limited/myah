@@ -54,7 +54,9 @@
 					// back to bare id for legacy models without selection_key.
 					value: model.selection_key ?? model.id,
 					label: model.name,
-					model: model
+					model: model,
+					selection_key:
+						(model as { selection_key?: string }).selection_key ?? `default::${model.id}`
 				}))}
 				{pinModelHandler}
 				bind:value={selectedModels[0]}

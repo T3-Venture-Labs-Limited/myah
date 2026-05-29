@@ -1,6 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
-// Mock fetch globally before any module imports
 const mockFetch = vi.fn();
 global.fetch = mockFetch;
 

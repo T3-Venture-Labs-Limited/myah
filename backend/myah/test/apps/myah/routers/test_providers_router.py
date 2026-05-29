@@ -17,6 +17,23 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _clear_unified_models_cache():
+    """Reset providers._unified_models_cache between tests in this file.
+
+    Every test uses the same `user.id = 'test-user'`. Without this fixture,
+    a prior test's cached fan-out leaks into later tests sharing the same
+    cache key (user_id + deployment_mode + provider tuple) and silently
+    bypasses their mocked state. See providers.get_unified_models for the
+    cache contract.
+    """
+    from myah.routers import providers
+
+    providers._unified_models_cache.clear()
+    yield
+    providers._unified_models_cache.clear()
+
+
 @pytest.mark.asyncio
 async def test_get_unified_models_returns_models_from_all_valid_providers():
     """When the agent returns a list body, the fan-out must produce a

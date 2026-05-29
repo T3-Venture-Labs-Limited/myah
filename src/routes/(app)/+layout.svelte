@@ -54,12 +54,10 @@
 
 	let loaded = false;
 
-	// Guard: at most one setModels() in-flight at a time. A second caller
-	// sets the pending flag so that exactly one follow-up run happens after
-	// the current one finishes — no N concurrent fetches for N rapid
-	// providerStatusV2 updates.
+	// Guard: drop concurrent setModels() callers. The in-flight fetch sees
+	// the latest provider state from the backend, so a queued follow-up is
+	// redundant. See setModels() below for the cold-load cost analysis.
 	let _setModelsInFlight = false;
-	let _setModelsPending = false;
 	// Snapshot of provider IDs + validity used by the reactive block below
 	// so that structurally-identical providerStatusV2 updates (new array
 	// reference, same data) do not re-trigger setModels() unnecessarily.
@@ -143,18 +141,21 @@
 	};
 
 	const setModels = async () => {
-		// Guard: if a fetch is already in flight, mark a pending re-run and bail.
-		// The finally block will drain at most one queued call, ensuring the last
-		// caller's settings (e.g. directConnections from setUserSettings) win.
+		// Coalesce concurrent callers: if a fetch is already in flight, skip
+		// entirely. The in-flight fetch will pick up the latest provider data
+		// from the backend (it reads UserProviderStatuses fresh each call), so
+		// a follow-up fetch is redundant. T3-1050: the previous pending-drain
+		// pattern caused two sequential 2.5s /providers/models calls on cold
+		// load — initial mount fires call #1, providerStatusV2 arrival fires
+		// call #2 reactively, which was queued and then drained, doubling the
+		// cold-load wait. Skipping the queued call collapses the cold-load
+		// model-fetch cost from ~5s to ~2.5s with no change in correctness:
+		// the one in-flight call already grabs the freshest provider data.
 		if (_setModelsInFlight) {
-			_setModelsPending = true;
 			return;
 		}
 		_setModelsInFlight = true;
-		_setModelsPending = false;
 		try {
-			// getModelsWithProviders already merges /api/v1/providers/models
-			// (getModelsUnified) with /api/models? internally — no second call needed.
 			const merged =
 				(await getModelsWithProviders(
 					localStorage.token,
@@ -165,10 +166,6 @@
 			models.set(merged);
 		} finally {
 			_setModelsInFlight = false;
-			if (_setModelsPending) {
-				_setModelsPending = false;
-				void setModels();
-			}
 		}
 	};
 
