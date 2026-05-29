@@ -107,7 +107,7 @@
 	import { getBanners } from '$lib/apis/configs';
 	import { linkProcessToChat } from '$lib/apis/processes';
 	import { scheduleRender } from '$lib/utils/rafScheduler';
-	import { findModelByIdOrSelectionKey } from '$lib/utils/modelSelection';
+	import { findModelByIdOrSelectionKey, selectionMatchesModel } from '$lib/utils/modelSelection';
 	import {
 		saveInflightSnapshot,
 		loadInflightSnapshot,
@@ -2164,7 +2164,7 @@
 						(messages.length == 2 &&
 							messages.at(0)?.role === 'system' &&
 							messages.at(1)?.role === 'user')) &&
-					(selectedModels[0] === model.id || atSelectedModel !== undefined)
+					(selectionMatchesModel(selectedModels[0], model) || atSelectedModel !== undefined)
 						? {
 								title_generation: $settings?.title?.auto ?? true,
 								tags_generation: $settings?.autoTags ?? true

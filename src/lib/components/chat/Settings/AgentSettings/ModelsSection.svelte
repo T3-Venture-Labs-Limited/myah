@@ -64,9 +64,9 @@
 		toggle?: { read: () => boolean; write: (next: boolean) => Promise<void> };
 	};
 
-	// Toggles for title/follow-up generation. The Agent tab is the sole
-	// control surface for these settings (legacy Interface tab duplicates
-	// removed in T3-982).
+	// Toggles for title/follow-up generation. Title generation is also exposed
+	// in Settings > Interface as a convenience toggle; both surfaces write the
+	// same settings.title.auto value so the behavior stays consistent.
 	const auxTasks: AuxTask[] = [
 		{ key: 'vision', label: 'Vision analysis', section: 'aux_vision' },
 		{ key: 'web_extract', label: 'Web page extraction', section: 'aux_web_extract' },

@@ -95,3 +95,17 @@ export function findModelByIdOrSelectionKey<T extends ModelLike>(
 	}
 	return idMatches[0];
 }
+
+/**
+ * Return true when a currently-selected model key refers to the resolved model
+ * row. The picker can hold either a composite `selection_key`
+ * (`provider::model`) or a legacy bare `id`; callers that compare the raw
+ * selection value directly to `model.id` will fail for composite selections.
+ */
+export function selectionMatchesModel(
+	selection: string | undefined,
+	model: ModelLike | undefined
+): boolean {
+	if (!selection || !model) return false;
+	return selection === model.id || selection === model.selection_key;
+}
