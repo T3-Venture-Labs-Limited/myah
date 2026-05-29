@@ -121,10 +121,16 @@ dev = [
     # the DevX + OSS CLI initiative). Without it, every test that requests
     # `mocker` fails at collection with `fixture 'mocker' not found`.
     "pytest-mock>=3.14.0",
+    # Coverage reporting for backend curated tests (T3-1076). Keep reports
+    # informational; do not add hard coverage thresholds here.
+    "pytest-cov>=5.0.0",
     # Codegen for the platform↔Hermes typed contract. See
     # ``platform/scripts/generate-ts-contract.sh`` and
     # ``.github/workflows/contract-typecheck.yml``.
     "pydantic-to-typescript>=2.0.0",
+    # Static-analysis baseline (T3-1077). Keep available through the
+    # standard backend dev install: ``pip install -e '.[dev]'``.
+    "ruff>=0.15.5",
 ]
 
 [project.scripts]

@@ -6,7 +6,7 @@
 		"dev": "vite dev --host",
 		"dev:5050": "vite dev --port 5050",
 		"dev:backend": "([ -d .venv ] || python3 -m venv .venv) && .venv/bin/pip install -q -e '.[dev]' && cd backend && set -a && [ -f ../.env ] && . ../.env; set +a; ../.venv/bin/uvicorn myah.main:app --host 0.0.0.0 --port 8082 --reload --forwarded-allow-ips '*'",
-		"dev:backend:fast": "[ -d .venv ] && cd backend && set -a && [ -f ../.env ] && . ../.env; set +a; ../.venv/bin/uvicorn myah.main:app --host 0.0.0.0 --port 8082 --reload --forwarded-allow-ips '*' || echo 'No .venv \u2014 run: pip install -e .[dev] && npm run dev:backend:fast'",
+		"dev:backend:fast": "[ -d .venv ] && cd backend && set -a && [ -f ../.env ] && . ../.env; set +a; ../.venv/bin/uvicorn myah.main:app --host 0.0.0.0 --port 8082 --reload --forwarded-allow-ips '*' || echo 'No .venv — run: pip install -e .[dev] && npm run dev:backend:fast'",
 		"build": "vite build",
 		"build:watch": "vite build --watch",
 		"preview": "vite preview",
@@ -20,7 +20,8 @@
 		"format": "prettier --write \"**/*.{js,ts,svelte,css,md,html,json}\"",
 		"format:backend": "ruff format . --exclude .venv --exclude venv",
 		"i18n:parse": "i18next --config i18next-parser.config.ts && prettier --write \"src/lib/i18n/**/*.{js,json}\"",
-		"test:frontend": "vitest --passWithNoTests"
+		"test:frontend": "vitest --passWithNoTests",
+		"test:frontend:coverage": "vitest run --coverage --coverage.provider=v8 --coverage.reporter=text --coverage.reporter=lcov --coverage.reporter=json --coverage.reportsDirectory=coverage/frontend"
 	},
 	"devDependencies": {
 		"@sveltejs/adapter-auto": "3.2.2",
@@ -34,9 +35,11 @@
 		"@testing-library/svelte": "5.3.1",
 		"@typescript-eslint/eslint-plugin": "^8.31.1",
 		"@typescript-eslint/parser": "^8.31.1",
+		"@vitest/coverage-v8": "^1.6.1",
 		"eslint": "^8.56.0",
 		"eslint-config-prettier": "^9.1.0",
 		"eslint-plugin-svelte": "^2.45.1",
+		"fallow": "2.84.0",
 		"i18next-parser": "^9.0.1",
 		"jsdom": "25.0.1",
 		"json-schema-to-typescript": "^15.0.4",
