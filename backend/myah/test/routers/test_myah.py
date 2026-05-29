@@ -16,7 +16,7 @@ is treated as the OSS user. Tests cover:
 """
 
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import patch, Mock
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -531,3 +531,272 @@ def test_whoami_oss_skips_providers_without_credential(monkeypatch):
 
     assert resp.status_code == 200
     assert upsert_calls == []
+
+
+# ── Durable final-message fallback ─────────────────────────────────
+
+def test_final_message_requires_bearer(monkeypatch):
+    monkeypatch.setenv('MYAH_AGENT_BEARER_TOKEN', 'tok')
+    client = _make_app()
+
+    resp = client.post(
+        '/api/v1/myah/messages/final',
+        json={
+            'user_id': 'u1',
+            'chat_id': 'chat1',
+            'message_id': 'msg1',
+            'response': 'hello',
+        },
+    )
+
+    assert resp.status_code == 401
+
+
+def test_final_message_persists_assistant_reply(monkeypatch):
+    monkeypatch.setenv('MYAH_AGENT_BEARER_TOKEN', 'tok')
+    client = _make_app()
+
+    fake_chat = SimpleNamespace(id='chat1', user_id='u1', chat={'history': {'messages': {}}})
+    with (
+        patch('myah.routers.myah.Chats.get_chat_by_id_and_user_id', return_value=fake_chat),
+        patch('myah.routers.myah.Chats.upsert_message_to_chat_by_id_and_message_id') as upsert,
+    ):
+        upsert.return_value = fake_chat
+        resp = client.post(
+            '/api/v1/myah/messages/final',
+            headers={'Authorization': 'Bearer tok'},
+            json={
+                'user_id': 'u1',
+                'chat_id': 'chat1',
+                'message_id': 'msg1',
+                'response': 'final answer',
+                'model': 'gpt-5.4',
+                'provider': 'openai-codex',
+            },
+        )
+
+    assert resp.status_code == 200
+    assert resp.json() == {'ok': True, 'message_id': 'msg1'}
+    upsert.assert_called_once()
+    args = upsert.call_args.args
+    assert args[0] == 'chat1'
+    assert args[1] == 'msg1'
+    update = args[2]
+    assert update['role'] == 'assistant'
+    assert update['content'] == 'final answer'
+    assert update['done'] is True
+    assert update['modelUsed'] == {'id': 'gpt-5.4', 'provider': 'openai-codex'}
+
+
+def test_final_message_rejects_wrong_user_chat(monkeypatch):
+    monkeypatch.setenv('MYAH_AGENT_BEARER_TOKEN', 'tok')
+    client = _make_app()
+
+    with patch('myah.routers.myah.Chats.get_chat_by_id_and_user_id', return_value=None):
+        resp = client.post(
+            '/api/v1/myah/messages/final',
+            headers={'Authorization': 'Bearer tok'},
+            json={
+                'user_id': 'u1',
+                'chat_id': 'missing-chat',
+                'message_id': 'msg1',
+                'response': 'final answer',
+            },
+        )
+
+    assert resp.status_code == 404
+
+
+def test_final_message_requires_message_id(monkeypatch):
+    monkeypatch.setenv('MYAH_AGENT_BEARER_TOKEN', 'tok')
+    client = _make_app()
+
+    fake_chat = SimpleNamespace(id='chat1', user_id='u1', chat={'history': {'messages': {}}})
+    with patch('myah.routers.myah.Chats.get_chat_by_id_and_user_id', return_value=fake_chat):
+        resp = client.post(
+            '/api/v1/myah/messages/final',
+            headers={'Authorization': 'Bearer tok'},
+            json={
+                'user_id': 'u1',
+                'chat_id': 'chat1',
+                'response': 'final answer',
+            },
+        )
+
+    assert resp.status_code == 400
+    assert 'message_id' in resp.json()['detail']
+
+
+def test_final_message_rejects_invalid_status(monkeypatch):
+    monkeypatch.setenv('MYAH_AGENT_BEARER_TOKEN', 'tok')
+    client = _make_app()
+
+    fake_chat = SimpleNamespace(id='chat1', user_id='u1', chat={'history': {'messages': {}}})
+    with patch('myah.routers.myah.Chats.get_chat_by_id_and_user_id', return_value=fake_chat):
+        resp = client.post(
+            '/api/v1/myah/messages/final',
+            headers={'Authorization': 'Bearer tok'},
+            json={
+                'user_id': 'u1',
+                'chat_id': 'chat1',
+                'message_id': 'msg1',
+                'response': 'final answer',
+                'status': 'weird',
+            },
+        )
+
+    assert resp.status_code == 400
+    assert 'status' in resp.json()['detail']
+
+
+def test_final_message_emits_active_chat_shaped_completion(monkeypatch):
+    monkeypatch.setenv('MYAH_AGENT_BEARER_TOKEN', 'tok')
+    client = _make_app()
+
+    emitted = []
+
+    class _FakeSio:
+        async def emit(self, event_name, payload, room=None):
+            emitted.append((event_name, payload, room))
+
+    fake_chat = SimpleNamespace(id='chat1', user_id='u1', chat={'history': {'messages': {}}})
+    with (
+        patch('myah.routers.myah.Chats.get_chat_by_id_and_user_id', return_value=fake_chat),
+        patch('myah.routers.myah.Chats.upsert_message_to_chat_by_id_and_message_id', return_value=fake_chat),
+        patch('myah.socket.main.sio', _FakeSio()),
+    ):
+        resp = client.post(
+            '/api/v1/myah/messages/final',
+            headers={'Authorization': 'Bearer tok'},
+            json={
+                'user_id': 'u1',
+                'chat_id': 'chat1',
+                'message_id': 'msg1',
+                'response': 'final answer',
+            },
+        )
+
+    assert resp.status_code == 200
+    completion = next(payload for name, payload, room in emitted if payload['data']['type'] == 'chat:completion')
+    assert completion == {
+        'chat_id': 'chat1',
+        'message_id': 'msg1',
+        'data': {
+            'type': 'chat:completion',
+            'data': {
+                'content': 'final answer',
+                'done': True,
+                'message_id': 'msg1',
+                'chat_id': 'chat1',
+            },
+        },
+    }
+
+
+def test_final_message_duplicate_retry_is_idempotent(monkeypatch):
+    monkeypatch.setenv('MYAH_AGENT_BEARER_TOKEN', 'tok')
+    client = _make_app()
+
+    emitted = []
+
+    class _FakeSio:
+        async def emit(self, event_name, payload, room=None):
+            emitted.append((event_name, payload, room))
+
+    fake_chat = SimpleNamespace(
+        id='chat1',
+        user_id='u1',
+        chat={
+            'history': {
+                'messages': {
+                    'msg1': {
+                        'id': 'msg1',
+                        'role': 'assistant',
+                        'content': 'final answer',
+                        'done': True,
+                    }
+                }
+            }
+        },
+    )
+    with (
+        patch('myah.routers.myah.Chats.get_chat_by_id_and_user_id', return_value=fake_chat),
+        patch('myah.routers.myah.Chats.upsert_message_to_chat_by_id_and_message_id') as upsert,
+        patch('myah.routers.myah.background_tasks_handler') as background_handler,
+        patch('myah.routers.myah.asyncio.create_task') as create_task,
+        patch('myah.socket.main.sio', _FakeSio()),
+    ):
+        resp = client.post(
+            '/api/v1/myah/messages/final',
+            headers={'Authorization': 'Bearer tok'},
+            json={
+                'user_id': 'u1',
+                'chat_id': 'chat1',
+                'message_id': 'msg1',
+                'response': 'final answer',
+            },
+        )
+
+    assert resp.status_code == 200
+    assert resp.json() == {'ok': True, 'message_id': 'msg1', 'duplicate': True}
+    upsert.assert_not_called()
+    background_handler.assert_not_called()
+    create_task.assert_not_called()
+    assert emitted == []
+
+
+def test_final_message_triggers_background_tasks_when_persisted(monkeypatch):
+    monkeypatch.setenv('MYAH_AGENT_BEARER_TOKEN', 'tok')
+    client = _make_app()
+
+    bg_calls = []
+
+    async def _fake_bg(ctx):
+        bg_calls.append(ctx)
+
+    fake_chat = SimpleNamespace(id='chat1', user_id='u1', chat={'history': {'messages': {}}})
+    scheduled = []
+
+    def _fake_create_task(coro):
+        scheduled.append(coro)
+        task = Mock()
+        task.exception.return_value = None
+        task.add_done_callback.return_value = None
+        return task
+
+    with (
+        patch('myah.routers.myah.Chats.get_chat_by_id_and_user_id', return_value=fake_chat),
+        patch('myah.routers.myah.Chats.upsert_message_to_chat_by_id_and_message_id', return_value=fake_chat),
+        patch('myah.routers.myah.background_tasks_handler', new=_fake_bg),
+        patch('myah.routers.myah.asyncio.create_task', side_effect=_fake_create_task) as create_task,
+    ):
+        resp = client.post(
+            '/api/v1/myah/messages/final',
+            headers={'Authorization': 'Bearer tok'},
+            json={
+                'user_id': 'u1',
+                'chat_id': 'chat1',
+                'message_id': 'msg1',
+                'response': 'final answer',
+                'model': 'gpt-5.4',
+                'provider': 'openai-codex',
+            },
+        )
+
+    assert resp.status_code == 200
+    assert len(bg_calls) == 0
+    create_task.assert_called_once()
+    assert len(scheduled) == 1
+
+    import asyncio
+
+    asyncio.run(scheduled[0])
+    assert len(bg_calls) == 1
+    ctx = bg_calls[0]
+    assert ctx['metadata']['chat_id'] == 'chat1'
+    assert ctx['metadata']['message_id'] == 'msg1'
+    assert ctx['form_data']['model'] == 'gpt-5.4'
+    assert ctx['form_data']['messages'] == [
+        {'role': 'assistant', 'content': 'final answer', 'model': 'gpt-5.4'}
+    ]
+    assert ctx['tasks']['title_generation'] is True

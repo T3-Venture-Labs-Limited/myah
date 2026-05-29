@@ -81,6 +81,9 @@ coverage.xml
 .pytest_cache/
 cover/
 
+# Generated static-analysis reports (T3-1077)
+artifacts/static-analysis/
+
 # Translations
 *.mo
 *.pot

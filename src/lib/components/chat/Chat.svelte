@@ -115,6 +115,7 @@
 		pruneStaleSnapshots
 	} from '$lib/utils/inflightPersistence';
 	import { reconnectBanner } from '$lib/stores';
+	import { applyDurableFinalMessageEvent } from '$lib/utils/chatEventFallback';
 	import type { InflightSnapshot } from '$lib/types';
 	import ReconnectBanner from './ReconnectBanner.svelte';
 
@@ -360,6 +361,11 @@
 
 	const chatEventHandler = async (event, cb) => {
 		if (event.chat_id === $chatId) {
+			if (applyDurableFinalMessageEvent(event, $chatId, { history })) {
+				await tick();
+				await saveChatHandler($chatId, history);
+			}
+
 			await tick();
 			let message = history.messages[event.message_id];
 

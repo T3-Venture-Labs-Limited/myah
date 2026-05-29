@@ -1389,6 +1389,7 @@ async def generate_chat_completion(
             'message': _last_user_text,
             'session_id': _session_id,
             'user_id': user.id if user else '',
+            'message_id': metadata.get('message_id', '') if metadata else '',
         }
         if user and user.name:
             myah_payload['user_name'] = user.name

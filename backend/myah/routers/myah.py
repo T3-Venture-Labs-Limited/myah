@@ -12,14 +12,52 @@
 # single-tenant mode this is the same secret the user pasted into
 # their .env when bootstrapping the platform.
 
+import asyncio
+import hmac
 import os
+import time
+from types import SimpleNamespace
 
 from fastapi import APIRouter, HTTPException, Request
 from loguru import logger
 from myah.models.users import Users
+from myah.models.chats import Chats
+from myah.utils.chat_tasks import background_tasks_handler
 from pydantic import BaseModel
 
 router = APIRouter()
+
+
+
+
+class FinalMessageRequest(BaseModel):
+    """Durable fallback payload for completed interactive Hermes replies."""
+
+    user_id: str
+    chat_id: str
+    message_id: str | None = None
+    response: str
+    status: str = 'ok'
+    model: str | None = None
+    provider: str | None = None
+
+
+def _verify_agent_bearer(request: Request) -> None:
+    auth_header = request.headers.get('Authorization', '')
+    if not auth_header.startswith('Bearer '):
+        raise HTTPException(status_code=401, detail='Missing or invalid Authorization header')
+
+    token = auth_header[len('Bearer ') :].strip()
+    expected = os.environ.get('MYAH_AGENT_BEARER_TOKEN', '').strip()
+
+    if not expected:
+        raise HTTPException(
+            status_code=503,
+            detail='MYAH_AGENT_BEARER_TOKEN not configured on the platform',
+        )
+
+    if not hmac.compare_digest(token, expected):
+        raise HTTPException(status_code=401, detail='Invalid bearer token')
 
 
 class WhoAmIResponse(BaseModel):
@@ -53,23 +91,7 @@ async def whoami(request: Request) -> WhoAmIResponse:
     database is treated as the OSS user. Multi-user OSS deployments
     require additional auth (out of scope for v1).
     """
-    auth_header = request.headers.get('Authorization', '')
-    if not auth_header.startswith('Bearer '):
-        raise HTTPException(status_code=401, detail='Missing or invalid Authorization header')
-
-    token = auth_header[len('Bearer ') :].strip()
-    expected = os.environ.get('MYAH_AGENT_BEARER_TOKEN', '').strip()
-
-    if not expected:
-        # Misconfiguration: token must be set in deployment env. Refuse
-        # the request so the plugin sees a clear error in its logs.
-        raise HTTPException(
-            status_code=503,
-            detail='MYAH_AGENT_BEARER_TOKEN not configured on the platform',
-        )
-
-    if token != expected:
-        raise HTTPException(status_code=401, detail='Invalid bearer token')
+    _verify_agent_bearer(request)
 
     deployment_mode = (
         'oss' if os.environ.get('MYAH_DEPLOYMENT_MODE', '').strip().lower() == 'oss' else 'hosted'
@@ -200,3 +222,147 @@ async def whoami(request: Request) -> WhoAmIResponse:
         default_model=default_pair[1] if default_pair else None,
         default_provider=default_pair[0] if default_pair else None,
     )
+
+
+@router.post('/messages/final')
+async def persist_final_message(request: Request, payload: FinalMessageRequest):
+    """Persist an interactive assistant reply when the live SSE stream is gone.
+
+    The Myah Hermes plugin normally delivers assistant text over
+    /myah/v1/events/{stream_id}. If the browser/platform SSE connection
+    disconnects during a long non-streaming run, the plugin's final
+    adapter.send(...) call cannot push to the in-memory queue. This endpoint
+    is the durable fallback: the plugin posts the completed content here so
+    the chat message is marked done instead of staying on "Thinking...".
+    """
+    _verify_agent_bearer(request)
+
+    if not payload.user_id or not payload.chat_id:
+        raise HTTPException(status_code=400, detail='Missing user_id or chat_id')
+    if payload.response is None:
+        raise HTTPException(status_code=400, detail='Missing response')
+
+    chat = Chats.get_chat_by_id_and_user_id(payload.chat_id, payload.user_id)
+    if chat is None:
+        raise HTTPException(status_code=404, detail='Chat not found')
+
+    if not payload.message_id:
+        raise HTTPException(status_code=400, detail='Missing message_id')
+    if payload.status not in {'ok', 'error'}:
+        raise HTTPException(status_code=400, detail='Invalid status')
+
+    message_id = payload.message_id
+    existing_message = (chat.chat or {}).get('history', {}).get('messages', {}).get(message_id, {})
+    already_finalized = (
+        existing_message.get('role') == 'assistant'
+        and existing_message.get('done') is True
+        and (existing_message.get('content') or '').strip() == (payload.response or '').strip()
+        and bool(existing_message.get('error')) == (payload.status == 'error')
+    )
+    if already_finalized:
+        logger.info(
+            f'/messages/final: duplicate final assistant message ignored chat_id={payload.chat_id} '
+            f'message_id={message_id} user_id={payload.user_id}'
+        )
+        return {'ok': True, 'message_id': message_id, 'duplicate': True}
+
+    clean_response = (payload.response or '').strip() or '(no output)'
+    update = {
+        'id': message_id,
+        'role': 'assistant',
+        'content': clean_response,
+        'done': True,
+        'timestamp': int(time.time()),
+    }
+    if payload.status == 'error':
+        update['error'] = {'content': clean_response}
+    if payload.model:
+        update['modelUsed'] = {'id': payload.model, 'provider': payload.provider or ''}
+
+    persisted = Chats.upsert_message_to_chat_by_id_and_message_id(
+        payload.chat_id,
+        message_id,
+        update,
+    )
+    if persisted is None:
+        raise HTTPException(status_code=404, detail='Chat not found')
+
+    async def _emit_final_event(event):
+        from myah.socket.main import sio
+
+        await sio.emit(
+            'events',
+            {
+                'chat_id': payload.chat_id,
+                'message_id': message_id,
+                'data': event,
+            },
+            room=f'user:{payload.user_id}',
+        )
+
+    try:
+        await _emit_final_event(
+            {
+                'type': 'chat:completion',
+                'data': {
+                    'content': clean_response,
+                    'done': True,
+                    'message_id': message_id,
+                    'chat_id': payload.chat_id,
+                },
+            }
+        )
+        await _emit_final_event({'type': 'status', 'data': {'done': True}})
+    except Exception as exc:  # pragma: no cover - socket notification is best-effort
+        logger.debug(f'/messages/final: socket emit failed: {exc}')
+
+    async def _background_event_emitter(event):
+        if event.get('type') in {
+            'chat:completion',
+            'chat:title',
+            'chat:message:follow_ups',
+        }:
+            await _emit_final_event(event)
+
+    def _log_background_task_failure(task):
+        if task.cancelled():
+            logger.debug('/messages/final: background tasks cancelled')
+            return
+        exc = task.exception()
+        if exc:
+            logger.debug(f'/messages/final: background tasks failed: {exc}')
+
+    try:
+        bg_ctx = {
+            'request': request,
+            'form_data': {
+                'model': payload.model or 'myah',
+                'messages': [
+                    {'role': 'assistant', 'content': clean_response, 'model': payload.model or 'myah'}
+                ],
+            },
+            'user': SimpleNamespace(id=payload.user_id, name='', role='user'),
+            'model': {'id': payload.model or 'myah'},
+            'metadata': {
+                'chat_id': payload.chat_id,
+                'message_id': message_id,
+                'session_id': payload.chat_id,
+            },
+            'tasks': {
+                'title_generation': True,
+                'follow_up_generation': True,
+            },
+            'events': {},
+            'event_emitter': _background_event_emitter,
+            'event_caller': None,
+        }
+        task = asyncio.create_task(background_tasks_handler(bg_ctx))
+        task.add_done_callback(_log_background_task_failure)
+    except Exception as exc:  # pragma: no cover - enrichment is best-effort
+        logger.debug(f'/messages/final: failed to schedule background tasks: {exc}')
+
+    logger.info(
+        f'/messages/final: persisted final assistant message chat_id={payload.chat_id} '
+        f'message_id={message_id} user_id={payload.user_id}'
+    )
+    return {'ok': True, 'message_id': message_id}
