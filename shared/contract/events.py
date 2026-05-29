@@ -178,6 +178,45 @@ class ToolConfirmationRequiredEvent(_BaseHermesEvent):
     timestamp: float | None = None
 
 
+class ApprovalRequestEvent(_BaseHermesEvent):
+    """The Hermes API server is waiting for a dangerous-action approval.
+
+    Wire source: ``api_server.py::_approval_notify``. The payload starts as
+    ``tools.approval`` approval data (``command``, ``description``,
+    ``pattern_key`` and ``pattern_keys``), then the API server adds the
+    ``approval.request`` discriminator, run metadata, and the allowed
+    response choices. The platform does not currently render these API-server
+    approvals directly, but recognising the event prevents typed validation
+    from logging it as unknown when Hermes emits it.
+    """
+
+    event: Literal['approval.request']
+    command: str | None = None
+    description: str | None = None
+    pattern_key: str | None = None
+    pattern_keys: list[str] = Field(default_factory=list)
+    choices: list[str] = Field(default_factory=lambda: ['once', 'session', 'always', 'deny'])
+    run_id: str | None = None
+    stream_id: str | None = None
+    timestamp: float | None = None
+
+
+class ApprovalRespondedEvent(_BaseHermesEvent):
+    """The pending Hermes API-server approval has been resolved.
+
+    Wire source: ``api_server.py::_handle_approval_response``. ``choice`` is
+    one of the API-server approval choices today, and ``resolved`` is the
+    number of queued approval entries released by the response.
+    """
+
+    event: Literal['approval.responded']
+    choice: str | None = None
+    resolved: int | None = None
+    run_id: str | None = None
+    stream_id: str | None = None
+    timestamp: float | None = None
+
+
 class SecretRequiredEvent(_BaseHermesEvent):
     """The agent has paused waiting for the user to supply a secret value.
 
@@ -302,6 +341,8 @@ HermesEvent = Annotated[
         ToolStartedEvent,
         ToolCompletedEvent,
         ToolConfirmationRequiredEvent,
+        ApprovalRequestEvent,
+        ApprovalRespondedEvent,
         SecretRequiredEvent,
         SecretResolvedEvent,
         RunCompletedEvent,
@@ -314,6 +355,8 @@ HermesEvent = Annotated[
 
 
 __all__ = [
+    'ApprovalRequestEvent',
+    'ApprovalRespondedEvent',
     'HermesEvent',
     'MessageDeltaEvent',
     'ReasoningAvailableEvent',

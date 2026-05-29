@@ -12,6 +12,8 @@ import pytest
 from pydantic import TypeAdapter, ValidationError
 
 from shared.contract.events import (
+    ApprovalRequestEvent,
+    ApprovalRespondedEvent,
     HermesEvent,
     MessageDeltaEvent,
     ReasoningAvailableEvent,
@@ -101,6 +103,29 @@ EVENT_SAMPLES: dict[str, tuple[dict, type]] = {
         },
         ToolConfirmationRequiredEvent,
     ),
+    'approval.request': (
+        {
+            'event': 'approval.request',
+            'command': 'rm -rf /tmp/foo',
+            'description': 'Command requires approval: rm -rf /tmp/foo',
+            'pattern_key': 'dangerous_rm',
+            'pattern_keys': ['dangerous_rm'],
+            'choices': ['once', 'session', 'always', 'deny'],
+            'run_id': 'run_abc',
+            'timestamp': 1714400002.0,
+        },
+        ApprovalRequestEvent,
+    ),
+    'approval.responded': (
+        {
+            'event': 'approval.responded',
+            'choice': 'once',
+            'resolved': 1,
+            'run_id': 'run_abc',
+            'timestamp': 1714400003.0,
+        },
+        ApprovalRespondedEvent,
+    ),
     'secret.required': (
         {
             'event': 'secret.required',
@@ -189,6 +214,8 @@ def test_completeness_every_known_event_has_a_sample() -> None:
         ToolStartedEvent,
         ToolCompletedEvent,
         ToolConfirmationRequiredEvent,
+        ApprovalRequestEvent,
+        ApprovalRespondedEvent,
         SecretRequiredEvent,
         SecretResolvedEvent,
         RunCompletedEvent,

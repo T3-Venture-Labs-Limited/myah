@@ -4,6 +4,8 @@
     "title_generation"
   ],
   "hermes_event_types": [
+    "approval.request",
+    "approval.responded",
     "message.delta",
     "reasoning.available",
     "reasoning.delta",

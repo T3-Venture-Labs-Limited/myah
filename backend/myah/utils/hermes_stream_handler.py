@@ -801,6 +801,16 @@ async def handle_hermes_stream(response, ctx: dict) -> StreamingResponse | None:
                     await _emit_completion()
                     _update_live_state()
 
+                # ── approval.request / approval.responded ─────────────────
+                elif event_type in ('approval.request', 'approval.responded'):
+                    # The Hermes API server emits these for /v1/runs approval
+                    # workflows. Myah's current chat UI uses
+                    # tool.confirmation_required for interactive approvals, so
+                    # there is nothing to render here yet. Keep an explicit
+                    # no-op branch so typed-known upstream events do not fall
+                    # through to the unknown-event warning path.
+                    log.debug('[HERMES] api approval event ignored: {}', event_type)
+
                 # ── run.completed ─────────────────────────────────────────
                 elif event_type == 'run.completed':
                     run_usage = event_data.get('usage')

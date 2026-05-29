@@ -150,6 +150,8 @@ export interface ContractRoot {
     | ToolStartedEvent
     | ToolCompletedEvent
     | ToolConfirmationRequiredEvent
+    | ApprovalRequestEvent
+    | ApprovalRespondedEvent
     | SecretRequiredEvent
     | SecretResolvedEvent
     | RunCompletedEvent
@@ -286,6 +288,45 @@ export interface ToolConfirmationRequiredEvent {
   metadata?: {
     [k: string]: unknown;
   };
+  run_id?: string | null;
+  stream_id?: string | null;
+  timestamp?: number | null;
+  [k: string]: unknown;
+}
+/**
+ * The Hermes API server is waiting for a dangerous-action approval.
+ *
+ * Wire source: ``api_server.py::_approval_notify``. The payload starts as
+ * ``tools.approval`` approval data (``command``, ``description``,
+ * ``pattern_key`` and ``pattern_keys``), then the API server adds the
+ * ``approval.request`` discriminator, run metadata, and the allowed
+ * response choices. The platform does not currently render these API-server
+ * approvals directly, but recognising the event prevents typed validation
+ * from logging it as unknown when Hermes emits it.
+ */
+export interface ApprovalRequestEvent {
+  event: "approval.request";
+  command?: string | null;
+  description?: string | null;
+  pattern_key?: string | null;
+  pattern_keys?: string[];
+  choices?: string[];
+  run_id?: string | null;
+  stream_id?: string | null;
+  timestamp?: number | null;
+  [k: string]: unknown;
+}
+/**
+ * The pending Hermes API-server approval has been resolved.
+ *
+ * Wire source: ``api_server.py::_handle_approval_response``. ``choice`` is
+ * one of the API-server approval choices today, and ``resolved`` is the
+ * number of queued approval entries released by the response.
+ */
+export interface ApprovalRespondedEvent {
+  event: "approval.responded";
+  choice?: string | null;
+  resolved?: number | null;
   run_id?: string | null;
   stream_id?: string | null;
   timestamp?: number | null;
