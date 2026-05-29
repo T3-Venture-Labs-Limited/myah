@@ -3,7 +3,8 @@ import {
 	parseSelectionKey,
 	buildSelectionKey,
 	resolveCompositeForLegacyBareId,
-	findModelByIdOrSelectionKey
+	findModelByIdOrSelectionKey,
+	selectionMatchesModel
 } from './modelSelection';
 import type { ParsedSelectionKey } from './modelSelection';
 
@@ -164,5 +165,28 @@ describe('findModelByIdOrSelectionKey', () => {
 		];
 		const result = findModelByIdOrSelectionKey('mistral-large', partialModels);
 		expect(result?.id).toBe('mistral-large');
+	});
+});
+
+describe('selectionMatchesModel', () => {
+	const model = {
+		id: 'gpt-5.5',
+		selection_key: 'openai-codex::gpt-5.5',
+		tags: [{ name: 'openai-codex' }]
+	};
+
+	it('matches composite picker values against the resolved model row', () => {
+		// Regression for chat title generation: Chat.svelte already resolved
+		// `openai-codex::gpt-5.5` to this model, but the background-task gate
+		// compared the raw selection to `model.id` and omitted title_generation.
+		expect(selectionMatchesModel('openai-codex::gpt-5.5', model)).toBe(true);
+	});
+
+	it('matches legacy bare id selections', () => {
+		expect(selectionMatchesModel('gpt-5.5', model)).toBe(true);
+	});
+
+	it('does not match unrelated selections', () => {
+		expect(selectionMatchesModel('openrouter::gpt-5.5', model)).toBe(false);
 	});
 });

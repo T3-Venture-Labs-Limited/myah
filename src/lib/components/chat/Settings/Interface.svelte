@@ -67,6 +67,7 @@
 	let expandDetails = false;
 	let renderMarkdownInPreviews = true;
 	let showChatTitleInTab = true;
+	let titleAuto = true;
 
 	let showFloatingActionButtons = true;
 	let floatingActionButtons = null;
@@ -218,6 +219,7 @@
 		chatDirection = $settings?.chatDirection ?? 'auto';
 		userLocation = $settings?.userLocation ?? false;
 		showChatTitleInTab = $settings?.showChatTitleInTab ?? true;
+		titleAuto = $settings?.title?.auto ?? true;
 
 		notificationSound = $settings?.notificationSound ?? true;
 		notificationSoundAlways = $settings?.notificationSoundAlways ?? false;
@@ -417,6 +419,25 @@
 							bind:state={showChatTitleInTab}
 							on:change={() => {
 								saveSettings({ showChatTitleInTab });
+							}}
+						/>
+					</div>
+				</div>
+			</div>
+
+			<div>
+				<div class=" py-0.5 flex w-full justify-between">
+					<div id="chat-title-generation-label" class=" self-center text-xs">
+						{$i18n.t('Chat Title Auto-Generation')}
+					</div>
+
+					<div class="flex items-center gap-2 p-1">
+						<Switch
+							ariaLabelledbyId="chat-title-generation-label"
+							tooltip={true}
+							bind:state={titleAuto}
+							on:change={() => {
+								saveSettings({ title: { ...($settings?.title ?? {}), auto: titleAuto } });
 							}}
 						/>
 					</div>
@@ -1113,7 +1134,7 @@
 				</div>
 			</div>
 
-		<div>
+			<div>
 				<div class=" py-0.5 flex w-full justify-between">
 					<div id="iframe-sandbox-allow-same-origin-label" class=" self-center text-xs">
 						{$i18n.t('iframe Sandbox Allow Same Origin')}
