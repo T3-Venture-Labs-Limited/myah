@@ -14,6 +14,8 @@ from shared.contract.enums import (
     OAuthStatus,
 )
 from shared.contract.events import (
+    ApprovalRequestEvent,
+    ApprovalRespondedEvent,
     HermesEvent,
     MessageDeltaEvent,
     ReasoningAvailableEvent,
@@ -40,7 +42,9 @@ from shared.contract.output_items import (
 
 __all__ = [
     'AUX_ALLOWED_TASKS',
+    'ApprovalRequestEvent',
     'ApprovalOption',
+    'ApprovalRespondedEvent',
     'AuxTask',
     'CodeInterpreterItem',
     'ConfirmationItem',
