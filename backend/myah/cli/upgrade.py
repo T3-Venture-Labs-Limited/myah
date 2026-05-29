@@ -11,10 +11,11 @@ instead of remembering the sequence:
   2. ``git -C <repo-root> pull`` — refreshes the Myah source. Skipped
      with a warning if (a) the user is outside a clone, or (b) the
      working tree is dirty (we never blow away unstaged work).
-  3. ``docker compose -f <repo-root>/docker-compose.yml pull`` — pulls
-     the latest platform image from GHCR. Soft-fail: if this errors
-     (no docker, no network, etc.) we warn and continue — the user's
-     existing image still runs.
+  3. ``docker compose -f <repo-root>/docker-compose.yml build platform``
+     when the OSS compose file has a local ``build:`` section; otherwise
+     ``docker compose pull`` for registry-backed deployments. Soft-fail:
+     if this errors (no docker, no network, etc.) we warn and continue —
+     the user's existing image still runs.
 
 The spec table additionally listed ``pip install -U myah`` but Myah is
 not on PyPI yet (Investigation D, 2026-05-25); the step is omitted with
@@ -98,9 +99,9 @@ def upgrade_command(
 
     _maybe_git_pull(repo_root, console=console)
 
-    # Step 3 — docker compose pull (warn + continue on any failure;
-    # the user's existing platform image keeps working).
-    _maybe_docker_pull(repo_root, console=console)
+    # Step 3 — update the platform image. Local OSS installs build
+    # ``myah/platform:latest`` from source; registry-backed installs pull.
+    _maybe_update_platform_image(repo_root, console=console)
 
     # TODO(slice-5-followup): re-enable `pip install -U myah` once Myah
     # ships on PyPI (per Investigation D, 2026-05-25). Until then, the
@@ -178,22 +179,73 @@ def _maybe_git_pull(repo_root: Path, *, console) -> None:  # noqa: ANN001
         )
 
 
-def _maybe_docker_pull(repo_root: Path, *, console) -> None:  # noqa: ANN001
-    """Run `docker compose -f <root>/docker-compose.yml pull`.
+def _compose_platform_uses_local_build(compose_file: Path) -> bool:
+    """Return True when the platform service is built from local source.
+
+    Keep this deliberately lightweight: importing PyYAML at module import
+    would hurt CLI cold-start, and ``docker compose config`` would require
+    Docker just to choose the Docker command. The OSS compose file uses a
+    top-level ``build:`` stanza under ``platform``, while registry-only
+    installs omit it.
+    """
+    try:
+        lines = compose_file.read_text(encoding='utf-8').splitlines()
+    except OSError:
+        return False
+
+    in_platform = False
+    platform_indent = 0
+    for raw_line in lines:
+        line = raw_line.split('#', 1)[0].rstrip()
+        if not line.strip():
+            continue
+
+        indent = len(line) - len(line.lstrip(' '))
+        stripped = line.strip()
+
+        if stripped == 'platform:':
+            in_platform = True
+            platform_indent = indent
+            continue
+
+        if in_platform:
+            if indent <= platform_indent:
+                in_platform = False
+            elif stripped.startswith('build:'):
+                return True
+
+    return False
+
+
+def _maybe_update_platform_image(repo_root: Path, *, console) -> None:  # noqa: ANN001
+    """Build local OSS images or pull registry-backed images.
 
     Soft-fail: every error is downgraded to a warning. The user's
     existing platform image keeps running fine; a stale image is much
     less bad than a failed upgrade that abandons us mid-flight.
     """
     compose_file = repo_root / 'docker-compose.yml'
-    argv = ['docker', 'compose', '-f', str(compose_file), 'pull']
-    rc = _run_step(argv, console=console, label='docker compose pull')
+    if _compose_platform_uses_local_build(compose_file):
+        action = 'build'
+        argv = ['docker', 'compose', '-f', str(compose_file), 'build', 'platform']
+        failure_hint = 'Re-run `docker compose build platform` from your Myah clone.'
+    else:
+        action = 'pull'
+        argv = ['docker', 'compose', '-f', str(compose_file), 'pull']
+        failure_hint = 'Re-try later or check registry access if this persists.'
+
+    rc = _run_step(argv, console=console, label=f'docker compose {action}')
     if rc != 0:
         console.print(
-            f'[yellow]⚠[/] `docker compose pull` returned exit {rc} — '
+            f'[yellow]⚠[/] `docker compose {action}` returned exit {rc} — '
             'your existing platform image still runs. '
-            'Re-try later or check `docker login ghcr.io` if this persists.'
+            f'{failure_hint}'
         )
+
+
+def _maybe_docker_pull(repo_root: Path, *, console) -> None:  # noqa: ANN001
+    """Backward-compatible wrapper for older tests/imports."""
+    _maybe_update_platform_image(repo_root, console=console)
 
 
 __all__ = ['upgrade_command']

@@ -7,8 +7,9 @@ Composite of the three OSS upgrade steps:
   1. ``hermes update [--check|--yes]`` — bumps the Hermes runtime + plugin
   2. ``git -C <repo-root> pull`` — refreshes Myah source (skips if not a
      clone; warns + skips if dirty tree)
-  3. ``docker compose -f <repo-root>/docker-compose.yml pull`` — pulls
-     latest platform image from GHCR
+  3. ``docker compose -f <repo-root>/docker-compose.yml build platform`` —
+     rebuilds the local OSS platform image when the compose file has a
+     local ``build:`` section; otherwise ``pull``s a prebuilt image.
 
 Mock target = consumer namespace (``myah.cli.upgrade.subprocess.run``,
 ``myah.cli.upgrade.resolve_hermes_binary_or_exit``,
@@ -55,6 +56,73 @@ def _fail(code: int = 1) -> subprocess.CompletedProcess:
     return subprocess.CompletedProcess(args=[], returncode=code, stdout='', stderr='boom')
 
 
+def _write_local_build_compose(repo: Path) -> None:
+    (repo / 'docker-compose.yml').write_text(
+        """
+services:
+  platform:
+    image: ${MYAH_PLATFORM_IMAGE:-myah/platform:latest}
+    build:
+      context: .
+      dockerfile: Dockerfile
+""".lstrip(),
+        encoding='utf-8',
+    )
+
+
+def _write_remote_image_compose(repo: Path) -> None:
+    (repo / 'docker-compose.yml').write_text(
+        """
+services:
+  platform:
+    image: ghcr.io/t3-venture-labs-limited/myah-platform-oss:latest
+""".lstrip(),
+        encoding='utf-8',
+    )
+
+
+# ── compose detection ──────────────────────────────────────────────────
+
+
+def test_compose_platform_build_detection_handles_local_build(tmp_path: Path) -> None:
+    """The lightweight compose scanner detects platform-local builds."""
+    from myah.cli.upgrade import _compose_platform_uses_local_build
+
+    _write_local_build_compose(tmp_path)
+
+    assert _compose_platform_uses_local_build(tmp_path / 'docker-compose.yml') is True
+
+
+def test_compose_platform_build_detection_ignores_other_build_keys(
+    tmp_path: Path,
+) -> None:
+    """Only the platform service's build key should trigger a local build."""
+    from myah.cli.upgrade import _compose_platform_uses_local_build
+
+    compose = tmp_path / 'docker-compose.yml'
+    compose.write_text(
+        """
+services:
+  worker:
+    build: .
+  platform:
+    image: ghcr.io/t3-venture-labs-limited/myah-platform-oss:latest
+""".lstrip(),
+        encoding='utf-8',
+    )
+
+    assert _compose_platform_uses_local_build(compose) is False
+
+
+def test_compose_platform_build_detection_missing_file_is_registry_backed(
+    tmp_path: Path,
+) -> None:
+    """A missing compose file falls back to registry pull behavior."""
+    from myah.cli.upgrade import _compose_platform_uses_local_build
+
+    assert _compose_platform_uses_local_build(tmp_path / 'missing.yml') is False
+
+
 # ── --check short-circuit ──────────────────────────────────────────────
 
 
@@ -99,13 +167,14 @@ def test_upgrade_check_and_yes_both_forwarded(
 def test_upgrade_full_sequence_invokes_three_steps_in_order(
     fake_repo: Path, fake_hermes_bin: Path, mocker
 ) -> None:
-    """Full upgrade fires hermes update → git pull → docker compose pull in order."""
+    """Full upgrade fires hermes update → git pull → docker compose build in order."""
+    _write_local_build_compose(fake_repo)
     run_mock = mocker.patch('myah.cli.upgrade.subprocess.run', return_value=_ok())
 
     result = runner.invoke(app, ['upgrade', '--yes'])
 
     assert result.exit_code == 0, f'stdout: {result.stdout}\nexc: {result.exception}'
-    # Three steps: hermes update, git status (clean check) + git pull, docker compose pull.
+    # Three steps: hermes update, git status (clean check) + git pull, docker compose build.
     # The clean check is one extra subprocess invocation.
     calls = [c.args[0] for c in run_mock.call_args_list]
 
@@ -116,16 +185,38 @@ def test_upgrade_full_sequence_invokes_three_steps_in_order(
     git_pull_idx = next(
         i for i, c in enumerate(calls) if c[:2] == ['git', '-C'] and 'pull' in c
     )
-    # And then docker compose pull
-    docker_pull_idx = next(
+    # And then docker compose build
+    docker_build_idx = next(
         i
         for i, c in enumerate(calls)
-        if c[:2] == ['docker', 'compose'] and 'pull' in c
+        if c[:2] == ['docker', 'compose'] and 'build' in c
     )
-    assert git_pull_idx < docker_pull_idx, 'git pull must happen before docker pull'
+    assert git_pull_idx < docker_build_idx, 'git pull must happen before docker build'
 
     # Verify the docker compose argv shape.
-    docker_cmd = calls[docker_pull_idx]
+    docker_cmd = calls[docker_build_idx]
+    assert docker_cmd == [
+        'docker',
+        'compose',
+        '-f',
+        str(fake_repo / 'docker-compose.yml'),
+        'build',
+        'platform',
+    ]
+
+
+def test_upgrade_pulls_when_compose_has_prebuilt_image_only(
+    fake_repo: Path, fake_hermes_bin: Path, mocker
+) -> None:
+    """Registry-backed compose files still use docker compose pull."""
+    _write_remote_image_compose(fake_repo)
+    run_mock = mocker.patch('myah.cli.upgrade.subprocess.run', return_value=_ok())
+
+    result = runner.invoke(app, ['upgrade', '--yes'])
+
+    assert result.exit_code == 0, f'stdout: {result.stdout}\nexc: {result.exception}'
+    calls = [c.args[0] for c in run_mock.call_args_list]
+    docker_cmd = next(c for c in calls if c[:2] == ['docker', 'compose'])
     assert docker_cmd == [
         'docker',
         'compose',
@@ -166,11 +257,12 @@ def test_upgrade_propagates_hermes_failure_and_short_circuits(
     assert run_mock.call_count == 1
 
 
-def test_upgrade_continues_when_docker_pull_fails(
+def test_upgrade_continues_when_docker_build_fails(
     fake_repo: Path, fake_hermes_bin: Path, mocker
 ) -> None:
-    """Docker pull failure warns + continues; overall exit code is 0."""
-    # hermes update ok, git status clean, git pull ok, docker pull fails.
+    """Docker build failure warns + continues; overall exit code is 0."""
+    _write_local_build_compose(fake_repo)
+    # hermes update ok, git status clean, git pull ok, docker build fails.
     mocker.patch(
         'myah.cli.upgrade.subprocess.run',
         side_effect=[_ok(), _ok(), _ok(), _fail(125)],
@@ -179,7 +271,7 @@ def test_upgrade_continues_when_docker_pull_fails(
     result = runner.invoke(app, ['upgrade', '--yes'])
 
     assert result.exit_code == 0, (
-        f'docker pull failure should NOT abort upgrade; '
+        f'docker build failure should NOT abort upgrade; '
         f'got {result.exit_code}, stdout: {result.stdout}'
     )
     # Warning surfaces.
@@ -217,14 +309,15 @@ def test_upgrade_skips_git_and_docker_outside_clone(
 def test_upgrade_skips_git_pull_on_dirty_tree(
     fake_repo: Path, fake_hermes_bin: Path, mocker
 ) -> None:
-    """Dirty git tree → warn + skip git pull but still do docker pull."""
-    # hermes update ok, git status returns non-empty (dirty), docker pull ok.
+    """Dirty git tree → warn + skip git pull but still do docker build."""
+    _write_local_build_compose(fake_repo)
+    # hermes update ok, git status returns non-empty (dirty), docker build ok.
     run_mock = mocker.patch(
         'myah.cli.upgrade.subprocess.run',
         side_effect=[
             _ok(),
             _ok(stdout=' M platform-oss/backend/myah/cli/upgrade.py\n'),
-            _ok(),  # docker pull
+            _ok(),  # docker build
         ],
     )
 
@@ -251,7 +344,8 @@ def test_upgrade_handles_docker_not_in_path(
     fake_repo: Path, fake_hermes_bin: Path, mocker
 ) -> None:
     """If docker is missing, hermes update + git pull still succeed; docker step warns."""
-    # hermes update ok, git status clean, git pull ok, docker pull raises FileNotFoundError.
+    _write_local_build_compose(fake_repo)
+    # hermes update ok, git status clean, git pull ok, docker build raises FileNotFoundError.
     mocker.patch(
         'myah.cli.upgrade.subprocess.run',
         side_effect=[
@@ -274,13 +368,14 @@ def test_upgrade_handles_git_not_in_path(
     fake_repo: Path, fake_hermes_bin: Path, mocker
 ) -> None:
     """If git is missing, hermes update still ran; git step warns + skips."""
+    _write_local_build_compose(fake_repo)
     # hermes update ok, then git status raises FileNotFoundError.
     mocker.patch(
         'myah.cli.upgrade.subprocess.run',
         side_effect=[
             _ok(),
             FileNotFoundError("[Errno 2] No such file or directory: 'git'"),
-            _ok(),  # docker pull
+            _ok(),  # docker build
         ],
     )
 
