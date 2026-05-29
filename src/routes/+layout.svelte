@@ -669,8 +669,23 @@
 		// ── Cron delivery failure notification ─────────────────────────────
 		// Shown globally so the user always knows when a scheduled task ran
 		// but its output couldn't be delivered to the originating chat.
+		//
+		// Delivery retries, socket reconnects, or page reloads can surface the
+		// same failed run more than once. Deduplicate by (job_id, ran_at) so a
+		// single cron failure doesn't spawn repeated identical toasts.
+		const seenCronDeliveryFailures = new Map<string, number>();
+		const CRON_FAILURE_TOAST_TTL_MS = 60_000;
 		const cronDeliveryFailedHandler = (data) => {
 			const name = data?.job_name ?? 'Scheduled task';
+			const key = `${data?.job_id ?? 'unknown'}:${data?.ran_at ?? 'unknown'}`;
+			const now = Date.now();
+			for (const [k, ts] of seenCronDeliveryFailures.entries()) {
+				if (now - ts > CRON_FAILURE_TOAST_TTL_MS) {
+					seenCronDeliveryFailures.delete(k);
+				}
+			}
+			if (seenCronDeliveryFailures.has(key)) return;
+			seenCronDeliveryFailures.set(key, now);
 			toast.error(`"${name}" ran but output could not be delivered — check task settings`, {
 				duration: 8000
 			});

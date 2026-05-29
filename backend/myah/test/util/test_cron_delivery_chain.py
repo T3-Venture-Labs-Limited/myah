@@ -353,6 +353,26 @@ class TestDeliveryFailureVisibility:
             'so users always see a notification when cron output cannot be delivered'
         )
 
+    def test_layout_svelte_dedupes_delivery_failed_toasts(self):
+        """Repeated socket events for the same failed run must not spawn
+        repeated identical toasts.
+
+        Deduplication key is (job_id, ran_at) and lives in the shared global
+        layout listener because reconnects / retries happen at the socket layer,
+        not inside an individual chat/task component.
+        """
+        layout = Path(__file__).resolve().parents[4] / 'src' / 'routes' / '+layout.svelte'
+        content = layout.read_text()
+
+        assert 'seenCronDeliveryFailures' in content, (
+            '+layout.svelte must track seen cron delivery failures so reconnects '
+            'or retries do not spam duplicate toasts for the same failed run'
+        )
+        assert 'job_id' in content and 'ran_at' in content, (
+            'Cron delivery failure toast dedupe must key on both job_id and ran_at '
+            'so distinct failed runs still notify once each'
+        )
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # 7. link-chat endpoint validation — prevents garbage chat_id values
