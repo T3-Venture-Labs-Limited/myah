@@ -119,7 +119,7 @@
 
 	import { getBackendConfig, getModelsWithProviders, getVersion } from '$lib/apis';
 	import { getSessionUser, ossSignIn, userSignOut } from '$lib/apis/auths';
-	import { getChatList } from '$lib/apis/chats';
+	import { getActiveRuns, getChatList } from '$lib/apis/chats';
 	import { chatCompletion } from '$lib/apis/openai';
 	import { addOpenAIConnection, removeOpenAIConnection } from '$lib/utils/connections';
 
@@ -131,6 +131,13 @@
 	import AppSidebar from '$lib/components/app/AppSidebar.svelte';
 	import Spinner from '$lib/components/common/Spinner.svelte';
 	import { getUserSettings } from '$lib/apis/users';
+	import { activeChatIdSetFromRuns, applyActiveChatEvent } from '$lib/utils/activeRuns';
+	import {
+		saveInflightSnapshot,
+		loadInflightSnapshot,
+		clearInflightSnapshot
+	} from '$lib/utils/inflightPersistence';
+	import { snapshotUpdateFromChatCompletionEvent } from '$lib/utils/inflightSnapshotEvents';
 	import dayjs from 'dayjs';
 	const unregisterServiceWorkers = async () => {
 		if ('serviceWorker' in navigator) {
@@ -178,8 +185,32 @@
 	let tokenTimer = null;
 
 	let showRefresh = $state(false);
-
 	let heartbeatInterval = null;
+
+	const hydrateActiveRuns = async () => {
+		const token = localStorage.getItem('token');
+		if (!token) return;
+		try {
+			const data = await getActiveRuns(token);
+			activeChatIds.set(activeChatIdSetFromRuns(data?.active_runs ?? []));
+		} catch (err) {
+			console.warn('[active-runs] hydrate failed:', err);
+		}
+	};
+
+	const persistInflightSnapshotFromEvent = (event) => {
+		if (!event?.chat_id || event.chat_id.startsWith('local:')) return;
+		const update = snapshotUpdateFromChatCompletionEvent(
+			event,
+			loadInflightSnapshot(event.chat_id)
+		);
+		if (update.kind === 'save') {
+			saveInflightSnapshot(update.snapshot);
+		} else if (update.kind === 'complete') {
+			saveInflightSnapshot(update.snapshot);
+			setTimeout(() => clearInflightSnapshot(event.chat_id), 10_000);
+		}
+	};
 
 	const BREAKPOINT = 768;
 
@@ -249,8 +280,9 @@
 			// for it to appear before giving up (T3-872).
 			if (localStorage.getItem('token')) {
 				_socket.emit('user-join', { auth: { token: localStorage.token } });
+				void hydrateActiveRuns();
 			} else {
-				const waited = await new Promise<string | null>((resolve) => {
+				const waited = await new Promise((resolve) => {
 					let elapsed = 0;
 					const interval = setInterval(() => {
 						const token = localStorage.getItem('token');
@@ -268,6 +300,7 @@
 				});
 				if (waited) {
 					_socket.emit('user-join', { auth: { token: waited } });
+					void hydrateActiveRuns();
 				} else {
 					console.warn('No token found in localStorage after waiting, user-join not emitted');
 				}
@@ -297,6 +330,8 @@
 	};
 
 	const chatEventHandler = async (event, cb) => {
+		persistInflightSnapshotFromEvent(event);
+
 		const chat = $page.url.pathname.includes(`/c/${event.chat_id}`);
 
 		// Skip events from temporary chats that are not the current chat.
@@ -324,23 +359,11 @@
 		// Track which chats are streaming live, regardless of which page the user is
 		// viewing. The Tasks page (`TaskList.svelte`) and the sidebar
 		// (`ChatItem.svelte`) read `$activeChatIds` to render the spinner. The
-		// backend emits `chat:active` from the OWI legacy chat task path
-		// (`main.py:1344` on completion, `main.py:1358` on task start) to room
-		// `user:{user_id}`. Note: the Hermes-first chat surface in
-		// `routers/openai.py` (`/myah/v1/message`) does NOT emit this event today,
-		// so the spinner only fires for legacy traffic. A follow-up should add the
-		// emit to the Hermes pipeline for full coverage.
+		// backend emits `chat:active` from both the legacy background-task path
+		// (`main.py`) and the Hermes-first chat stream wrapper (`routers/openai.py`).
 		if (type === 'chat:active' && event.chat_id) {
 			const isActive = !!data?.active;
-			activeChatIds.update((ids) => {
-				const next = new Set(ids);
-				if (isActive) {
-					next.add(event.chat_id);
-				} else {
-					next.delete(event.chat_id);
-				}
-				return next;
-			});
+			activeChatIds.update((ids) => applyActiveChatEvent(ids, event.chat_id, isActive));
 			return;
 		}
 
@@ -490,6 +513,7 @@
 		if (now >= exp - TOKEN_EXPIRY_BUFFER) {
 			const res = await userSignOut();
 			user.set(null);
+			activeChatIds.set(new Set());
 			localStorage.removeItem('token');
 
 			location.href = res?.redirect_url ?? '/auth';
@@ -673,7 +697,7 @@
 		// Delivery retries, socket reconnects, or page reloads can surface the
 		// same failed run more than once. Deduplicate by (job_id, ran_at) so a
 		// single cron failure doesn't spawn repeated identical toasts.
-		const seenCronDeliveryFailures = new Map<string, number>();
+		const seenCronDeliveryFailures = new Map();
 		const CRON_FAILURE_TOAST_TTL_MS = 60_000;
 		const cronDeliveryFailedHandler = (data) => {
 			const name = data?.job_name ?? 'Scheduled task';
@@ -825,6 +849,7 @@
 							);
 						} else {
 							// Definitive failure — remove token and redirect to auth.
+							activeChatIds.set(new Set());
 							localStorage.removeItem('token');
 							await goto(`/auth?redirect=${encodedUrl}`);
 						}

@@ -35,10 +35,12 @@
 		}
 	}
 
-	// Track user-resolved confirmation IDs locally so status persists across
+	// Track user-resolved confirmation cards locally so status persists across
 	// parent re-renders from continued SSE events (backend still shows 'pending'
-	// until run.completed sets it to 'cancelled').
-	let resolvedConfirmations = new Map<string, string>(); // confirmation_id → chosen option
+	// until run.completed sets it to 'cancelled'). Use the output item id, not
+	// confirmation_id: exec approvals legitimately use an empty confirmation_id
+	// and multiple no-ID approvals can appear in the same run.
+	let resolvedConfirmations = new Map<string, string>(); // output item id → chosen option
 
 	// Track secrets the user has submitted so the card shows 'stored' immediately,
 	// without waiting for the backend to re-emit the item with status='stored'.
@@ -68,10 +70,10 @@
 			<ConfirmationCard
 				item={g.item}
 				{messageId}
-				localStatus={resolvedConfirmations.has(g.item.confirmation_id) ? 'resolved' : g.item.status}
-				localChosen={resolvedConfirmations.get(g.item.confirmation_id)}
+				localStatus={resolvedConfirmations.has(g.item.id) ? 'resolved' : g.item.status}
+				localChosen={resolvedConfirmations.get(g.item.id)}
 				on:confirmed={(e) => {
-					resolvedConfirmations.set(e.detail.confirmation_id, e.detail.choice);
+					resolvedConfirmations.set(e.detail.item_id, e.detail.choice);
 					resolvedConfirmations = resolvedConfirmations;
 				}}
 				on:retry

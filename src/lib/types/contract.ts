@@ -281,7 +281,7 @@ export interface ToolCompletedEvent {
  */
 export interface ToolConfirmationRequiredEvent {
   event: "tool.confirmation_required";
-  confirmation_id: string;
+  confirmation_id?: string | null;
   action_type?: string;
   description?: string;
   options?: string[];

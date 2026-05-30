@@ -168,7 +168,7 @@ class ToolConfirmationRequiredEvent(_BaseHermesEvent):
     """
 
     event: Literal['tool.confirmation_required']
-    confirmation_id: str
+    confirmation_id: str | None = None
     action_type: str = 'confirmation'
     description: str = ''
     options: list[str] = Field(default_factory=lambda: ['approve', 'deny'])

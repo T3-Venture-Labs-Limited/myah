@@ -106,10 +106,8 @@
 	import Image from '../common/Image.svelte';
 	import { getBanners } from '$lib/apis/configs';
 	import { linkProcessToChat } from '$lib/apis/processes';
-	import { scheduleRender } from '$lib/utils/rafScheduler';
 	import { findModelByIdOrSelectionKey, selectionMatchesModel } from '$lib/utils/modelSelection';
 	import {
-		saveInflightSnapshot,
 		loadInflightSnapshot,
 		clearInflightSnapshot,
 		pruneStaleSnapshots
@@ -1479,24 +1477,6 @@
 		}
 
 		history.messages[message.id] = message;
-
-		// Persist in-flight snapshot so a page reload can resume from mid-stream.
-		// Skipped for temp/local chats (no server-side chat record to resume from).
-		if (!done && chatId && !chatId.startsWith('local:')) {
-			scheduleRender('inflight-save', () =>
-				saveInflightSnapshot({
-					run_id: id ?? '',
-					chat_id: chatId,
-					message_id: message.id,
-					started_at: loadInflightSnapshot(chatId)?.started_at ?? Date.now(),
-					updated_at: Date.now(),
-					message_content: message.content ?? '',
-					reasoning_content: '',
-					output: Array.isArray(message.output) ? message.output : [],
-					status: 'streaming'
-				})
-			);
-		}
 
 		if (done) {
 			message.done = true;

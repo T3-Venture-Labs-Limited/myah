@@ -148,6 +148,27 @@ describe('ConfirmationCard 404 handling', () => {
 		});
 	});
 
+	test('confirmed event includes unique output item id for no-id approvals', async () => {
+		global.fetch = vi.fn().mockResolvedValue(new Response(null, { status: 200 }));
+
+		const { default: Harness } = await import('./__test__/ConfirmationCardHarness.svelte');
+		const item = makeConfirmationItem({ id: 'conf-no-id-1', confirmation_id: '' });
+		const onConfirmed = vi.fn();
+		render(Harness, { props: { item, messageId: 'msg-1', onConfirmed } });
+
+		const approveBtn = screen.getByRole('button', { name: /^approve$/i });
+		await fireEvent.click(approveBtn);
+
+		await waitFor(() => {
+			expect(onConfirmed).toHaveBeenCalled();
+		});
+		expect(onConfirmed.mock.calls[0][0]).toMatchObject({
+			item_id: 'conf-no-id-1',
+			confirmation_id: '',
+			choice: 'approve'
+		});
+	});
+
 	test('non-404 errors still surface inline (not interrupted state)', async () => {
 		global.fetch = vi.fn().mockResolvedValue(
 			new Response(JSON.stringify({ detail: 'Server exploded' }), {

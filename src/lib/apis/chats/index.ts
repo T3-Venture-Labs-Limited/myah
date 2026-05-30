@@ -1173,6 +1173,41 @@ export const downloadChatStats = async (
 	return [res, controller];
 };
 
+export interface ActiveRun {
+	chat_id: string;
+	run_id: string | null;
+	started_at: number | null;
+	message_id: string | null;
+}
+
+export const getActiveRuns = async (token: string): Promise<{ active_runs: ActiveRun[] }> => {
+	let error = null;
+
+	const res = await fetch(`${MYAH_API_BASE_URL}/chats/active_runs`, {
+		method: 'GET',
+		headers: {
+			Accept: 'application/json',
+			'Content-Type': 'application/json',
+			authorization: `Bearer ${token}`
+		}
+	})
+		.then(async (res) => {
+			if (!res.ok) throw await res.json();
+			return res.json();
+		})
+		.catch((err) => {
+			console.error(err);
+			error = 'detail' in err ? err.detail : err;
+			return null;
+		});
+
+	if (error) {
+		throw error;
+	}
+
+	return res;
+};
+
 export const getActiveRun = async (
 	token: string,
 	chatId: string
