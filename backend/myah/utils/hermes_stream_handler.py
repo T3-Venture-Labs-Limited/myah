@@ -737,7 +737,7 @@ async def handle_hermes_stream(response, ctx: dict) -> StreamingResponse | None:
 
                 # ── tool.confirmation_required ─────────────────────────────────
                 elif event_type == 'tool.confirmation_required':
-                    confirmation_id = event_data.get('confirmation_id', '')
+                    confirmation_id = event_data.get('confirmation_id') or ''
                     action_type = event_data.get('action_type', 'confirmation')
                     description = event_data.get('description', '')
                     options = event_data.get('options', ['approve', 'deny'])
@@ -1133,6 +1133,14 @@ async def handle_hermes_stream(response, ctx: dict) -> StreamingResponse | None:
                     # ─────────────────────────────────────────────────────
 
                     yield _sse_chunk(done=True)
+
+                # ── status ───────────────────────────────────────────────
+                elif event_type == 'status':
+                    # Hermes emits status pings while a run is still alive.
+                    # Treat them as known no-op progress events so they do
+                    # not look like unknown-event failures or terminate the
+                    # visual stream before a terminal run.* event arrives.
+                    continue
 
                 # ── unknown event type ───────────────────────────────────
                 # Tactical observability gap closer (Workstream I pre-Phase 2):

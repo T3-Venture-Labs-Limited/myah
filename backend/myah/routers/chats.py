@@ -804,6 +804,36 @@ async def get_user_chat_list_by_tag_name(
 
 
 ############################
+# GetActiveRuns
+# Rehydrate the app-shell active chat indicators from the in-memory
+# stream registry. The per-chat endpoint below remains the precise route
+# resume check; this aggregate endpoint is only for shell/sidebar state.
+############################
+
+
+@router.get('/active_runs')
+async def get_active_runs_for_user(
+    user=Depends(get_verified_user),
+    db: Session = Depends(get_session),
+):
+    active_runs = get_active_runs()
+    runs = []
+    for chat_id, entry in active_runs.items():
+        chat = Chats.get_chat_by_id_and_user_id(chat_id, user.id, db=db)
+        if not chat:
+            continue
+        runs.append(
+            {
+                'chat_id': chat_id,
+                'run_id': entry.get('run_id'),
+                'started_at': entry.get('started_at'),
+                'message_id': entry.get('message_id'),
+            }
+        )
+    return {'active_runs': runs}
+
+
+############################
 # GetChatById
 ############################
 

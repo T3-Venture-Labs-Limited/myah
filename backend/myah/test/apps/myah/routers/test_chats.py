@@ -89,6 +89,24 @@ def _get_active_run_handler(chat_id: str, user, fake_chats: _FakeChats, active_r
     return {'run_id': None, 'started_at': None, 'message_id': None}
 
 
+def _get_active_runs_handler(user, fake_chats: _FakeChats, active_runs: dict) -> dict:
+    """Mirror of GET /active_runs handler logic."""
+    runs = []
+    for chat_id, entry in active_runs.items():
+        chat = fake_chats.get_chat_by_id_and_user_id(chat_id, user.id)
+        if not chat:
+            continue
+        runs.append(
+            {
+                'chat_id': chat_id,
+                'run_id': entry.get('run_id'),
+                'started_at': entry.get('started_at'),
+                'message_id': entry.get('message_id'),
+            }
+        )
+    return {'active_runs': runs}
+
+
 def _get_live_state_handler(
     chat_id: str,
     message_id: str,
@@ -171,6 +189,38 @@ def test_ownership_check_rejects_other_user_active_run(fake_chats, seeded_chat, 
         _get_active_run_handler(seeded_chat.id, _fake_user('user-2'), fake_chats, active_runs)
 
     assert exc_info.value.status_code == 401
+
+
+def test_get_active_runs_returns_only_current_users_runs(fake_chats, seeded_chat, active_runs):
+    """All-active-runs endpoint filters registry entries by chat ownership."""
+    other_chat = fake_chats.seed(_ChatModel(id=str(uuid.uuid4()), user_id='user-2'))
+    active_runs[seeded_chat.id] = {'run_id': 'run-1', 'started_at': 100, 'message_id': 'msg-1'}
+    active_runs[other_chat.id] = {'run_id': 'run-2', 'started_at': 200, 'message_id': 'msg-2'}
+    active_runs['deleted-chat'] = {'run_id': 'run-3', 'started_at': 300, 'message_id': 'msg-3'}
+
+    result = _get_active_runs_handler(_fake_user(), fake_chats, active_runs)
+
+    assert result == {
+        'active_runs': [
+            {
+                'chat_id': seeded_chat.id,
+                'run_id': 'run-1',
+                'started_at': 100,
+                'message_id': 'msg-1',
+            }
+        ]
+    }
+
+
+def test_chats_router_declares_active_runs_before_dynamic_chat_id_route():
+    """Static /active_runs route must not be captured by /{id}."""
+    from pathlib import Path
+
+    router_source = Path(__file__).parents[4] / 'routers' / 'chats.py'
+    source = router_source.read_text()
+
+    assert "@router.get('/active_runs')" in source
+    assert source.index("@router.get('/active_runs')") < source.index("@router.get('/{id}'")
 
 
 # ---------------------------------------------------------------------------

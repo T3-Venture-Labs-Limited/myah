@@ -222,6 +222,34 @@ def test_tool_confirmation_required_options_default() -> None:
     assert instance.metadata == {}
 
 
+def test_tool_confirmation_required_accepts_exec_approval_without_confirmation_id() -> None:
+    """Exec approvals resolve by stream/session key and may omit ``confirmation_id``."""
+    payload = {
+        'event': 'tool.confirmation_required',
+        'action_type': 'exec_approval',
+        'description': 'Allow command?',
+        'options': ['approve', 'deny', 'approve_session'],
+        'metadata': {'command': 'pytest -q'},
+        'stream_id': 'stream-exec-approval',
+    }
+    instance = _HERMES_EVENT_ADAPTER.validate_python(payload)
+    assert isinstance(instance, ToolConfirmationRequiredEvent)
+    assert instance.confirmation_id is None
+    assert instance.action_type == 'exec_approval'
+
+
+def test_tool_confirmation_required_preserves_action_confirmation_id() -> None:
+    """Action confirmations with explicit IDs must still preserve them."""
+    payload = {
+        'event': 'tool.confirmation_required',
+        'confirmation_id': 'conf-action-123',
+        'action_type': 'confirmation',
+    }
+    instance = _HERMES_EVENT_ADAPTER.validate_python(payload)
+    assert isinstance(instance, ToolConfirmationRequiredEvent)
+    assert instance.confirmation_id == 'conf-action-123'
+
+
 # ── Discriminator literal coverage ──────────────────────────────────────────
 
 def test_every_event_class_has_a_literal_event_field() -> None:

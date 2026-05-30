@@ -11,7 +11,7 @@
 	export let localChosen: ApprovalOption | string | null | undefined = item.chosen;
 
 	const dispatch = createEventDispatcher<{
-		confirmed: { confirmation_id: string; choice: ApprovalOption };
+		confirmed: { item_id: string; confirmation_id: string; choice: ApprovalOption };
 		retry: { confirmation_id: string; run_id: string };
 	}>();
 
@@ -86,7 +86,7 @@
 				return;
 			}
 
-			dispatch('confirmed', { confirmation_id: item.confirmation_id, choice });
+			dispatch('confirmed', { item_id: item.id, confirmation_id: item.confirmation_id, choice });
 		} catch {
 			error = 'Network error. Please try again.';
 			submitting = false;
