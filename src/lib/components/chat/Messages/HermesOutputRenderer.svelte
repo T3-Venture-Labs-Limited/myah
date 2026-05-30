@@ -8,6 +8,7 @@
 
 	import type { OutputItem, FunctionCallOutputItem } from './HermesOutputRenderer/types';
 	import { groupChronologically } from './HermesOutputRenderer/groupChronologically';
+	import { confirmationKey } from './HermesOutputRenderer/confirmationKey';
 
 	export let output: OutputItem[] = [];
 	export let messageId: string = '';
@@ -37,10 +38,10 @@
 
 	// Track user-resolved confirmation cards locally so status persists across
 	// parent re-renders from continued SSE events (backend still shows 'pending'
-	// until run.completed sets it to 'cancelled'). Use the output item id, not
-	// confirmation_id: exec approvals legitimately use an empty confirmation_id
-	// and multiple no-ID approvals can appear in the same run.
-	let resolvedConfirmations = new Map<string, string>(); // output item id → chosen option
+	// until run.completed sets it to 'cancelled'). Use the real confirmation_id
+	// when present; no-ID exec approvals fall back to run_id:item.id so multiple
+	// no-ID approvals in the same run do not collide.
+	let resolvedConfirmations = new Map<string, string>(); // confirmationKey(item) → chosen option
 
 	// Track secrets the user has submitted so the card shows 'stored' immediately,
 	// without waiting for the backend to re-emit the item with status='stored'.
@@ -67,13 +68,14 @@
 		{:else if g.kind === 'message'}
 			<MessageText item={g.item} {messageId} done={g.item.status === 'completed' || done} />
 		{:else if g.kind === 'confirmation'}
+			{@const key = confirmationKey(g.item)}
 			<ConfirmationCard
 				item={g.item}
 				{messageId}
-				localStatus={resolvedConfirmations.has(g.item.id) ? 'resolved' : g.item.status}
-				localChosen={resolvedConfirmations.get(g.item.id)}
+				localStatus={resolvedConfirmations.has(key) ? 'resolved' : g.item.status}
+				localChosen={resolvedConfirmations.get(key)}
 				on:confirmed={(e) => {
-					resolvedConfirmations.set(e.detail.item_id, e.detail.choice);
+					resolvedConfirmations.set(key, e.detail.choice);
 					resolvedConfirmations = resolvedConfirmations;
 				}}
 				on:retry

@@ -729,6 +729,111 @@ async def test_background_path_handles_run_cancelled_without_hanging():
 
 
 @pytest.mark.asyncio
+async def test_status_event_is_explicit_noop_not_unknown():
+    """Typed status events must not log as unknown or mutate assistant output."""
+    sse_lines = _make_sse_lines(
+        {'event': 'status', 'run_id': 'stream-status', 'status': 'Still working'},
+        {'event': 'message.delta', 'run_id': 'stream-status', 'delta': 'Hello after status'},
+        {'event': 'run.completed', 'run_id': 'stream-status', 'usage': None},
+    )
+    response = _make_upstream_response(sse_lines)
+    ctx = _make_ctx(with_event_caller=True)
+    upsert_calls = []
+    warnings: list[str] = []
+    sink_id = logger.add(lambda message: warnings.append(str(message)), level='WARNING')
+
+    try:
+        with (
+            patch('myah.utils.hermes_stream_handler.Chats') as mock_chats,
+            patch('myah.utils.hermes_stream_handler.background_tasks_handler', new=AsyncMock()),
+        ):
+            mock_chats.upsert_message_to_chat_by_id_and_message_id.side_effect = (
+                lambda chat_id, message_id, update: upsert_calls.append(update)
+            )
+            from myah.utils.hermes_stream_handler import handle_hermes_stream
+
+            result = await handle_hermes_stream(response, ctx)
+    finally:
+        logger.remove(sink_id)
+
+    assert result is None
+    assert not any('unknown hermes event type' in warning and 'status' in warning for warning in warnings)
+    completions = [e for e in ctx['_emitted'] if e.get('type') == 'chat:completion']
+    assert any(e['data'].get('done') is True for e in completions)
+    assert any('Hello after status' in str(e['data'].get('content', '')) for e in completions)
+    final_output = _final_output(ctx)
+    assert 'Still working' not in json.dumps(final_output)
+    assert 'Hello after status' in json.dumps(final_output)
+    assert any(call.get('done') is True for call in upsert_calls)
+
+
+@pytest.mark.asyncio
+async def test_exec_approval_without_confirmation_id_emits_empty_string_confirmation_item():
+    """No-id exec approvals must render a pending confirmation with confirmation_id ''."""
+    sse_lines = _make_sse_lines(
+        {
+            'event': 'tool.confirmation_required',
+            'stream_id': 'stream-no-id-confirm',
+            'action_type': 'exec_approval',
+            'description': 'Run shell command?',
+            'options': ['approve', 'approve_session', 'deny'],
+            'metadata': {'command': 'pwd'},
+        },
+        {'event': 'run.cancelled', 'stream_id': 'stream-no-id-confirm'},
+    )
+    response = _make_upstream_response(sse_lines)
+    ctx = _make_ctx(with_event_caller=True)
+
+    with (
+        patch('myah.utils.hermes_stream_handler.Chats'),
+        patch('myah.utils.hermes_stream_handler.background_tasks_handler', new=AsyncMock()),
+    ):
+        from myah.utils.hermes_stream_handler import handle_hermes_stream
+
+        await handle_hermes_stream(response, ctx)
+
+    confirmations = [item for item in _final_output(ctx) if item.get('type') == 'confirmation']
+    assert len(confirmations) == 1
+    assert confirmations[0]['confirmation_id'] == ''
+    assert confirmations[0]['run_id'] == 'stream-no-id-confirm'
+    assert confirmations[0]['action_type'] == 'exec_approval'
+    assert confirmations[0]['status'] == 'cancelled'
+
+
+@pytest.mark.asyncio
+async def test_exec_approval_null_confirmation_id_emits_empty_string_confirmation_item():
+    """Explicit JSON null confirmation_id must normalize to the empty output-item ID."""
+    sse_lines = _make_sse_lines(
+        {
+            'event': 'tool.confirmation_required',
+            'stream_id': 'stream-null-confirm',
+            'confirmation_id': None,
+            'action_type': 'exec_approval',
+            'description': 'Run shell command?',
+            'options': ['approve', 'deny'],
+            'metadata': {'command': 'whoami'},
+        },
+        {'event': 'run.cancelled', 'stream_id': 'stream-null-confirm'},
+    )
+    response = _make_upstream_response(sse_lines)
+    ctx = _make_ctx(with_event_caller=True)
+
+    with (
+        patch('myah.utils.hermes_stream_handler.Chats'),
+        patch('myah.utils.hermes_stream_handler.background_tasks_handler', new=AsyncMock()),
+    ):
+        from myah.utils.hermes_stream_handler import handle_hermes_stream
+
+        await handle_hermes_stream(response, ctx)
+
+    confirmations = [item for item in _final_output(ctx) if item.get('type') == 'confirmation']
+    assert len(confirmations) == 1
+    assert confirmations[0]['confirmation_id'] == ''
+    assert confirmations[0]['run_id'] == 'stream-null-confirm'
+    assert confirmations[0]['status'] == 'cancelled'
+
+
+@pytest.mark.asyncio
 async def test_background_path_cancels_pending_confirmation_on_run_cancelled():
     """A pending confirmation card must be cancelled and persisted when the run is cancelled."""
     sse_lines = _make_sse_lines(

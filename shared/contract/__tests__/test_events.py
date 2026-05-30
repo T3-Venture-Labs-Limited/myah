@@ -218,6 +218,7 @@ def test_tool_confirmation_required_options_default() -> None:
     }
     instance = _HERMES_EVENT_ADAPTER.validate_python(payload)
     assert isinstance(instance, ToolConfirmationRequiredEvent)
+    assert instance.confirmation_id == 'conf_1'
     assert instance.options == ['approve', 'deny']
     assert instance.metadata == {}
 
@@ -231,6 +232,20 @@ def test_tool_confirmation_required_accepts_exec_approval_without_confirmation_i
         'options': ['approve', 'deny', 'approve_session'],
         'metadata': {'command': 'pytest -q'},
         'stream_id': 'stream-exec-approval',
+    }
+    instance = _HERMES_EVENT_ADAPTER.validate_python(payload)
+    assert isinstance(instance, ToolConfirmationRequiredEvent)
+    assert instance.confirmation_id is None
+    assert instance.action_type == 'exec_approval'
+
+
+def test_tool_confirmation_required_accepts_null_confirmation_id() -> None:
+    """Exec approvals may send explicit JSON null confirmation_id."""
+    payload = {
+        'event': 'tool.confirmation_required',
+        'confirmation_id': None,
+        'action_type': 'exec_approval',
+        'description': 'Command requires approval',
     }
     instance = _HERMES_EVENT_ADAPTER.validate_python(payload)
     assert isinstance(instance, ToolConfirmationRequiredEvent)
