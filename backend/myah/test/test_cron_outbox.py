@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 import uuid
@@ -677,6 +678,239 @@ class TestOutboxWorkerSingleTick:
             for s in samples:
                 assert lo <= s <= hi, f'attempt {attempt}: backoff {s}s outside [{lo}, {hi}] around {base}s'
 
+    @pytest.mark.asyncio
+    async def test_deliver_one_inject_exception_marks_retry(self, db_session, seed_user_and_chat):
+        """Chat write RAISING (not just returning False) is caught and rescheduled.
+
+        Covers the ``except`` arm around ``_inject_cron_output_to_chat`` — distinct
+        from the ``if not ok`` False-return path already exercised by
+        ``test_deliver_one_chat_write_failure_marks_retry``.
+        """
+        from myah.models.cron_deliveries import CronDeliveries
+        from myah.utils.cron_outbox_worker import OutboxWorker
+
+        user_id, chat_id, _ = seed_user_and_chat
+        row_id = CronDeliveries.insert_idempotent(
+            {
+                'user_id': user_id,
+                'job_id': 'jraise',
+                'chat_id': chat_id,
+                'ran_at_iso': '2026-05-26T11:47:00+00:00',
+                'content': 'will raise',
+                'metadata_json': json.dumps({'job_name': 'jraise', 'status': 'ok', 'tool_calls_log': None}),
+            }
+        )
+        row = CronDeliveries.pop_pending(batch_size=10, lease_ttl_secs=300)[0]
+
+        worker = OutboxWorker()
+        with patch('myah.routers.processes._inject_cron_output_to_chat', new_callable=AsyncMock) as mock_inject:
+            mock_inject.side_effect = RuntimeError('chat lookup blew up')
+            await worker.deliver_one(row)
+
+        final = CronDeliveries.get_by_id(row_id)
+        assert final.delivery_status == 'pending'
+        assert final.retry_count == 1
+        assert final.next_retry_at is not None
+        assert final.last_error is not None
+        assert 'chat lookup blew up' in final.last_error
+
+    @pytest.mark.asyncio
+    async def test_deliver_one_mark_delivered_failure_is_non_fatal(self, db_session, seed_user_and_chat):
+        """If chat write succeeds but mark_delivered raises, deliver_one logs and
+        returns BEFORE the best-effort socket emit (no crash)."""
+        from myah.models.cron_deliveries import CronDeliveries
+        from myah.utils.cron_outbox_worker import OutboxWorker
+
+        user_id, chat_id, _ = seed_user_and_chat
+        CronDeliveries.insert_idempotent(
+            {
+                'user_id': user_id,
+                'job_id': 'jmarkfail',
+                'chat_id': chat_id,
+                'ran_at_iso': '2026-05-26T11:47:00+00:00',
+                'content': 'ok',
+                'metadata_json': json.dumps({'job_name': 'jmarkfail', 'status': 'ok', 'tool_calls_log': None}),
+            }
+        )
+        row = CronDeliveries.pop_pending(batch_size=10, lease_ttl_secs=300)[0]
+
+        worker = OutboxWorker()
+        # NOTE: patch CronDeliveries on the WORKER module, not the model module.
+        # The db_session fixture deletes myah.models.cron_deliveries from
+        # sys.modules each test, but the already-imported worker keeps its own
+        # `from ... import CronDeliveries` binding. Patching the model path would
+        # target a different class object than the one the worker actually calls.
+        with (
+            patch('myah.routers.processes._inject_cron_output_to_chat', new_callable=AsyncMock) as mock_inject,
+            patch(
+                'myah.utils.cron_outbox_worker.CronDeliveries.mark_delivered',
+                side_effect=RuntimeError('db write failed'),
+            ),
+            patch('myah.socket.main.sio.emit', new_callable=AsyncMock) as mock_emit,
+        ):
+            mock_inject.return_value = True
+            await worker.deliver_one(row)  # must not raise
+
+        mock_emit.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_deliver_one_emits_agui_events_when_tool_calls_log_present(self, db_session, seed_user_and_chat):
+        """A delivered row carrying a tool_calls_log fans out best-effort AG-UI
+        ``events`` emits in addition to the ``process:run-complete`` emit."""
+        from myah.models.cron_deliveries import CronDeliveries
+        from myah.utils.cron_outbox_worker import OutboxWorker
+
+        user_id, chat_id, _ = seed_user_and_chat
+        tool_calls_log = [
+            {
+                'role': 'assistant',
+                'tool_calls': [{'id': 'call-1', 'function': {'name': 'render_ui', 'arguments': '{"blocks": []}'}}],
+            }
+        ]
+        row_id = CronDeliveries.insert_idempotent(
+            {
+                'user_id': user_id,
+                'job_id': 'jagui',
+                'chat_id': chat_id,
+                'ran_at_iso': '2026-05-26T11:47:00+00:00',
+                'content': 'with tools',
+                'metadata_json': json.dumps({'job_name': 'jagui', 'status': 'ok', 'tool_calls_log': tool_calls_log}),
+            }
+        )
+        row = CronDeliveries.pop_pending(batch_size=10, lease_ttl_secs=300)[0]
+
+        worker = OutboxWorker()
+        with (
+            patch('myah.routers.processes._inject_cron_output_to_chat', new_callable=AsyncMock) as mock_inject,
+            patch('myah.socket.main.sio.emit', new_callable=AsyncMock) as mock_emit,
+        ):
+            mock_inject.return_value = True
+            await worker.deliver_one(row)
+
+        final = CronDeliveries.get_by_id(row_id)
+        assert final.delivery_status == 'delivered'
+        agui_emits = [c for c in mock_emit.call_args_list if c.args and c.args[0] == 'events']
+        assert agui_emits, 'expected AG-UI events emit when tool_calls_log present'
+        envelope = agui_emits[0].args[1]
+        assert envelope['data']['type'] == 'agui:event'
+        assert agui_emits[0].kwargs.get('room') == f'user:{user_id}'
+
+    @pytest.mark.asyncio
+    async def test_deliver_one_agui_emit_failure_is_non_fatal(self, db_session, seed_user_and_chat):
+        """A raising AG-UI emit must not roll back the already-delivered row."""
+        from myah.models.cron_deliveries import CronDeliveries
+        from myah.utils.cron_outbox_worker import OutboxWorker
+
+        user_id, chat_id, _ = seed_user_and_chat
+        tool_calls_log = [
+            {
+                'role': 'assistant',
+                'tool_calls': [{'id': 'call-1', 'function': {'name': 'render_ui', 'arguments': '{"blocks": []}'}}],
+            }
+        ]
+        row_id = CronDeliveries.insert_idempotent(
+            {
+                'user_id': user_id,
+                'job_id': 'jaguifail',
+                'chat_id': chat_id,
+                'ran_at_iso': '2026-05-26T11:47:00+00:00',
+                'content': 'with tools',
+                'metadata_json': json.dumps(
+                    {'job_name': 'jaguifail', 'status': 'ok', 'tool_calls_log': tool_calls_log}
+                ),
+            }
+        )
+        row = CronDeliveries.pop_pending(batch_size=10, lease_ttl_secs=300)[0]
+
+        worker = OutboxWorker()
+        with (
+            patch('myah.routers.processes._inject_cron_output_to_chat', new_callable=AsyncMock) as mock_inject,
+            patch('myah.socket.main.sio.emit', new_callable=AsyncMock) as mock_emit,
+        ):
+            mock_inject.return_value = True
+            mock_emit.side_effect = RuntimeError('socket gone')
+            await worker.deliver_one(row)  # must not raise
+
+        final = CronDeliveries.get_by_id(row_id)
+        assert final.delivery_status == 'delivered', 'AG-UI emit failure must not block delivered terminal state'
+        agui_attempts = [c for c in mock_emit.call_args_list if c.args and c.args[0] == 'events']
+        assert agui_attempts, 'expected AG-UI events emit to be attempted before the non-fatal failure'
+
+    @pytest.mark.asyncio
+    async def test_terminal_failure_captures_even_if_mark_failed_raises(self, db_session, seed_user_and_chat):
+        """A mark_failed DB error at the retry ceiling must not suppress the
+        terminal-failure Sentry capture."""
+        from myah.internal.db import get_db
+        from myah.models.cron_deliveries import CronDeliveries, CronDelivery
+        from myah.utils.cron_outbox_worker import OutboxWorker
+
+        user_id, chat_id, _ = seed_user_and_chat
+        row_id = CronDeliveries.insert_idempotent(
+            {
+                'user_id': user_id,
+                'job_id': 'jcapfail',
+                'chat_id': chat_id,
+                'ran_at_iso': '2026-05-26T11:47:00+00:00',
+                'content': 'will exhaust',
+                'metadata_json': json.dumps({'job_name': 'jcapfail', 'status': 'ok', 'tool_calls_log': None}),
+            }
+        )
+        with get_db() as db:
+            db.query(CronDelivery).filter(CronDelivery.id == row_id).update(
+                {CronDelivery.retry_count: 4}, synchronize_session=False
+            )
+            db.commit()
+        row = CronDeliveries.get_by_id(row_id)
+
+        worker = OutboxWorker()
+        with (
+            patch('myah.routers.processes._inject_cron_output_to_chat', new_callable=AsyncMock) as mock_inject,
+            patch('myah.utils.cron_outbox_worker.CronDeliveries.mark_failed', side_effect=RuntimeError('db down')),
+            patch('myah.utils.cron_outbox_metrics.capture_row_failed') as mock_capture,
+        ):
+            mock_inject.return_value = False
+            await worker.deliver_one(row)  # must not raise
+
+        mock_capture.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_retry_path_swallows_mark_retry_db_error(self, db_session, seed_user_and_chat):
+        """A mark_retry DB error is logged, not raised, and the retry breadcrumb
+        (emitted only after a successful mark_retry) is skipped."""
+        from myah.models.cron_deliveries import CronDeliveries
+        from myah.utils.cron_outbox_worker import OutboxWorker
+
+        user_id, chat_id, _ = seed_user_and_chat
+        CronDeliveries.insert_idempotent(
+            {
+                'user_id': user_id,
+                'job_id': 'jretryfail',
+                'chat_id': chat_id,
+                'ran_at_iso': '2026-05-26T11:47:00+00:00',
+                'content': 'retry write fails',
+                'metadata_json': json.dumps({'job_name': 'jretryfail', 'status': 'ok', 'tool_calls_log': None}),
+            }
+        )
+        row = CronDeliveries.pop_pending(batch_size=10, lease_ttl_secs=300)[0]
+
+        worker = OutboxWorker()
+        with (
+            patch('myah.routers.processes._inject_cron_output_to_chat', new_callable=AsyncMock) as mock_inject,
+            patch('myah.utils.cron_outbox_worker.CronDeliveries.mark_retry', side_effect=RuntimeError('db down')),
+            patch('myah.utils.cron_outbox_metrics.emit_retry_scheduled_breadcrumb') as mock_crumb,
+        ):
+            mock_inject.return_value = False
+            await worker.deliver_one(row)  # must not raise
+
+        mock_crumb.assert_not_called()
+
+    def test_compute_next_retry_out_of_range_returns_max_backoff(self):
+        """attempt < 1 or beyond the schedule length clamps to the final backoff."""
+        from myah.utils.cron_outbox_worker import _BACKOFF_SCHEDULE_SECS, _compute_next_retry_at_secs
+
+        assert _compute_next_retry_at_secs(0) == _BACKOFF_SCHEDULE_SECS[-1]
+        assert _compute_next_retry_at_secs(len(_BACKOFF_SCHEDULE_SECS) + 1) == _BACKOFF_SCHEDULE_SECS[-1]
+
 
 class TestOutboxWorkerLifespanRegistration:
     """Worker task registration logic — tested via the helper, not TestClient(app)."""
@@ -736,6 +970,215 @@ class TestOutboxWorkerLifespanRegistration:
                 app_obj.state.cron_outbox_worker_task.cancel()
 
         asyncio.run(_run())
+
+
+class TestOutboxWorkerTickLoop:
+    """OutboxWorker._tick() orchestration: reclaim cadence, mode gating,
+    pop+deliver fan-out, and per-row error isolation."""
+
+    def _seed_pending(self, CronDeliveries, user_id, chat_id, job_id='jtick'):
+        return CronDeliveries.insert_idempotent(
+            {
+                'user_id': user_id,
+                'job_id': job_id,
+                'chat_id': chat_id,
+                'ran_at_iso': '2026-05-26T11:47:00+00:00',
+                'content': 'tick body',
+                'metadata_json': json.dumps({'job_name': job_id, 'status': 'ok', 'tool_calls_log': None}),
+            }
+        )
+
+    @pytest.mark.asyncio
+    async def test_tick_delivers_pending_rows_in_outbox_mode(self, db_session, seed_user_and_chat, monkeypatch):
+        """In outbox mode the tick pops the pending batch and delivers each row."""
+        monkeypatch.setenv('MYAH_CRON_DELIVERY_MODE', 'outbox')
+        from myah.models.cron_deliveries import CronDeliveries
+        from myah.utils.cron_outbox_worker import OutboxWorker
+
+        user_id, chat_id, _ = seed_user_and_chat
+        row_id = self._seed_pending(CronDeliveries, user_id, chat_id)
+
+        worker = OutboxWorker()
+        worker._last_parity_emit_at = int(time.time())  # skip the parity emit branch
+        with (
+            patch('myah.routers.processes._inject_cron_output_to_chat', new_callable=AsyncMock) as mock_inject,
+            patch('myah.socket.main.sio.emit', new_callable=AsyncMock),
+        ):
+            mock_inject.return_value = True
+            await worker._tick()
+
+        final = CronDeliveries.get_by_id(row_id)
+        assert final.delivery_status == 'delivered'
+        assert mock_inject.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_tick_shadow_mode_skips_row_delivery(self, db_session, seed_user_and_chat, monkeypatch):
+        """Shadow mode does reclaim + parity only; it must never deliver rows."""
+        monkeypatch.setenv('MYAH_CRON_DELIVERY_MODE', 'shadow')
+        from myah.models.cron_deliveries import CronDeliveries
+        from myah.utils.cron_outbox_worker import OutboxWorker
+
+        user_id, chat_id, _ = seed_user_and_chat
+        row_id = self._seed_pending(CronDeliveries, user_id, chat_id, job_id='jshadow')
+
+        worker = OutboxWorker()
+        worker._last_parity_emit_at = int(time.time())
+        with patch('myah.routers.processes._inject_cron_output_to_chat', new_callable=AsyncMock) as mock_inject:
+            await worker._tick()
+            mock_inject.assert_not_called()
+
+        final = CronDeliveries.get_by_id(row_id)
+        assert final.delivery_status == 'pending', 'shadow mode must not deliver rows'
+
+    @pytest.mark.asyncio
+    async def test_tick_reclaims_stuck_leases_on_reclaim_tick(self, db_session, seed_user_and_chat, monkeypatch):
+        """Every _RECLAIM_EVERY_N_TICKS ticks, stuck delivering rows are reset to
+        pending and the reclaim breadcrumb is emitted with the reclaimed count."""
+        monkeypatch.setenv('MYAH_CRON_DELIVERY_MODE', 'shadow')  # isolate the reclaim path
+        from myah.models.cron_deliveries import CronDeliveries
+        from myah.utils.cron_outbox_worker import OutboxWorker, _RECLAIM_EVERY_N_TICKS
+
+        user_id, chat_id, _ = seed_user_and_chat
+        row_id = self._seed_pending(CronDeliveries, user_id, chat_id, job_id='jstuck')
+        CronDeliveries.pop_pending(batch_size=10, lease_ttl_secs=300)  # -> delivering + leased
+        CronDeliveries._test_backdate_lease(row_id, secs_ago=600)  # stuck beyond TTL
+
+        worker = OutboxWorker()
+        worker._tick_count = _RECLAIM_EVERY_N_TICKS - 1  # next tick hits the reclaim cadence
+        worker._last_parity_emit_at = int(time.time())
+        with patch('myah.utils.cron_outbox_metrics.emit_lease_reclaim_breadcrumb') as mock_crumb:
+            await worker._tick()
+            mock_crumb.assert_called_once()
+            assert mock_crumb.call_args.args[0] == 1  # reclaimed count
+
+        final = CronDeliveries.get_by_id(row_id)
+        assert final.delivery_status == 'pending'
+        assert final.leased_at is None
+
+    @pytest.mark.asyncio
+    async def test_tick_reclaim_tick_with_no_stuck_rows_is_noop(self, db_session, monkeypatch):
+        """A reclaim-cadence tick with nothing stuck returns an empty list and
+        emits no reclaim breadcrumb (covers the falsy ``if reclaimed`` branch)."""
+        monkeypatch.setenv('MYAH_CRON_DELIVERY_MODE', 'shadow')
+        from myah.utils.cron_outbox_worker import OutboxWorker, _RECLAIM_EVERY_N_TICKS
+
+        worker = OutboxWorker()
+        worker._tick_count = _RECLAIM_EVERY_N_TICKS - 1
+        worker._last_parity_emit_at = int(time.time())
+        with patch('myah.utils.cron_outbox_metrics.emit_lease_reclaim_breadcrumb') as mock_crumb:
+            await worker._tick()  # reclaim runs against an empty table -> []
+            mock_crumb.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_tick_reclaim_failure_is_non_fatal(self, db_session, monkeypatch):
+        """A failing reclaim_stuck_leases is logged and the tick keeps going."""
+        monkeypatch.setenv('MYAH_CRON_DELIVERY_MODE', 'shadow')
+        from myah.utils.cron_outbox_worker import OutboxWorker, _RECLAIM_EVERY_N_TICKS
+
+        worker = OutboxWorker()
+        worker._tick_count = _RECLAIM_EVERY_N_TICKS - 1
+        worker._last_parity_emit_at = int(time.time())
+        with patch(
+            'myah.utils.cron_outbox_worker.CronDeliveries.reclaim_stuck_leases',
+            side_effect=RuntimeError('db down'),
+        ):
+            await worker._tick()  # must not raise
+
+    @pytest.mark.asyncio
+    async def test_tick_pop_failure_is_non_fatal(self, db_session, monkeypatch):
+        """A failing _pop_next_batch is logged and the tick returns cleanly."""
+        monkeypatch.setenv('MYAH_CRON_DELIVERY_MODE', 'outbox')
+        from myah.utils.cron_outbox_worker import OutboxWorker
+
+        worker = OutboxWorker()
+        worker._last_parity_emit_at = int(time.time())
+        with patch.object(worker, '_pop_next_batch', side_effect=RuntimeError('pop failed')):
+            await worker._tick()  # must not raise
+
+    @pytest.mark.asyncio
+    async def test_tick_continues_when_deliver_one_raises(self, db_session, seed_user_and_chat, monkeypatch):
+        """A deliver_one exception is caught per-row so the batch loop survives."""
+        monkeypatch.setenv('MYAH_CRON_DELIVERY_MODE', 'outbox')
+        from myah.models.cron_deliveries import CronDeliveries
+        from myah.utils.cron_outbox_worker import OutboxWorker
+
+        user_id, chat_id, _ = seed_user_and_chat
+        self._seed_pending(CronDeliveries, user_id, chat_id, job_id='jdeliverboom')
+
+        worker = OutboxWorker()
+        worker._last_parity_emit_at = int(time.time())
+        with patch.object(
+            worker, 'deliver_one', new_callable=AsyncMock, side_effect=RuntimeError('deliver boom')
+        ) as mock_deliver:
+            await worker._tick()  # must not raise
+            mock_deliver.assert_awaited()
+
+    @pytest.mark.asyncio
+    async def test_tick_no_pending_rows_is_noop(self, db_session, monkeypatch):
+        """An empty pop batch returns without attempting any chat write."""
+        monkeypatch.setenv('MYAH_CRON_DELIVERY_MODE', 'outbox')
+        from myah.utils.cron_outbox_worker import OutboxWorker
+
+        worker = OutboxWorker()
+        worker._last_parity_emit_at = int(time.time())
+        with patch('myah.routers.processes._inject_cron_output_to_chat', new_callable=AsyncMock) as mock_inject:
+            await worker._tick()
+            mock_inject.assert_not_called()
+
+
+class TestOutboxWorkerRunLoop:
+    """OutboxWorker.run(): tick scheduling, shutdown, and the cancelled /
+    exception arms of the loop body."""
+
+    @pytest.mark.asyncio
+    async def test_run_ticks_until_shutdown(self, monkeypatch):
+        """run() keeps ticking (honouring the wait timeout) until stop() is set."""
+        from myah.utils import cron_outbox_worker as worker_mod
+        from myah.utils.cron_outbox_worker import OutboxWorker
+
+        monkeypatch.setattr(worker_mod, '_TICK_INTERVAL_SECS', 0.01)
+        worker = OutboxWorker()
+        calls = {'n': 0}
+
+        async def fake_tick():
+            calls['n'] += 1
+            if calls['n'] >= 2:
+                worker.stop()
+
+        monkeypatch.setattr(worker, '_tick', fake_tick)
+        await asyncio.wait_for(worker.run(), timeout=2.0)
+        assert calls['n'] >= 2
+
+    @pytest.mark.asyncio
+    async def test_run_continues_after_tick_exception(self, monkeypatch):
+        """A non-cancel tick exception is logged and the loop continues."""
+        from myah.utils.cron_outbox_worker import OutboxWorker
+
+        worker = OutboxWorker()
+        calls = {'n': 0}
+
+        async def fake_tick():
+            calls['n'] += 1
+            worker.stop()  # let the loop exit after this iteration
+            raise RuntimeError('tick boom')
+
+        monkeypatch.setattr(worker, '_tick', fake_tick)
+        await asyncio.wait_for(worker.run(), timeout=2.0)  # must not raise
+        assert calls['n'] == 1
+
+    @pytest.mark.asyncio
+    async def test_run_reraises_cancelled_error(self, monkeypatch):
+        """CancelledError from a tick is re-raised so task cancellation works."""
+        from myah.utils.cron_outbox_worker import OutboxWorker
+
+        worker = OutboxWorker()
+
+        async def fake_tick():
+            raise asyncio.CancelledError()
+
+        monkeypatch.setattr(worker, '_tick', fake_tick)
+        with pytest.raises(asyncio.CancelledError):
+            await worker.run()
 
 
 class TestCronOutboxCleanup:
@@ -983,6 +1426,38 @@ class TestCronOutboxParityEmit:
             mock_event.assert_called_once()
             args = mock_event.call_args.args
             assert isinstance(args[2], int), 'gap_count must be int'
+
+    @pytest.mark.asyncio
+    async def test_parity_emit_skipped_when_not_due(self, db_session):
+        """Without force, a recent _last_parity_emit_at short-circuits before any
+        gap query or event emit."""
+        from myah.utils.cron_outbox_worker import OutboxWorker
+
+        worker = OutboxWorker()
+        worker._last_parity_emit_at = int(time.time())  # just emitted -> not due yet
+        with (
+            patch('myah.utils.cron_outbox_worker.CronDeliveries.count_parity_gap') as mock_gap,
+            patch('myah.utils.cron_outbox_metrics.emit_parity_event') as mock_event,
+        ):
+            await worker._emit_parity_check_if_due(force=False)
+            mock_gap.assert_not_called()
+            mock_event.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_parity_gap_query_failure_is_non_fatal(self, db_session):
+        """A failing count_parity_gap is logged and swallowed; no event emitted."""
+        from myah.utils.cron_outbox_worker import OutboxWorker
+
+        worker = OutboxWorker()
+        with (
+            patch(
+                'myah.utils.cron_outbox_worker.CronDeliveries.count_parity_gap',
+                side_effect=RuntimeError('db down'),
+            ),
+            patch('myah.utils.cron_outbox_metrics.emit_parity_event') as mock_event,
+        ):
+            await worker._emit_parity_check_if_due(force=True)  # must not raise
+            mock_event.assert_not_called()
 
 
 class TestCronDeliveryModeEnv:

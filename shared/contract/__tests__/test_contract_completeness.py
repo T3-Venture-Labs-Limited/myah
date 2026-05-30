@@ -30,6 +30,7 @@ from typing import get_args
 import pytest
 
 from shared.contract.events import HermesEvent
+from shared.contract.samples import EVENT_SAMPLES
 
 # ── Filesystem layout ──────────────────────────────────────────────────────
 # Plan B PR B (2026-05-12) deleted the agent/hermes/ submodule. Tests now
@@ -165,6 +166,21 @@ def test_at_least_one_hermes_event_was_discovered() -> None:
         f'Hermes event discovery regex found only {len(discovered)} events — '
         f'something is wrong with the regex or the submodule layout. '
         f'Discovered: {sorted(discovered)}'
+    )
+
+
+def test_every_snapshot_event_has_a_sample() -> None:
+    """Every snapshot-known Hermes event has reusable sample payload data."""
+    discovered = _discover_hermes_event_types()
+    sampled = set(EVENT_SAMPLES)
+    missing = discovered - sampled
+    assert not missing, (
+        f'Hermes emits these event types without reusable samples: {sorted(missing)}. '
+        f'Add plain payload dicts to ``shared.contract.samples.EVENT_SAMPLES``.'
+    )
+    unexpected = sampled - discovered
+    assert not unexpected, (
+        f'Reusable samples declare event types absent from the Hermes snapshot: {sorted(unexpected)}.'
     )
 
 

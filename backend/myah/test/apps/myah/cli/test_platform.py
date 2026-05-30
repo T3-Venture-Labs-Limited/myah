@@ -131,7 +131,7 @@ def test_platform_down_invokes_docker_compose_down(fake_env: Path, mocker) -> No
 
 
 def test_platform_restart_invokes_docker_compose_restart(fake_env: Path, mocker) -> None:
-    """`myah platform restart` invokes `docker compose -f <root>/docker-compose.yml restart`."""
+    """`myah platform restart` is a process restart, not an image update/recreate."""
     run_mock = mocker.patch('myah.cli.platform_.run', return_value=_ok())
 
     result = runner.invoke(app, ['platform', 'restart'])
@@ -146,6 +146,53 @@ def test_platform_restart_invokes_docker_compose_restart(fake_env: Path, mocker)
         'restart',
     ]
 
+
+
+
+def test_platform_update_builds_local_image_and_force_recreates(fake_env: Path, mocker) -> None:
+    """`myah platform update` rebuilds local OSS image and recreates the container."""
+    (fake_env / 'docker-compose.yml').write_text(
+        """
+services:
+  platform:
+    image: ${MYAH_PLATFORM_IMAGE:-myah/platform:latest}
+    build:
+      context: .
+""".lstrip(),
+        encoding='utf-8',
+    )
+    run_mock = mocker.patch('myah.cli.platform_.run', return_value=_ok())
+
+    result = runner.invoke(app, ['platform', 'update'])
+
+    assert result.exit_code == 0, result.stdout
+    calls = [c.args[0] for c in run_mock.call_args_list]
+    assert calls == [
+        ['docker', 'compose', '-f', str(fake_env / 'docker-compose.yml'), 'build', 'platform'],
+        ['docker', 'compose', '-f', str(fake_env / 'docker-compose.yml'), 'up', '-d', '--force-recreate', 'platform'],
+    ]
+
+
+def test_platform_update_pulls_registry_image_and_force_recreates(fake_env: Path, mocker) -> None:
+    """Registry-backed platform installs pull before recreating the container."""
+    (fake_env / 'docker-compose.yml').write_text(
+        """
+services:
+  platform:
+    image: ghcr.io/t3-venture-labs-limited/myah-platform-oss:latest
+""".lstrip(),
+        encoding='utf-8',
+    )
+    run_mock = mocker.patch('myah.cli.platform_.run', return_value=_ok())
+
+    result = runner.invoke(app, ['platform', 'update'])
+
+    assert result.exit_code == 0, result.stdout
+    calls = [c.args[0] for c in run_mock.call_args_list]
+    assert calls == [
+        ['docker', 'compose', '-f', str(fake_env / 'docker-compose.yml'), 'pull'],
+        ['docker', 'compose', '-f', str(fake_env / 'docker-compose.yml'), 'up', '-d', '--force-recreate', 'platform'],
+    ]
 
 def test_platform_up_succeeds_when_compose_returns_0(fake_env: Path, mocker) -> None:
     """Successful docker compose run → exit 0; stdout surfaces."""

@@ -21,10 +21,8 @@ from pathlib import Path
 from unittest.mock import MagicMock, call, patch
 
 import pytest
-
 from myah.lib.cli import hermes_install
 from myah.lib.cli.shell import ShellError, ShellResult
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -67,6 +65,25 @@ class TestDetectHermesVenv:
         monkeypatch.setenv('MYAH_HERMES_VENV', str(bad))
         with pytest.raises(RuntimeError, match=str(bad)):
             hermes_install.detect_hermes_venv()
+
+    def test_selected_hermes_home_venv_wins_over_global_candidates(self, tmp_path: Path, monkeypatch) -> None:
+        monkeypatch.delenv('MYAH_HERMES_VENV', raising=False)
+        selected_home = tmp_path / 'selected-home'
+        selected_venv = _make_executable_python(selected_home / 'hermes-agent' / 'venv')
+        global_candidate = _make_executable_python(tmp_path / 'global-candidate')
+        monkeypatch.setattr(hermes_install, '_HERMES_VENV_CANDIDATES', (global_candidate,))
+
+        assert hermes_install.detect_hermes_venv(hermes_home=selected_home) == selected_venv
+
+    def test_selected_hermes_home_missing_venv_falls_back_to_global_candidates(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        monkeypatch.delenv('MYAH_HERMES_VENV', raising=False)
+        selected_home = tmp_path / 'selected-home'
+        global_candidate = _make_executable_python(tmp_path / 'global-candidate')
+        monkeypatch.setattr(hermes_install, '_HERMES_VENV_CANDIDATES', (global_candidate,))
+
+        assert hermes_install.detect_hermes_venv(hermes_home=selected_home) == global_candidate
 
     def test_first_candidate_with_executable_python_wins(self, tmp_path: Path, monkeypatch) -> None:
         monkeypatch.delenv('MYAH_HERMES_VENV', raising=False)
@@ -136,6 +153,182 @@ class TestDetectHermesVenv:
         msg = str(exc.value)
         assert 'MYAH_HERMES_VENV' in msg
         assert 'env-based shebang' in msg
+
+
+# ---------------------------------------------------------------------------
+# inspect_hermes_runtime
+# ---------------------------------------------------------------------------
+
+
+class TestInspectHermesRuntime:
+    def test_checkout_import_path_records_editable_source(self, tmp_path: Path) -> None:
+        hermes_home = tmp_path / 'hermes-home'
+        checkout = tmp_path / 'checkout'
+        (checkout / 'hermes_cli').mkdir(parents=True)
+        (checkout / 'pyproject.toml').write_text('[project]\nname = "hermes-agent"\n')
+        (checkout / 'ui-tui').mkdir()
+        venv = tmp_path / 'venv'
+        import_path = checkout / 'hermes_cli' / '__init__.py'
+
+        with patch.object(hermes_install, 'run') as mock_run:
+            mock_run.return_value = _ok(stdout=f'{{"hermes_cli_file": "{import_path}"}}')
+            state = hermes_install.inspect_hermes_runtime(venv, hermes_home)
+
+        assert state.venv_path == venv
+        assert state.hermes_home == hermes_home
+        assert state.import_path == import_path
+        assert state.active_project_path == checkout
+        assert state.editable_source_path == checkout
+        assert state.active_runtime_is_site_packages is False
+        assert state.ui_tui_path == checkout / 'ui-tui'
+
+    def test_site_packages_runtime_falls_back_to_selected_home_checkout(self, tmp_path: Path) -> None:
+        hermes_home = tmp_path / 'hermes-home'
+        checkout = hermes_home / 'hermes-agent'
+        (checkout / 'pyproject.toml').parent.mkdir(parents=True)
+        (checkout / 'pyproject.toml').write_text('[project]\nname = "hermes-agent"\n')
+        (checkout / 'ui-tui').mkdir()
+        venv = tmp_path / 'venv'
+        import_path = venv / 'lib' / 'python3.12' / 'site-packages' / 'hermes_cli' / '__init__.py'
+
+        with patch.object(hermes_install, 'run') as mock_run:
+            mock_run.return_value = _ok(stdout=f'{{"hermes_cli_file": "{import_path}"}}')
+            state = hermes_install.inspect_hermes_runtime(venv, hermes_home)
+
+        assert state.import_path == import_path
+        assert state.active_project_path == import_path.parent.parent
+        assert state.expected_checkout_path == checkout
+        assert state.editable_source_path == checkout
+        assert state.active_runtime_is_site_packages is True
+        assert state.ui_tui_path == import_path.parent.parent / 'ui-tui'
+
+    def test_probe_failure_returns_unknown_import_path(self, tmp_path: Path) -> None:
+        with patch.object(hermes_install, 'run') as mock_run:
+            mock_run.return_value = _fail(returncode=1, stderr='import failed')
+            state = hermes_install.inspect_hermes_runtime(tmp_path / 'venv', tmp_path / 'home')
+
+        assert state.import_path is None
+        assert state.active_project_path is None
+        assert state.editable_source_path is None
+        assert state.active_runtime_is_site_packages is False
+        assert state.ui_tui_path is None
+
+    def test_malformed_json_returns_unknown_import_path(self, tmp_path: Path) -> None:
+        with patch.object(hermes_install, 'run') as mock_run:
+            mock_run.return_value = _ok(stdout='not json')
+            state = hermes_install.inspect_hermes_runtime(tmp_path / 'venv', tmp_path / 'home')
+
+        assert state.import_path is None
+        assert state.active_project_path is None
+        assert state.active_runtime_is_site_packages is False
+
+
+# ---------------------------------------------------------------------------
+# reassert_editable_hermes_if_needed
+# ---------------------------------------------------------------------------
+
+
+def _runtime_state(
+    tmp_path: Path,
+    *,
+    active_project: Path | None,
+    editable_source: Path | None,
+    import_path: Path | None = None,
+) -> hermes_install.HermesRuntimeState:
+    venv = tmp_path / 'venv'
+    return hermes_install.HermesRuntimeState(
+        venv_path=venv,
+        hermes_home=tmp_path / 'home',
+        import_path=import_path,
+        active_project_path=active_project,
+        expected_checkout_path=tmp_path / 'home' / 'hermes-agent',
+        editable_source_path=editable_source,
+        active_runtime_is_site_packages=bool(import_path and 'site-packages' in import_path.parts),
+        ui_tui_path=(active_project / 'ui-tui') if active_project is not None else None,
+    )
+
+
+class TestReassertEditableHermes:
+    def test_repairs_when_runtime_moves_from_editable_source_to_site_packages(self, tmp_path: Path) -> None:
+        checkout = tmp_path / 'checkout'
+        checkout.mkdir()
+        (checkout / 'pyproject.toml').write_text('[project]\nname = "hermes-agent"\n')
+        before = _runtime_state(tmp_path, active_project=checkout, editable_source=checkout)
+        site_packages = tmp_path / 'venv' / 'lib' / 'python3.12' / 'site-packages'
+        after = _runtime_state(
+            tmp_path,
+            active_project=site_packages,
+            editable_source=checkout,
+            import_path=site_packages / 'hermes_cli' / '__init__.py',
+        )
+
+        with patch.object(hermes_install, 'run') as mock_run:
+            mock_run.return_value = _ok()
+            repaired = hermes_install.reassert_editable_hermes_if_needed(before, after)
+
+        assert repaired is True
+        assert mock_run.call_args_list[0].args[0] == [
+            str(tmp_path / 'venv' / 'bin' / 'python'),
+            '-m',
+            'pip',
+            'uninstall',
+            '-y',
+            'hermes-agent',
+        ]
+        assert mock_run.call_args_list[0].kwargs.get('check') is False
+        assert mock_run.call_args_list[1].args[0] == [
+            str(tmp_path / 'venv' / 'bin' / 'python'),
+            '-m',
+            'pip',
+            'install',
+            '-e',
+            str(checkout),
+            '--config-settings',
+            'editable_mode=compat',
+        ]
+        assert mock_run.call_args_list[1].kwargs.get('check') is True
+
+    def test_noop_when_before_has_no_editable_source(self, tmp_path: Path) -> None:
+        before = _runtime_state(tmp_path, active_project=None, editable_source=None)
+        after = _runtime_state(tmp_path, active_project=tmp_path / 'site-packages', editable_source=None)
+
+        with patch.object(hermes_install, 'run') as mock_run:
+            assert hermes_install.reassert_editable_hermes_if_needed(before, after) is False
+
+        mock_run.assert_not_called()
+
+    def test_noop_when_runtime_still_points_at_same_editable_source(self, tmp_path: Path) -> None:
+        checkout = tmp_path / 'checkout'
+        checkout.mkdir()
+        (checkout / 'pyproject.toml').write_text('[project]\nname = "hermes-agent"\n')
+        before = _runtime_state(tmp_path, active_project=checkout, editable_source=checkout)
+        after = _runtime_state(tmp_path, active_project=checkout, editable_source=checkout)
+
+        with patch.object(hermes_install, 'run') as mock_run:
+            assert hermes_install.reassert_editable_hermes_if_needed(before, after) is False
+
+        mock_run.assert_not_called()
+
+    def test_raises_actionable_error_when_original_editable_source_missing(self, tmp_path: Path) -> None:
+        missing_checkout = tmp_path / 'missing-checkout'
+        before = _runtime_state(tmp_path, active_project=missing_checkout, editable_source=missing_checkout)
+        site_packages = tmp_path / 'venv' / 'lib' / 'python3.12' / 'site-packages'
+        after = _runtime_state(
+            tmp_path,
+            active_project=site_packages,
+            editable_source=missing_checkout,
+            import_path=site_packages / 'hermes_cli' / '__init__.py',
+        )
+
+        with pytest.raises(RuntimeError) as exc:
+            hermes_install.reassert_editable_hermes_if_needed(before, after)
+
+        message = str(exc.value)
+        assert 'HERMES_HOME' in message
+        assert 'venv=' in message
+        assert 'active_import=' in message
+        assert 'expected_editable_source=' in message
+        assert 'hermes --tui' in message
 
 
 # ---------------------------------------------------------------------------
@@ -243,6 +436,16 @@ class TestPipInstallPluginAtSha:
         assert req == (f'myah-hermes-plugin @ git+https://github.com/T3-Venture-Labs-Limited/myah-hermes-plugin@{sha}')
         assert mock_run.call_args.kwargs.get('check') is True
 
+    def test_plugin_install_uses_no_deps_to_avoid_reinstalling_hermes_agent(self, tmp_path: Path) -> None:
+        sha = 'a' * 40
+        venv_py = tmp_path / 'venv' / 'bin' / 'python'
+        with patch.object(hermes_install, 'run') as mock_run:
+            mock_run.return_value = _ok()
+            hermes_install.pip_install_plugin_at_sha(sha, venv_py)
+
+        cmd = mock_run.call_args.args[0]
+        assert '--no-deps' in cmd
+
     def test_with_auth_token_embeds_in_url(self, tmp_path: Path) -> None:
         sha = 'e' * 40
         venv_py = tmp_path / 'venv' / 'bin' / 'python'
@@ -261,6 +464,95 @@ class TestPipInstallPluginAtSha:
             mock_run.side_effect = ShellError(['pip'], _fail())
             with pytest.raises(ShellError):
                 hermes_install.pip_install_plugin_at_sha(sha, venv_py)
+
+
+# ---------------------------------------------------------------------------
+# verify_myah_plugin_importable
+# ---------------------------------------------------------------------------
+
+
+class TestVerifyMyahPluginImportable:
+    def test_runs_import_smoke_with_venv_python(self, tmp_path: Path) -> None:
+        venv = tmp_path / 'venv'
+        with patch.object(hermes_install, 'run') as mock_run:
+            mock_run.return_value = _ok()
+            hermes_install.verify_myah_plugin_importable(venv)
+
+        assert mock_run.call_args.args[0] == [
+            str(venv / 'bin' / 'python'),
+            '-c',
+            'import myah_hermes_plugin',
+        ]
+        assert mock_run.call_args.kwargs.get('check') is True
+
+    def test_shell_error_propagates(self, tmp_path: Path) -> None:
+        with patch.object(hermes_install, 'run') as mock_run:
+            mock_run.side_effect = ShellError(['python'], _fail())
+            with pytest.raises(ShellError):
+                hermes_install.verify_myah_plugin_importable(tmp_path / 'venv')
+
+
+# ---------------------------------------------------------------------------
+# verify_hermes_tui_integrity
+# ---------------------------------------------------------------------------
+
+
+class TestVerifyHermesTuiIntegrity:
+    def test_checkout_runtime_with_ui_tui_present_does_not_raise(self, tmp_path: Path) -> None:
+        checkout = tmp_path / 'checkout'
+        (checkout / 'ui-tui').mkdir(parents=True)
+        state = _runtime_state(
+            tmp_path,
+            active_project=checkout,
+            editable_source=checkout,
+            import_path=checkout / 'hermes_cli' / '__init__.py',
+        )
+
+        hermes_install.verify_hermes_tui_integrity(state)
+
+    def test_site_packages_missing_ui_tui_raises_actionable_tui_error(self, tmp_path: Path) -> None:
+        checkout = tmp_path / 'checkout'
+        (checkout / 'ui-tui').mkdir(parents=True)
+        site_packages = tmp_path / 'venv' / 'lib' / 'python3.12' / 'site-packages'
+        state = _runtime_state(
+            tmp_path,
+            active_project=site_packages,
+            editable_source=checkout,
+            import_path=site_packages / 'hermes_cli' / '__init__.py',
+        )
+
+        with pytest.raises(RuntimeError) as exc:
+            hermes_install.verify_hermes_tui_integrity(state)
+
+        message = str(exc.value)
+        assert 'hermes --tui' in message
+        assert 'site-packages' in message
+        assert 'active_import=' in message
+        assert 'HERMES_HOME' in message
+        assert 'venv=' in message
+        assert 'expected_editable_source=' in message
+        assert 'pip install -e' in message
+
+    def test_checkout_runtime_missing_ui_tui_raises_incomplete_checkout_error(self, tmp_path: Path) -> None:
+        checkout = tmp_path / 'home' / 'hermes-agent'
+        checkout.mkdir(parents=True)
+        state = _runtime_state(
+            tmp_path,
+            active_project=checkout,
+            editable_source=checkout,
+            import_path=checkout / 'hermes_cli' / '__init__.py',
+        )
+
+        with pytest.raises(RuntimeError) as exc:
+            hermes_install.verify_hermes_tui_integrity(state)
+
+        assert 'incomplete' in str(exc.value).lower()
+        assert 'ui-tui' in str(exc.value)
+
+    def test_unknown_import_path_does_not_raise(self, tmp_path: Path) -> None:
+        state = _runtime_state(tmp_path, active_project=None, editable_source=None, import_path=None)
+
+        hermes_install.verify_hermes_tui_integrity(state)
 
 
 # ---------------------------------------------------------------------------
@@ -659,6 +951,35 @@ class TestRegisterPluginWithGateway:
             hermes_install.register_plugin_with_gateway(hermes_bin, adapter_auth_key=bearer)
         env_first = mock_run.call_args_list[0].kwargs.get('env') or {}
         assert env_first.get('MYAH_ADAPTER_AUTH_KEY') == bearer
+
+    def test_passes_selected_hermes_home_to_both_plugin_subprocesses(self, tmp_path: Path) -> None:
+        """Profile-aware installs must register/enable the plugin in the selected HERMES_HOME."""
+        hermes_bin = tmp_path / 'venv' / 'bin' / 'hermes'
+        hermes_home = tmp_path / '.hermes' / 'profiles' / 'myah'
+        with patch.object(hermes_install, 'run') as mock_run:
+            mock_run.return_value = _ok()
+            hermes_install.register_plugin_with_gateway(hermes_bin, hermes_home=hermes_home)
+
+        assert mock_run.call_count == 2
+        for call_info in mock_run.call_args_list:
+            env = call_info.kwargs.get('env') or {}
+            assert env.get('HERMES_HOME') == str(hermes_home)
+
+    def test_selected_hermes_home_env_preserves_adapter_auth_key(self, tmp_path: Path) -> None:
+        hermes_bin = tmp_path / 'venv' / 'bin' / 'hermes'
+        hermes_home = tmp_path / '.hermes' / 'profiles' / 'myah'
+        bearer = 'b' * 32
+        with patch.object(hermes_install, 'run') as mock_run:
+            mock_run.return_value = _ok()
+            hermes_install.register_plugin_with_gateway(
+                hermes_bin,
+                adapter_auth_key=bearer,
+                hermes_home=hermes_home,
+            )
+
+        env = mock_run.call_args_list[0].kwargs.get('env') or {}
+        assert env.get('HERMES_HOME') == str(hermes_home)
+        assert env.get('MYAH_ADAPTER_AUTH_KEY') == bearer
 
     def test_install_failure_propagates(self, tmp_path: Path) -> None:
         """If ``hermes plugins install`` fails, surface the ShellError."""

@@ -121,30 +121,54 @@ def _file_id_from_url(url: str | None) -> str | None:
 
 
 def _extract_model_provider(payload: dict) -> str | None:
-    """Extract the provider tag the frontend attaches to each model.
+    """Extract the provider hint the frontend attaches to each model.
 
     Every chat-completion POST ships `model_item` as shaped by the
-    frontend model switcher; `_fetch_provider_models` at users.py:956-958
-    tags each entry as ``tags=[{'name': <provider_id>}]`` (e.g.
-    ``openai-codex``, ``anthropic-claude-code``, ``openrouter``).
+    frontend model switcher; the `/api/models` endpoint at
+    main.py:1035-1040 tags each entry as
+    ``tags=[{'name': <provider_id>}]`` (e.g. ``openai-codex``,
+    ``anthropic-claude-code``, ``openrouter``).
 
-    Returns the first tag name if present and well-formed; ``None``
-    otherwise. Keeping this in a helper so the provider-forwarding path
-    in the /myah/v1/message handler stays unit-testable without having
-    to mock aiohttp.
+    Provider tags are canonical: the first well-formed tag name wins.
+    Only when tags are missing or malformed do we fall back to an
+    explicit provider-bearing field already present on the
+    payload/model item; otherwise returns ``None``. The request's
+    ``model`` field is a model identifier, not a provider slug, and
+    must not be slash-split or forwarded as the provider fallback.
     """
+
+    def _clean_provider(value) -> str | None:
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+        return None
+
     model_item = payload.get('model_item') or {}
+
+    # Canonical source: the first well-formed provider tag on model_item.
+    if isinstance(model_item, dict):
+        tags = model_item.get('tags') or []
+        if isinstance(tags, list) and tags:
+            first = tags[0]
+            if isinstance(first, dict):
+                name = _clean_provider(first.get('name'))
+                if name:
+                    return name
+
+    # Fallback only when tags are missing/malformed: explicit provider-bearing
+    # fields on the payload, then on the model item.
+    for field in ('provider', 'provider_id'):
+        provider = _clean_provider(payload.get(field))
+        if provider:
+            return provider
+
     if not isinstance(model_item, dict):
         return None
-    tags = model_item.get('tags') or []
-    if not isinstance(tags, list) or not tags:
-        return None
-    first = tags[0]
-    if not isinstance(first, dict):
-        return None
-    name = first.get('name')
-    if isinstance(name, str) and name.strip():
-        return name.strip()
+
+    for field in ('provider', 'provider_id'):
+        provider = _clean_provider(model_item.get(field))
+        if provider:
+            return provider
+
     return None
 
 
@@ -1515,8 +1539,8 @@ async def generate_chat_completion(
             # openai-codex / anthropic-claude-code where the env-var
             # heuristic in PROVIDER_REGISTRY cannot find matching creds).
             # The frontend ships model_item in every chat-completion POST;
-            # _fetch_provider_models at users.py:956-958 tags each model
-            # as tags=[{'name': <provider_id>}].
+            # /api/models shaping in backend/myah/main.py tags each model as
+            # tags=[{'name': <provider_id>}].
             _myah_provider = _extract_model_provider(payload)
             if _myah_provider:
                 myah_payload['provider'] = _myah_provider
@@ -1580,6 +1604,17 @@ async def generate_chat_completion(
             if _start_resp.status != 202:
                 _err_body = await _start_resp.text()
                 await _myah_session.close()
+                if _start_resp.status >= 500:
+                    log.error(
+                        '[CHAT_PIPELINE] /myah/v1/message failed: status=%s chat_id=%s body_len=%s body=<redacted>',
+                        _start_resp.status,
+                        _chat_id,
+                        len(_err_body),
+                    )
+                    raise HTTPException(
+                        status_code=502,
+                        detail='Agent message dispatch failed',
+                    )
                 log.error(
                     '[CHAT_PIPELINE] /myah/v1/message failed: status=%s chat_id=%s body=%s',
                     _start_resp.status,
@@ -1640,6 +1675,29 @@ async def generate_chat_completion(
             if _events_resp.status != 200:
                 _err_body = await _events_resp.text()
                 await _myah_session.close()
+                if _events_resp.status >= 500:
+                    # Mirror the POST /myah/v1/message dispatch phase: upstream
+                    # 5xx bodies can carry tracebacks/secrets, so never surface
+                    # the raw body in the client detail or the logs — record
+                    # only status/chat_id/body length with a redacted marker.
+                    log.error(
+                        '[CHAT_PIPELINE] /myah/v1/events failed: status=%s chat_id=%s body_len=%s body=<redacted>',
+                        _events_resp.status,
+                        _chat_id,
+                        len(_err_body),
+                    )
+                    raise HTTPException(
+                        status_code=502,
+                        detail='Agent events stream failed',
+                    )
+                # 4xx are client-actionable upstream errors — preserve the
+                # existing status/detail forwarding (truncated) for the caller.
+                log.error(
+                    '[CHAT_PIPELINE] /myah/v1/events failed: status=%s chat_id=%s body=%s',
+                    _events_resp.status,
+                    _chat_id,
+                    _err_body[:500],
+                )
                 raise HTTPException(
                     status_code=_events_resp.status,
                     detail=f'Agent events stream failed: {_err_body[:200]}',

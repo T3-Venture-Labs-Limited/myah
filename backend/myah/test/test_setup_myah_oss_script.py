@@ -309,6 +309,9 @@ def test_next_steps_guidance_is_correct():
     src = SCRIPT_PATH.read_text()
 
     assert 'hermes gateway run' in src, 'Expected `hermes gateway run` in script guidance'
+    assert 'Hermes gateway plugin registered' in src
+    assert 'Hermes gateway plugin enabled' in src
+    assert 'hermes plugins enable myah' in src
     # D7: must not tell OSS users to "sign up" (no signup screen after Phase 1B)
     assert 'sign up' not in src.lower(), 'Stale sign-up guidance still present'
     # Positive: should clarify the no-signup flow

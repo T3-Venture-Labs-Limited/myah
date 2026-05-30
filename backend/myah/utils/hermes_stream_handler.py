@@ -1096,16 +1096,26 @@ async def handle_hermes_stream(response, ctx: dict) -> StreamingResponse | None:
                     log.info('[HERMES] step=run_cancelled chat_id={}', chat_id)
 
                     for item in output:
+                        if item.get('status') == 'in_progress':
+                            if item.get('type') == 'function_call':
+                                item['status'] = 'failed'
+                            else:
+                                item['status'] = 'completed'
+                                if item.get('type') == 'reasoning':
+                                    if reasoning_start is not None:
+                                        item['duration'] = round(time.monotonic() - reasoning_start)
+                                        reasoning_start = None
+                                    elif item.get('duration') is None:
+                                        item['duration'] = 0
                         if item.get('type') == 'confirmation' and item.get('status') == 'pending':
                             item['status'] = 'cancelled'
+                        elif item.get('type') == 'secret_input' and item.get('status') == 'pending':
+                            item['status'] = 'timeout'
 
                     done = True
-
                     if chat_id and message_id and not chat_id.startswith('local:'):
                         try:
-                            Chats.upsert_message_to_chat_by_id_and_message_id(
-                                chat_id, message_id, {'done': True}
-                            )
+                            await _save_to_db(done_flag=True)
                             Chats.add_message_status_to_chat_by_id_and_message_id(
                                 chat_id,
                                 message_id,

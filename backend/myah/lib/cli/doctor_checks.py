@@ -22,7 +22,7 @@ from pathlib import Path
 from myah.lib.cli.shell import run
 
 
-class CheckStatus(str, Enum):
+class CheckStatus(str, Enum):  # noqa: UP042
     """Three-level status for individual checks."""
 
     OK = 'ok'
@@ -375,6 +375,44 @@ def check_agent_container_env_injection(
     )
 
 
+def check_hermes_runtime_integrity(hermes_home: str | None = None) -> CheckResult:
+    """Verify active Hermes runtime/TUI path integrity without mutating it."""
+    if hermes_home is None:
+        hermes_home_path = Path(os.path.expanduser('~/.hermes'))
+    else:
+        hermes_home_path = Path(os.path.expanduser(hermes_home))
+
+    try:
+        from myah.lib.cli.hermes_install import (
+            detect_hermes_venv,
+            inspect_hermes_runtime,
+            verify_hermes_tui_integrity,
+        )
+
+        venv = detect_hermes_venv(hermes_home=hermes_home_path)
+        state = inspect_hermes_runtime(venv, hermes_home_path)
+        verify_hermes_tui_integrity(state)
+    except RuntimeError as exc:
+        return CheckResult(
+            name='hermes runtime integrity',
+            status=CheckStatus.FAIL,
+            message=str(exc),
+        )
+    except Exception as exc:  # noqa: BLE001 — doctor is diagnostic, not a crash surface
+        return CheckResult(
+            name='hermes runtime integrity',
+            status=CheckStatus.WARN,
+            message=f'could not inspect Hermes runtime integrity: {exc}',
+        )
+
+    detail = str(state.active_project_path or state.import_path or 'unknown import path')
+    return CheckResult(
+        name='hermes runtime integrity',
+        status=CheckStatus.OK,
+        message=f'Hermes runtime import path ok ({detail})',
+    )
+
+
 def _oss_platform_container_running() -> bool:
     """Return True when the compose platform container is running in OSS mode."""
     result = run(['docker', 'ps', '--filter', 'label=com.docker.compose.service=platform', '-q'])
@@ -485,7 +523,11 @@ def probe_required_ports(*, services_started: bool = False) -> list[CheckResult]
     return results
 
 
-def post_install_doctor_run(*, services_started: bool = False) -> list[CheckResult]:
+def post_install_doctor_run(
+    *,
+    services_started: bool = False,
+    hermes_home: str | None = None,
+) -> list[CheckResult]:
     """Aggregate post-install verification: doctor checks + port probes.
 
     Pure orchestrator. Composes the 5 existing doctor predicates from
@@ -513,7 +555,8 @@ def post_install_doctor_run(*, services_started: bool = False) -> list[CheckResu
     """
     results: list[CheckResult] = [
         check_hermes_binary_on_path(),
-        check_hermes_plugin_installed(),
+        check_hermes_runtime_integrity(hermes_home=hermes_home),
+        check_hermes_plugin_installed(hermes_home=hermes_home),
         check_plugin_sha_drift(),
         check_platform_container_running(),
         check_agent_container_env_injection(),

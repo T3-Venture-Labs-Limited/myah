@@ -616,6 +616,49 @@ PY
 
 ensure_myah_platform_enabled_in_config
 
+# ─── 6b. Register + enable the Myah gateway plugin ───────────────────
+#
+# The pip install above makes ``myah_hermes_plugin`` importable to the
+# dashboard process, and the config merge above enables the platform
+# adapter. One more operation is still required: Hermes must materialize
+# the gateway-side plugin under $HERMES_HOME_DIR/plugins and remove it
+# from the disabled list. Historically this was only printed as a manual
+# "Next steps" command, which left CI and non-interactive installs with
+# port 8642 healthy but port 8643 closed (OSS probe:
+# plugin_installed=false, dashboard_running=false). Run it here so the
+# bash flow preserves the same runtime contract as ``myah install``.
+register_myah_plugin_with_gateway() {
+  local hermes_bin="$HERMES_VENV/bin/hermes"
+  if [[ ! -x "$hermes_bin" ]]; then
+    echo "✗ Expected Hermes console script at $hermes_bin" >&2
+    return 1
+  fi
+
+  local install_out install_status
+  set +e
+  install_out="$(HERMES_HOME="$HERMES_HOME_DIR" MYAH_ADAPTER_AUTH_KEY="$TOKEN" \
+    "$hermes_bin" plugins install T3-Venture-Labs-Limited/myah-hermes-plugin 2>&1)"
+  install_status=$?
+  set -e
+  if [[ "$install_status" -ne 0 ]]; then
+    if grep -Eqi 'already (exists|installed)' <<<"$install_out"; then
+      echo "✓ Hermes gateway plugin already registered"
+    else
+      printf '%s\n' "$install_out" >&2
+      echo "✗ hermes plugins install failed" >&2
+      return "$install_status"
+    fi
+  else
+    echo "✓ Hermes gateway plugin registered"
+  fi
+
+  HERMES_HOME="$HERMES_HOME_DIR" MYAH_ADAPTER_AUTH_KEY="$TOKEN" \
+    "$hermes_bin" plugins enable myah
+  echo "✓ Hermes gateway plugin enabled"
+}
+
+register_myah_plugin_with_gateway
+
 # ─── 7. Optional service-unit setup ─────────────────────────────────
 #
 # The user has three ways to keep `hermes gateway` and `hermes dashboard`
@@ -948,10 +991,10 @@ echo "     echo 'ANTHROPIC_API_KEY=sk-ant-...'   >> $HERMES_ENV"
 echo "     echo 'KIMI_API_KEY=...'               >> $HERMES_ENV"
 echo "     (see Hermes docs for the full provider list)"
 echo
-echo "  2. Install the Myah plugin into Hermes (if you haven't yet):"
-echo "       hermes plugins install T3-Venture-Labs-Limited/myah-hermes-plugin"
-echo "     When prompted for MYAH_ADAPTER_AUTH_KEY, press Enter to skip —"
-echo "     this script already wrote that value to $HERMES_ENV."
+echo "  2. The Myah plugin was pip-installed, registered, and enabled above."
+echo "     To repair manually if needed:"
+echo "       HERMES_HOME=$HERMES_HOME_DIR hermes plugins install T3-Venture-Labs-Limited/myah-hermes-plugin"
+echo "       HERMES_HOME=$HERMES_HOME_DIR hermes plugins enable myah"
 echo
 echo "  3. Start the Hermes gateway. Two options:"
 echo "       hermes gateway run --replace                  # foreground (replaces any existing gateway)"

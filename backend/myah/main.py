@@ -308,6 +308,85 @@ class _PipelineFilter(logging.Filter):
 logging.getLogger().addFilter(_PipelineFilter())
 
 
+# OSS public client-routed paths that fall through to index.html. The app is a
+# pure SPA (ssr=false, adapter-static fallback) so the server has no route table
+# of its own; this mirrors platform-oss/src/routes. Anything not matched gets a
+# real 404 instead of a misleading 200 app shell so crawler-trash / fake URLs
+# don't unfurl. Hosted-only routes (admin, integrations, memory) are layered in
+# from platform-hosted/ via _load_hosted_spa_routes() and only when NOT in OSS
+# mode — keeping hosted route knowledge out of the OSS canon (anti-SaaS-fork).
+# Keep in sync when adding a SvelteKit public route; the drift tests in both
+# repos fail if this falls behind.
+#
+# Deep-link limitation (intentional): only paths backed by a +page.svelte in
+# the route file tree are served. A path-param deep link (e.g.
+# /agent/skills/edit/<name>) 404s unless its route declares a [param] segment.
+# The two param-less edit pages take their entity via query string instead
+# (/agent/skills/edit?name=…, /agent/tools/edit?id=…), so their deep links
+# match the param-less allowlist entry and still serve the shell. New nested
+# deep links must either add a [param] route (auto-covered by the drift tests)
+# or use query params; test_seo_hygiene.py guards this for the edit pages.
+_SPA_STATIC_ROUTES = frozenset(
+    {
+        '/',
+        '/auth',
+        '/error',
+        '/c',
+        '/notes',
+        '/notes/new',
+        '/spaces',
+        '/diagnostics',
+        '/agent',
+        '/agent/settings',
+        '/agent/skills',
+        '/agent/skills/create',
+        '/agent/skills/edit',
+        '/agent/tools',
+        '/agent/tools/create',
+        '/agent/tools/edit',
+    }
+)
+_SPA_DYNAMIC_ROUTES = (
+    re.compile(r'^/c/[^/]+$'),
+    re.compile(r'^/notes/[^/]+$'),
+    re.compile(r'^/spaces/[^/]+$'),
+)
+
+_hosted_spa_routes_cache: tuple[frozenset, tuple] | None = None
+
+
+def _load_hosted_spa_routes() -> tuple[frozenset, tuple]:
+    global _hosted_spa_routes_cache
+    if _hosted_spa_routes_cache is not None:
+        return _hosted_spa_routes_cache
+    try:
+        from myah.utils.spa_fallback_routes import HOSTED_SPA_DYNAMIC_ROUTES, HOSTED_SPA_ROUTES
+    except ModuleNotFoundError as exc:
+        # OSS build: the hosted overlay module is absent. Fail closed (no
+        # hosted routes) rather than re-raising an unrelated import error.
+        if exc.name == 'myah.utils.spa_fallback_routes':
+            _hosted_spa_routes_cache = (frozenset(), ())
+            return _hosted_spa_routes_cache
+        raise
+    _hosted_spa_routes_cache = (
+        frozenset(HOSTED_SPA_ROUTES),
+        tuple(re.compile(p) for p in HOSTED_SPA_DYNAMIC_ROUTES),
+    )
+    return _hosted_spa_routes_cache
+
+
+def is_spa_route(path: str) -> bool:
+    normalized = '/' + path.strip('/') if path not in ('', '.') else '/'
+    if normalized in _SPA_STATIC_ROUTES or any(rx.match(normalized) for rx in _SPA_DYNAMIC_ROUTES):
+        return True
+    if _is_oss_mode():
+        return False
+    hosted_static, hosted_dynamic = _load_hosted_spa_routes()
+    if normalized in hosted_static:
+        return True
+    return any(rx.match(normalized) for rx in hosted_dynamic)
+
+
 _IMMUTABLE_ASSET_PREFIXES = ('_app/immutable/',)
 _LONG_CACHE_EXTS = ('.svg', '.png', '.webp', '.avif', '.jpg', '.jpeg', '.ico', '.woff2', '.woff')
 
@@ -317,9 +396,7 @@ class SPAStaticFiles(StaticFiles):
         try:
             response = await super().get_response(path, scope)
         except (HTTPException, StarletteHTTPException) as ex:
-            if ex.status_code == 404:
-                if path.endswith('.js'):
-                    raise ex
+            if ex.status_code == 404 and not path.endswith('.js') and is_spa_route(path):
                 return await super().get_response('index.html', scope)
             raise ex
 
@@ -2023,6 +2100,13 @@ async def healthcheck_with_db():
 
 
 app.mount('/static', StaticFiles(directory=STATIC_DIR), name='static')
+
+
+@app.get('/sitemap.xml', include_in_schema=False)
+@app.get('/sitemap_index.xml', include_in_schema=False)
+@app.get('/wp-sitemap.xml', include_in_schema=False)
+async def no_sitemap() -> None:
+    raise HTTPException(status_code=404, detail='Not Found')
 
 
 @app.get('/cache/{path:path}')

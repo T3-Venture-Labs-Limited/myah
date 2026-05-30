@@ -116,6 +116,21 @@ def test_agent_restart_invokes_systemctl_on_linux(linux_with_systemd, mocker) ->
     ]
 
 
+
+
+def test_agent_update_invokes_hermes_update_with_yes(mocker, tmp_path: Path) -> None:
+    """`myah agent update --yes` is the individual Hermes runtime update command."""
+    hermes_bin = tmp_path / 'hermes'
+    mocker.patch('myah.cli.agent.resolve_hermes_binary_or_exit', return_value=hermes_bin)
+    completed = MagicMock(returncode=0)
+    run_mock = mocker.patch('myah.cli.agent.subprocess.run', return_value=completed)
+
+    result = runner.invoke(app, ['agent', 'update', '--yes'])
+
+    assert result.exit_code == 0, result.stdout
+    assert run_mock.call_args.args[0] == [str(hermes_bin), 'update', '--yes']
+
+
 # ── lifecycle: macOS (launchctl) ───────────────────────────────────────
 
 

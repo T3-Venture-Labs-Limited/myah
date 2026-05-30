@@ -8,6 +8,8 @@ validation so the handler can log a warning and continue.
 """
 from __future__ import annotations
 
+from typing import get_args
+
 import pytest
 from pydantic import TypeAdapter, ValidationError
 
@@ -18,6 +20,7 @@ from shared.contract.events import (
     MessageDeltaEvent,
     ReasoningAvailableEvent,
     ReasoningDeltaEvent,
+    RunCancelledEvent,
     RunCompletedEvent,
     RunFailedEvent,
     SecretRequiredEvent,
@@ -27,6 +30,7 @@ from shared.contract.events import (
     ToolConfirmationRequiredEvent,
     ToolStartedEvent,
 )
+from shared.contract.samples import EVENT_SAMPLES
 
 # A single TypeAdapter avoids re-building the discriminated union machinery on
 # every test invocation. Pydantic v2 caches schema compilation under the hood
@@ -34,163 +38,50 @@ from shared.contract.events import (
 _HERMES_EVENT_ADAPTER: TypeAdapter[HermesEvent] = TypeAdapter(HermesEvent)
 
 
-# ── Sample payloads (one per event type) ────────────────────────────────────
-# Payloads mirror what the upstream emitters actually push onto the SSE
-# queue today. See the docstrings on each event class for the canonical
-# wire-format source line.
-
-EVENT_SAMPLES: dict[str, tuple[dict, type]] = {
-    'message.delta': (
-        {
-            'event': 'message.delta',
-            'delta': 'Hello world',
-            'run_id': 'run_abc',
-            'stream_id': 'run_abc',
-            'timestamp': 1714400000.0,
-        },
-        MessageDeltaEvent,
-    ),
-    'reasoning.delta': (
-        {
-            'event': 'reasoning.delta',
-            'text': 'Considering the problem...',
-            'run_id': 'run_abc',
-            'timestamp': 1714400001.0,
-        },
-        ReasoningDeltaEvent,
-    ),
-    'reasoning.available': (
-        {
-            'event': 'reasoning.available',
-            'text': 'Full chain-of-thought transcript.',
-            'run_id': 'run_abc',
-        },
-        ReasoningAvailableEvent,
-    ),
-    'tool.started': (
-        {
-            'event': 'tool.started',
-            'tool': 'shell_exec',
-            'call_id': 'call_xyz',
-            'args': {'command': 'ls -la'},
-            'preview': 'ls -la',
-            'run_id': 'run_abc',
-        },
-        ToolStartedEvent,
-    ),
-    'tool.completed': (
-        {
-            'event': 'tool.completed',
-            'tool': 'shell_exec',
-            'call_id': 'call_xyz',
-            'args': {'command': 'ls -la'},
-            'result': 'total 0\ndrwxr-xr-x  2 user staff   64 Apr 25 12:00 .',
-            'duration': 0.123,
-            'error': False,
-            'run_id': 'run_abc',
-        },
-        ToolCompletedEvent,
-    ),
-    'tool.confirmation_required': (
-        {
-            'event': 'tool.confirmation_required',
-            'confirmation_id': 'conf_123',
-            'action_type': 'exec_approval',
-            'description': 'Command requires approval: rm -rf /tmp/foo',
-            'options': ['approve', 'approve_session', 'deny'],
-            'metadata': {'risk': 'high'},
-            'run_id': 'run_abc',
-        },
-        ToolConfirmationRequiredEvent,
-    ),
-    'approval.request': (
-        {
-            'event': 'approval.request',
-            'command': 'rm -rf /tmp/foo',
-            'description': 'Command requires approval: rm -rf /tmp/foo',
-            'pattern_key': 'dangerous_rm',
-            'pattern_keys': ['dangerous_rm'],
-            'choices': ['once', 'session', 'always', 'deny'],
-            'run_id': 'run_abc',
-            'timestamp': 1714400002.0,
-        },
-        ApprovalRequestEvent,
-    ),
-    'approval.responded': (
-        {
-            'event': 'approval.responded',
-            'choice': 'once',
-            'resolved': 1,
-            'run_id': 'run_abc',
-            'timestamp': 1714400003.0,
-        },
-        ApprovalRespondedEvent,
-    ),
-    'secret.required': (
-        {
-            'event': 'secret.required',
-            'var_name': 'OPENAI_API_KEY',
-            'prompt': 'Enter your OpenAI API key',
-            'help': 'https://platform.openai.com/api-keys',
-            'skill_name': 'openai',
-            'run_id': 'run_abc',
-        },
-        SecretRequiredEvent,
-    ),
-    'secret.resolved': (
-        {
-            'event': 'secret.resolved',
-            'var_name': 'OPENAI_API_KEY',
-            'status': 'stored',
-            'run_id': 'run_abc',
-        },
-        SecretResolvedEvent,
-    ),
-    'run.completed': (
-        {
-            'event': 'run.completed',
-            'output': 'Final response text',
-            'usage': {'input_tokens': 100, 'output_tokens': 50, 'total_tokens': 150},
-            'model': 'anthropic/claude-sonnet-4-6',
-            'provider': 'openrouter',
-            'run_id': 'run_abc',
-        },
-        RunCompletedEvent,
-    ),
-    'run.failed': (
-        {
-            'event': 'run.failed',
-            'error': 'LLM provider returned 429',
-            'run_id': 'run_abc',
-        },
-        RunFailedEvent,
-    ),
-    'status': (
-        {
-            'event': 'status',
-            'text': 'working',
-            'run_id': 'run_abc',
-        },
-        StatusEvent,
-    ),
+EVENT_SAMPLE_CLASSES: dict[str, type] = {
+    'approval.request': ApprovalRequestEvent,
+    'approval.responded': ApprovalRespondedEvent,
+    'message.delta': MessageDeltaEvent,
+    'reasoning.available': ReasoningAvailableEvent,
+    'reasoning.delta': ReasoningDeltaEvent,
+    'run.cancelled': RunCancelledEvent,
+    'run.completed': RunCompletedEvent,
+    'run.failed': RunFailedEvent,
+    'secret.required': SecretRequiredEvent,
+    'secret.resolved': SecretResolvedEvent,
+    'status': StatusEvent,
+    'tool.completed': ToolCompletedEvent,
+    'tool.confirmation_required': ToolConfirmationRequiredEvent,
+    'tool.started': ToolStartedEvent,
 }
+
+
+def _contract_event_literals() -> set[str]:
+    """Return the set of ``event`` literal values declared by ``HermesEvent``."""
+    annotated_args = get_args(HermesEvent)
+    union_type = annotated_args[0]
+    event_classes = get_args(union_type)
+    literals: set[str] = set()
+    for cls in event_classes:
+        for value in get_args(cls.model_fields['event'].annotation):
+            if isinstance(value, str):
+                literals.add(value)
+    return literals
 
 
 # ── Per-event validation ────────────────────────────────────────────────────
 
 
-@pytest.mark.parametrize('event_type,payload_and_class', sorted(EVENT_SAMPLES.items()))
-def test_each_event_validates_against_union(
-    event_type: str, payload_and_class: tuple[dict, type]
-) -> None:
-    """Every documented event payload must validate as the matching model.
+@pytest.mark.parametrize('event_type,payload', sorted(EVENT_SAMPLES.items()))
+def test_each_event_validates_against_union(event_type: str, payload: dict) -> None:
+    """Every reusable event sample must validate as the matching model.
 
     Failure here means the contract has drifted from the upstream wire
     format — either Hermes added a required field we don't know about, or
     we accidentally tightened the schema. Either way the stream handler's
     new validation layer would reject real production traffic.
     """
-    payload, expected_class = payload_and_class
+    expected_class = EVENT_SAMPLE_CLASSES[event_type]
     instance = _HERMES_EVENT_ADAPTER.validate_python(payload)
     assert isinstance(instance, expected_class), (
         f'discriminator dispatch failed for {event_type!r}: '
@@ -199,38 +90,33 @@ def test_each_event_validates_against_union(
 
 
 def test_completeness_every_known_event_has_a_sample() -> None:
-    """Every concrete event class must appear in EVENT_SAMPLES.
+    """Every concrete event class must appear in reusable ``EVENT_SAMPLES``.
 
     This guards against a class being added to ``events.py`` and the
-    union without a corresponding sample payload being added to the
-    test matrix above. Without this check, new events would silently
-    skip validation testing.
+    union without a corresponding sample payload being added to the shared
+    sample matrix. Without this check, new events would silently skip
+    validation testing.
     """
-    sampled_classes = {expected_class for _, expected_class in EVENT_SAMPLES.values()}
-    declared_classes = {
-        MessageDeltaEvent,
-        ReasoningDeltaEvent,
-        ReasoningAvailableEvent,
-        ToolStartedEvent,
-        ToolCompletedEvent,
-        ToolConfirmationRequiredEvent,
-        ApprovalRequestEvent,
-        ApprovalRespondedEvent,
-        SecretRequiredEvent,
-        SecretResolvedEvent,
-        RunCompletedEvent,
-        RunFailedEvent,
-        StatusEvent,
-    }
-    assert sampled_classes == declared_classes, (
-        f'Test matrix drift: missing samples for '
-        f'{declared_classes - sampled_classes}; '
-        f'unexpected samples for {sampled_classes - declared_classes}'
+    sampled_events = set(EVENT_SAMPLES)
+    declared_events = set(EVENT_SAMPLE_CLASSES)
+    assert sampled_events == declared_events, (
+        f'Event sample drift: missing samples for {sorted(declared_events - sampled_events)}; '
+        f'unexpected samples for {sorted(sampled_events - declared_events)}'
+    )
+    assert 'run.cancelled' in EVENT_SAMPLES
+
+
+def test_every_hermes_event_union_literal_has_a_sample() -> None:
+    """Every ``HermesEvent`` discriminator literal must have reusable sample data."""
+    sampled_events = set(EVENT_SAMPLES)
+    union_events = _contract_event_literals()
+    assert sampled_events == union_events, (
+        f'HermesEvent sample drift: missing samples for {sorted(union_events - sampled_events)}; '
+        f'unexpected samples for {sorted(sampled_events - union_events)}'
     )
 
 
 # ── Discriminator behaviour ─────────────────────────────────────────────────
-
 
 def test_unknown_event_type_fails_validation() -> None:
     """An unrecognised ``event`` value must raise ``ValidationError``.
@@ -270,7 +156,6 @@ def test_extra_fields_are_allowed() -> None:
 
 
 # ── Field-shape regressions ─────────────────────────────────────────────────
-
 
 def test_tool_started_accepts_str_args_from_api_server() -> None:
     """``api_server.py`` packs ``args`` as a stringified preview, not a dict.
@@ -317,6 +202,14 @@ def test_run_failed_defaults_error_text() -> None:
     assert instance.error == 'Agent run failed'
 
 
+def test_run_cancelled_minimal_payload_validates() -> None:
+    """``run.cancelled`` requires only its discriminator."""
+    payload = {'event': 'run.cancelled'}
+    instance = _HERMES_EVENT_ADAPTER.validate_python(payload)
+    assert isinstance(instance, RunCancelledEvent)
+    assert instance.run_id is None
+
+
 def test_tool_confirmation_required_options_default() -> None:
     """``options`` defaults to ``['approve', 'deny']`` to match handler default."""
     payload = {
@@ -331,27 +224,13 @@ def test_tool_confirmation_required_options_default() -> None:
 
 # ── Discriminator literal coverage ──────────────────────────────────────────
 
-
 def test_every_event_class_has_a_literal_event_field() -> None:
     """Every concrete event must declare a ``Literal[...]`` ``event`` field.
 
     Without this, the discriminated union silently degrades to structural
     matching, which can pick the wrong class for ambiguous payloads.
     """
-    classes = [
-        MessageDeltaEvent,
-        ReasoningDeltaEvent,
-        ReasoningAvailableEvent,
-        ToolStartedEvent,
-        ToolCompletedEvent,
-        ToolConfirmationRequiredEvent,
-        SecretRequiredEvent,
-        SecretResolvedEvent,
-        RunCompletedEvent,
-        RunFailedEvent,
-        StatusEvent,
-    ]
-    for cls in classes:
+    for cls in EVENT_SAMPLE_CLASSES.values():
         field = cls.model_fields['event']
         # The annotation should be ``Literal["..."]`` — pydantic stores the
         # discriminator literal in ``field.annotation``.

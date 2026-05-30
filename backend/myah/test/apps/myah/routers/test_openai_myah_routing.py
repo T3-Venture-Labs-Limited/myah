@@ -1,7 +1,68 @@
 """Tests for _build_myah_attachments helper in openai router."""
 
 import pytest
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
+
+
+class _FakeAiohttpResponse:
+    def __init__(self, *, status=200, json_data=None, text_data=''):
+        self.status = status
+        self._json_data = json_data or {}
+        self._text_data = text_data
+
+    async def json(self):
+        return self._json_data
+
+    async def text(self):
+        return self._text_data
+
+
+class _FakeMyahClientSession:
+    def __init__(self, *, start_response, events_response=None):
+        self.start_response = start_response
+        self.events_response = events_response or _FakeAiohttpResponse(status=200)
+        self.posts = []
+        self.gets = []
+        self.closed = False
+
+    async def post(self, url, **kwargs):
+        self.posts.append({'url': url, **kwargs})
+        return self.start_response
+
+    async def get(self, url, **kwargs):
+        self.gets.append({'url': url, **kwargs})
+        return self.events_response
+
+    async def close(self):
+        self.closed = True
+
+
+def _fake_openai_request():
+    return SimpleNamespace(
+        state=SimpleNamespace(bypass_filter=False),
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                config=SimpleNamespace(
+                    OPENAI_API_BASE_URLS=[],
+                    OPENAI_API_KEYS=[],
+                    OPENAI_API_CONFIGS={},
+                ),
+                OPENAI_MODELS={},
+            )
+        ),
+    )
+
+
+def _fake_user(**overrides):
+    data = {
+        'id': 'user-1',
+        'name': 'Ada Lovelace',
+        'email': 'ada@example.test',
+        'role': 'user',
+    }
+    data.update(overrides)
+    return SimpleNamespace(**data)
 
 
 def test_empty_payload_returns_empty_list():
@@ -128,7 +189,8 @@ def test_file_id_from_url_extracts_id():
 # skips setChatSessionModel — the per-message body is the only channel
 # that can tell Hermes which provider owns the user's picked model.
 # Frontend ships model_item.tags=[{'name': '<provider_id>'}] on every
-# chat-completion POST (see users.py:956-958).
+# chat-completion POST; /api/models shaping in backend/myah/main.py builds
+# those provider tags.
 
 
 def test_extract_model_provider_returns_first_tag_name():
@@ -172,6 +234,396 @@ def test_extract_model_provider_handles_malformed_tags():
     assert _extract_model_provider({'model_item': 'foo'}) is None
     # tags is not a list
     assert _extract_model_provider({'model_item': {'tags': 'openai-codex'}}) is None
+
+
+def test_extract_model_provider_does_not_use_model_id_as_provider_when_tags_missing_or_malformed():
+    from myah.routers.openai import _extract_model_provider
+
+    assert _extract_model_provider({'model': 'claude-opus-4', 'model_item': {'tags': []}}) is None
+    assert (
+        _extract_model_provider(
+            {
+                'model': 'anthropic/claude-opus-4',
+                'model_item': {'tags': [{'name': 123}]},
+            }
+        )
+        is None
+    )
+    assert _extract_model_provider({'model': 'openai-codex/gpt-5', 'model_item': 'not-a-dict'}) is None
+
+
+def test_extract_model_provider_allows_explicit_provider_bearing_fields():
+    from myah.routers.openai import _extract_model_provider
+
+    assert _extract_model_provider({'provider': ' openai-codex ', 'model': 'gpt-5'}) == 'openai-codex'
+    assert (
+        _extract_model_provider(
+            {
+                'model': 'claude-opus-4',
+                'model_item': {'provider_id': 'anthropic-claude-code', 'tags': []},
+            }
+        )
+        == 'anthropic-claude-code'
+    )
+
+
+def test_extract_model_provider_tag_wins_over_conflicting_explicit_field():
+    from myah.routers.openai import _extract_model_provider
+
+    # Tags are canonical. When a valid first tag and a conflicting explicit
+    # provider-bearing field are both present, the tag must win — explicit
+    # fields are only a fallback when tags are missing/malformed.
+    assert (
+        _extract_model_provider(
+            {'provider': 'openrouter', 'model_item': {'tags': [{'name': 'openai-codex'}]}}
+        )
+        == 'openai-codex'
+    )
+    assert (
+        _extract_model_provider(
+            {
+                'provider_id': 'openrouter',
+                'model_item': {
+                    'provider': 'openrouter',
+                    'provider_id': 'openrouter',
+                    'tags': [{'name': 'anthropic-claude-code'}],
+                },
+            }
+        )
+        == 'anthropic-claude-code'
+    )
+
+
+@pytest.mark.asyncio
+async def test_myah_dispatch_payload_preserves_session_chat_user_and_model_metadata():
+    import myah.routers.openai as openai_router
+
+    user = _fake_user()
+    session = _FakeMyahClientSession(
+        start_response=_FakeAiohttpResponse(
+            status=202,
+            json_data={'stream_id': 'stream-1', 'session_id': 'hermes-session-1'},
+        )
+    )
+    emitted_events = []
+
+    async def fake_container(_user_id, *, event_emitter=None):
+        if event_emitter:
+            await event_emitter({'type': 'status', 'data': {'description': 'waking', 'done': False}})
+        return SimpleNamespace(host_port=18080, gateway_port=18081)
+
+    async def fake_emit(event):
+        emitted_events.append(event)
+
+    form_data = {
+        'model': 'claude-opus-4',
+        'model_item': {'tags': [{'name': 'anthropic-claude-code'}]},
+        'messages': [
+            {'role': 'system', 'content': 'be concise'},
+            {'role': 'user', 'content': 'hello from chat'},
+        ],
+        'metadata': {
+            'chat_id': 'chat-123',
+            'message_id': 'msg-456',
+            'chat_name': 'Launch notes',
+            'user_id': user.id,
+        },
+    }
+
+    with (
+        patch('myah.routers.openai.get_or_create_container', side_effect=fake_container),
+        patch('myah.routers.openai.aiohttp.ClientSession', return_value=session),
+        patch('myah.routers.openai.AGENT_BEARER_TOKEN', 'test-agent-token'),
+        patch('myah.routers.openai._build_myah_attachments', return_value=[]),
+        patch('myah.routers.openai.Chats.set_hermes_session_id'),
+        patch('myah.socket.main.get_event_emitter', return_value=fake_emit),
+        patch('myah.utils.ui_state.prepend_user_ref_block', side_effect=lambda text, ui_state: text),
+    ):
+        response = await openai_router.generate_chat_completion(
+            _fake_openai_request(),
+            form_data,
+            user=user,
+        )
+
+    assert response.status_code == 200
+    assert session.posts, 'expected /myah/v1/message dispatch POST'
+    dispatch = session.posts[0]
+    assert dispatch['url'].endswith('/myah/v1/message')
+    assert dispatch['headers']['Authorization'] == 'Bearer test-agent-token'
+
+    myah_payload = dispatch['json']
+    assert myah_payload['message'] == 'hello from chat'
+    assert myah_payload['session_id'] == 'chat-123'
+    assert myah_payload['message_id'] == 'msg-456'
+    assert myah_payload['user_id'] == user.id
+    assert myah_payload['user_name'] == user.name
+    assert myah_payload['chat_name'] == 'Launch notes'
+    assert myah_payload['model'] == 'claude-opus-4'
+    assert myah_payload['provider'] == 'anthropic-claude-code'
+    assert emitted_events, 'container/status emitter should remain wired during dispatch'
+
+
+@pytest.mark.asyncio
+async def test_myah_dispatch_missing_model_uses_default_without_forwarding_virtual_model():
+    import myah.routers.openai as openai_router
+
+    user = _fake_user(id='user-default')
+    session = _FakeMyahClientSession(
+        start_response=_FakeAiohttpResponse(status=202, json_data={'stream_id': 'stream-default'})
+    )
+
+    async def fake_container(_user_id, *, event_emitter=None):
+        return SimpleNamespace(host_port=18080, gateway_port=18081)
+
+    with (
+        patch('myah.routers.openai.get_or_create_container', side_effect=fake_container),
+        patch('myah.routers.openai.aiohttp.ClientSession', return_value=session),
+        patch('myah.routers.openai._build_myah_attachments', return_value=[]),
+        patch('myah.routers.openai.Chats.set_hermes_session_id'),
+        patch('myah.socket.main.get_event_emitter', return_value=None),
+        patch('myah.utils.ui_state.prepend_user_ref_block', side_effect=lambda text, ui_state: text),
+    ):
+        response = await openai_router.generate_chat_completion(
+            _fake_openai_request(),
+            {
+                'messages': [{'role': 'user', 'content': 'use your default model'}],
+                'metadata': {'chat_id': 'chat-default', 'message_id': 'msg-default'},
+            },
+            user=user,
+        )
+
+    assert response.status_code == 200
+    myah_payload = session.posts[0]['json']
+    assert myah_payload['session_id'] == 'chat-default'
+    assert myah_payload['user_id'] == 'user-default'
+    assert 'model' not in myah_payload
+    assert 'provider' not in myah_payload
+
+
+@pytest.mark.asyncio
+async def test_myah_dispatch_malformed_provider_tags_do_not_forward_model_as_provider():
+    import myah.routers.openai as openai_router
+
+    user = _fake_user(id='user-malformed-provider')
+    session = _FakeMyahClientSession(
+        start_response=_FakeAiohttpResponse(status=202, json_data={'stream_id': 'stream-malformed'})
+    )
+
+    async def fake_container(_user_id, *, event_emitter=None):
+        return SimpleNamespace(host_port=18080, gateway_port=18081)
+
+    with (
+        patch('myah.routers.openai.get_or_create_container', side_effect=fake_container),
+        patch('myah.routers.openai.aiohttp.ClientSession', return_value=session),
+        patch('myah.routers.openai._build_myah_attachments', return_value=[]),
+        patch('myah.routers.openai.Chats.set_hermes_session_id'),
+        patch('myah.socket.main.get_event_emitter', return_value=None),
+        patch('myah.utils.ui_state.prepend_user_ref_block', side_effect=lambda text, ui_state: text),
+    ):
+        response = await openai_router.generate_chat_completion(
+            _fake_openai_request(),
+            {
+                'model': 'anthropic/claude-opus-4',
+                'model_item': {'tags': [{'name': 123}]},
+                'messages': [{'role': 'user', 'content': 'use selected model'}],
+                'metadata': {'chat_id': 'chat-malformed', 'message_id': 'msg-malformed'},
+            },
+            user=user,
+        )
+
+    assert response.status_code == 200
+    myah_payload = session.posts[0]['json']
+    assert myah_payload['model'] == 'anthropic/claude-opus-4'
+    assert 'provider' not in myah_payload
+
+
+@pytest.mark.asyncio
+async def test_myah_dispatch_gateway_5xx_returns_clear_platform_error_without_raw_body_logs():
+    from fastapi import HTTPException
+    import myah.routers.openai as openai_router
+
+    raw_body = 'Traceback: FAKE_SECRET_TOKEN=*** internal plugin failure with confusing raw details'
+    session = _FakeMyahClientSession(
+        start_response=_FakeAiohttpResponse(
+            status=500,
+            text_data=raw_body,
+        )
+    )
+
+    async def fake_container(_user_id, *, event_emitter=None):
+        return SimpleNamespace(host_port=18080, gateway_port=18081)
+
+    with (
+        patch('myah.routers.openai.get_or_create_container', side_effect=fake_container),
+        patch('myah.routers.openai.aiohttp.ClientSession', return_value=session),
+        patch('myah.routers.openai._build_myah_attachments', return_value=[]),
+        patch('myah.socket.main.get_event_emitter', return_value=None),
+        patch('myah.utils.ui_state.prepend_user_ref_block', side_effect=lambda text, ui_state: text),
+        patch('myah.routers.openai.log.error') as error_log,
+    ):
+        with pytest.raises(HTTPException) as exc:
+            await openai_router.generate_chat_completion(
+                _fake_openai_request(),
+                {
+                    'model': 'gpt-5',
+                    'messages': [{'role': 'user', 'content': 'hello'}],
+                    'metadata': {'chat_id': 'chat-err', 'message_id': 'msg-err'},
+                },
+                user=_fake_user(),
+            )
+
+    assert exc.value.status_code == 502
+    assert exc.value.detail == 'Agent message dispatch failed'
+    assert 'Traceback' not in exc.value.detail
+    assert 'FAKE_SECRET_TOKEN' not in exc.value.detail
+    assert 'internal plugin failure' not in exc.value.detail
+    logged = ' '.join(str(part) for call in error_log.call_args_list for part in call.args)
+    assert raw_body not in logged
+    assert 'Traceback' not in logged
+    assert 'FAKE_SECRET_TOKEN' not in logged
+    assert 'internal plugin failure' not in logged
+    assert 'status=%s' in logged
+    assert '500' in logged
+    assert 'chat_id=%s' in logged
+    assert 'chat-err' in logged
+    assert 'body_len=%s' in logged
+    assert session.closed is True
+
+
+@pytest.mark.asyncio
+async def test_myah_dispatch_gateway_4xx_preserves_status_and_client_error_detail():
+    from fastapi import HTTPException
+    import myah.routers.openai as openai_router
+
+    client_error_body = 'Bad request: invalid provider selection'
+    session = _FakeMyahClientSession(
+        start_response=_FakeAiohttpResponse(status=400, text_data=client_error_body)
+    )
+
+    async def fake_container(_user_id, *, event_emitter=None):
+        return SimpleNamespace(host_port=18080, gateway_port=18081)
+
+    with (
+        patch('myah.routers.openai.get_or_create_container', side_effect=fake_container),
+        patch('myah.routers.openai.aiohttp.ClientSession', return_value=session),
+        patch('myah.routers.openai._build_myah_attachments', return_value=[]),
+        patch('myah.socket.main.get_event_emitter', return_value=None),
+        patch('myah.utils.ui_state.prepend_user_ref_block', side_effect=lambda text, ui_state: text),
+        patch('myah.routers.openai.log.error'),
+    ):
+        with pytest.raises(HTTPException) as exc:
+            await openai_router.generate_chat_completion(
+                _fake_openai_request(),
+                {
+                    'model': 'gpt-5',
+                    'messages': [{'role': 'user', 'content': 'hello'}],
+                    'metadata': {'chat_id': 'chat-4xx', 'message_id': 'msg-4xx'},
+                },
+                user=_fake_user(),
+            )
+
+    assert exc.value.status_code == 400
+    assert exc.value.detail == f'Agent message dispatch failed: {client_error_body}'
+    assert session.closed is True
+
+
+@pytest.mark.asyncio
+async def test_myah_events_stream_5xx_returns_clear_platform_error_without_raw_body_logs():
+    from fastapi import HTTPException
+    import myah.routers.openai as openai_router
+
+    # POST /myah/v1/message succeeds (202 + stream_id); the SECOND phase —
+    # GET /myah/v1/events/{stream_id} — returns a 5xx whose raw upstream body
+    # must never reach the client detail or the logs.
+    raw_body = 'Traceback: FAKE_FAKE_SECRET_TOKEN=*** internal failure with confusing raw details'
+    session = _FakeMyahClientSession(
+        start_response=_FakeAiohttpResponse(
+            status=202,
+            json_data={'stream_id': 'stream-evt-5xx'},
+        ),
+        events_response=_FakeAiohttpResponse(status=503, text_data=raw_body),
+    )
+
+    async def fake_container(_user_id, *, event_emitter=None):
+        return SimpleNamespace(host_port=18080, gateway_port=18081)
+
+    with (
+        patch('myah.routers.openai.get_or_create_container', side_effect=fake_container),
+        patch('myah.routers.openai.aiohttp.ClientSession', return_value=session),
+        patch('myah.routers.openai._build_myah_attachments', return_value=[]),
+        patch('myah.routers.openai.Chats.set_hermes_session_id'),
+        patch('myah.socket.main.get_event_emitter', return_value=None),
+        patch('myah.utils.ui_state.prepend_user_ref_block', side_effect=lambda text, ui_state: text),
+        patch('myah.routers.openai.log.error') as error_log,
+    ):
+        with pytest.raises(HTTPException) as exc:
+            await openai_router.generate_chat_completion(
+                _fake_openai_request(),
+                {
+                    'model': 'gpt-5',
+                    'messages': [{'role': 'user', 'content': 'hello'}],
+                    'metadata': {'chat_id': 'chat-evt-5xx', 'message_id': 'msg-evt-5xx'},
+                },
+                user=_fake_user(),
+            )
+
+    assert exc.value.status_code == 502
+    assert exc.value.detail == 'Agent events stream failed'
+    assert 'Traceback' not in exc.value.detail
+    assert 'FAKE_FAKE_SECRET_TOKEN' not in exc.value.detail
+    assert 'internal failure' not in exc.value.detail
+    logged = ' '.join(str(part) for call in error_log.call_args_list for part in call.args)
+    assert raw_body not in logged
+    assert 'Traceback' not in logged
+    assert 'FAKE_FAKE_SECRET_TOKEN' not in logged
+    assert 'internal failure' not in logged
+    assert 'status=%s' in logged
+    assert '503' in logged
+    assert 'chat_id=%s' in logged
+    assert 'chat-evt-5xx' in logged
+    assert 'body_len=%s' in logged
+    assert session.closed is True
+
+
+@pytest.mark.asyncio
+async def test_myah_events_stream_4xx_preserves_status_and_client_error_detail():
+    from fastapi import HTTPException
+    import myah.routers.openai as openai_router
+
+    # The events phase forwards 4xx status/detail unchanged (client-actionable
+    # errors); only 5xx is sanitized. This characterizes the preserved 4xx path.
+    client_error_body = 'Bad request: unknown stream id'
+    session = _FakeMyahClientSession(
+        start_response=_FakeAiohttpResponse(status=202, json_data={'stream_id': 'stream-evt-4xx'}),
+        events_response=_FakeAiohttpResponse(status=404, text_data=client_error_body),
+    )
+
+    async def fake_container(_user_id, *, event_emitter=None):
+        return SimpleNamespace(host_port=18080, gateway_port=18081)
+
+    with (
+        patch('myah.routers.openai.get_or_create_container', side_effect=fake_container),
+        patch('myah.routers.openai.aiohttp.ClientSession', return_value=session),
+        patch('myah.routers.openai._build_myah_attachments', return_value=[]),
+        patch('myah.routers.openai.Chats.set_hermes_session_id'),
+        patch('myah.socket.main.get_event_emitter', return_value=None),
+        patch('myah.utils.ui_state.prepend_user_ref_block', side_effect=lambda text, ui_state: text),
+        patch('myah.routers.openai.log.error'),
+    ):
+        with pytest.raises(HTTPException) as exc:
+            await openai_router.generate_chat_completion(
+                _fake_openai_request(),
+                {
+                    'model': 'gpt-5',
+                    'messages': [{'role': 'user', 'content': 'hello'}],
+                    'metadata': {'chat_id': 'chat-evt-4xx', 'message_id': 'msg-evt-4xx'},
+                },
+                user=_fake_user(),
+            )
+
+    assert exc.value.status_code == 404
+    assert exc.value.detail == f'Agent events stream failed: {client_error_body}'
+    assert session.closed is True
 
 
 # ── TestAttachmentForwardingIntegration ────────────────────────────────────

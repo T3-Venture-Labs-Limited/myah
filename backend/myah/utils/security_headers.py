@@ -6,38 +6,28 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from typing import Dict
 
 
+_BASELINE_HEADERS: Dict[str, str] = {
+    'X-Robots-Tag': 'noindex, nofollow',
+    'X-Content-Type-Options': 'nosniff',
+    'X-Frame-Options': 'SAMEORIGIN',
+    'Referrer-Policy': 'strict-origin-when-cross-origin',
+}
+
+
 class SecurityHeadersMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         response = await call_next(request)
-        response.headers.update(set_security_headers())
+        headers = set_security_headers()
+        # A route that already set an immutable Cache-Control (hashed /_app/
+        # assets) must keep it; the env-driven global CACHE_CONTROL must not win.
+        if 'immutable' in response.headers.get('Cache-Control', ''):
+            headers.pop('Cache-Control', None)
+        response.headers.update(headers)
         return response
 
 
 def set_security_headers() -> Dict[str, str]:
-    """
-    Sets security headers based on environment variables.
-
-    This function reads specific environment variables and uses their values
-    to set corresponding security headers. The headers that can be set are:
-    - cache-control
-    - permissions-policy
-    - strict-transport-security
-    - referrer-policy
-    - x-content-type-options
-    - x-download-options
-    - x-frame-options
-    - x-permitted-cross-domain-policies
-    - content-security-policy
-    - reporting-endpoints
-
-    Each environment variable is associated with a specific setter function
-    that constructs the header. If the environment variable is set, the
-    corresponding header is added to the options dictionary.
-
-    Returns:
-        dict: A dictionary containing the security headers and their values.
-    """
-    options = {}
+    options = dict(_BASELINE_HEADERS)
     header_setters = {
         'CACHE_CONTROL': set_cache_control,
         'HSTS': set_hsts,

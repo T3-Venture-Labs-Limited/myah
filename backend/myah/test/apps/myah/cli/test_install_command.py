@@ -17,16 +17,16 @@ Test strategy:
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from pathlib import Path
-from typing import Iterator
+from unittest.mock import call
 
 import pytest
-from typer.testing import CliRunner
-
 from myah import app
 from myah.lib.cli.doctor_checks import CheckResult, CheckStatus
 from myah.lib.cli.env_loader import parse_env_file
-
+from myah.lib.cli.hermes_install import HermesRuntimeState
+from typer.testing import CliRunner
 
 runner = CliRunner()
 
@@ -120,6 +120,28 @@ def all_lib_mocks(mocker) -> dict[str, object]:
         ),
         'bootstrap_pip': mocker.patch('myah.cli.install.bootstrap_pip'),
         'pip_install_plugin_at_sha': mocker.patch('myah.cli.install.pip_install_plugin_at_sha'),
+        'inspect_hermes_runtime': mocker.patch(
+            'myah.cli.install.inspect_hermes_runtime',
+            side_effect=lambda venv, hermes_home: HermesRuntimeState(
+                venv_path=venv,
+                hermes_home=hermes_home,
+                import_path=Path('/tmp/fake-checkout/hermes_cli/__init__.py'),
+                active_project_path=Path('/tmp/fake-checkout'),
+                expected_checkout_path=hermes_home / 'hermes-agent',
+                editable_source_path=Path('/tmp/fake-checkout'),
+                active_runtime_is_site_packages=False,
+                ui_tui_path=Path('/tmp/fake-checkout/ui-tui'),
+            ),
+        ),
+        'reassert_editable_hermes_if_needed': mocker.patch(
+            'myah.cli.install.reassert_editable_hermes_if_needed', return_value=False
+        ),
+        'verify_myah_plugin_importable': mocker.patch(
+            'myah.cli.install.verify_myah_plugin_importable'
+        ),
+        'verify_hermes_tui_integrity': mocker.patch(
+            'myah.cli.install.verify_hermes_tui_integrity'
+        ),
         'materialize_dashboard_shim': mocker.patch('myah.cli.install.materialize_dashboard_shim'),
         'register_plugin_with_gateway': mocker.patch(
             'myah.cli.install.register_plugin_with_gateway'
@@ -153,13 +175,132 @@ def test_non_interactive_happy_path(install_env, all_lib_mocks) -> None:
     result = runner.invoke(app, ['install', '--non-interactive', '--service', 'none'])
     assert result.exit_code == 0, f'stdout: {result.stdout}\nexc: {result.exception}'
     # Sanity: helpers were called
-    all_lib_mocks['detect_hermes_venv'].assert_called_once()
+    all_lib_mocks['detect_hermes_venv'].assert_called_once_with(hermes_home=install_env['hermes_home'])
     all_lib_mocks['bootstrap_pip'].assert_called_once()
     all_lib_mocks['pip_install_plugin_at_sha'].assert_called_once()
     all_lib_mocks['materialize_dashboard_shim'].assert_called_once()
     all_lib_mocks['register_plugin_with_gateway'].assert_called_once()
     all_lib_mocks['enable_myah_platform'].assert_called_once()
     all_lib_mocks['post_install_doctor_run'].assert_called_once()
+
+
+def test_install_runs_runtime_integrity_guardrails(install_env, all_lib_mocks) -> None:
+    result = runner.invoke(app, ['install', '--non-interactive', '--service', 'none'])
+
+    assert result.exit_code == 0, f'stdout: {result.stdout}\nexc: {result.exception}'
+    assert all_lib_mocks['inspect_hermes_runtime'].call_count >= 1
+    all_lib_mocks['reassert_editable_hermes_if_needed'].assert_called()
+    all_lib_mocks['verify_myah_plugin_importable'].assert_called_once_with(Path('/tmp/fake-venv'))
+    all_lib_mocks['verify_hermes_tui_integrity'].assert_called_once()
+
+
+def test_install_reasserts_editable_hermes_when_pip_install_regresses_runtime(install_env, all_lib_mocks) -> None:
+    before = HermesRuntimeState(
+        venv_path=Path('/tmp/fake-venv'),
+        hermes_home=install_env['hermes_home'],
+        import_path=Path('/tmp/checkout/hermes_cli/__init__.py'),
+        active_project_path=Path('/tmp/checkout'),
+        expected_checkout_path=install_env['hermes_home'] / 'hermes-agent',
+        editable_source_path=Path('/tmp/checkout'),
+        active_runtime_is_site_packages=False,
+        ui_tui_path=Path('/tmp/checkout/ui-tui'),
+    )
+    after_pip = HermesRuntimeState(
+        venv_path=Path('/tmp/fake-venv'),
+        hermes_home=install_env['hermes_home'],
+        import_path=Path('/tmp/fake-venv/lib/python3.12/site-packages/hermes_cli/__init__.py'),
+        active_project_path=Path('/tmp/fake-venv/lib/python3.12/site-packages'),
+        expected_checkout_path=install_env['hermes_home'] / 'hermes-agent',
+        editable_source_path=Path('/tmp/checkout'),
+        active_runtime_is_site_packages=True,
+        ui_tui_path=Path('/tmp/fake-venv/lib/python3.12/site-packages/ui-tui'),
+    )
+    repaired = before
+    all_lib_mocks['inspect_hermes_runtime'].side_effect = [before, after_pip, repaired, repaired]
+    all_lib_mocks['reassert_editable_hermes_if_needed'].side_effect = [True, False]
+
+    result = runner.invoke(app, ['install', '--non-interactive', '--service', 'none'])
+
+    assert result.exit_code == 0, f'stdout: {result.stdout}\nexc: {result.exception}'
+    assert all_lib_mocks['inspect_hermes_runtime'].call_count == 4
+    assert all_lib_mocks['reassert_editable_hermes_if_needed'].call_args_list[0] == call(before, after_pip)
+    all_lib_mocks['verify_hermes_tui_integrity'].assert_called_once_with(repaired)
+
+
+def test_install_repairs_when_gateway_registration_regresses_runtime(install_env, all_lib_mocks) -> None:
+    before = HermesRuntimeState(
+        venv_path=Path('/tmp/fake-venv'),
+        hermes_home=install_env['hermes_home'],
+        import_path=Path('/tmp/checkout/hermes_cli/__init__.py'),
+        active_project_path=Path('/tmp/checkout'),
+        expected_checkout_path=install_env['hermes_home'] / 'hermes-agent',
+        editable_source_path=Path('/tmp/checkout'),
+        active_runtime_is_site_packages=False,
+        ui_tui_path=Path('/tmp/checkout/ui-tui'),
+    )
+    after_gateway = HermesRuntimeState(
+        venv_path=Path('/tmp/fake-venv'),
+        hermes_home=install_env['hermes_home'],
+        import_path=Path('/tmp/fake-venv/lib/python3.12/site-packages/hermes_cli/__init__.py'),
+        active_project_path=Path('/tmp/fake-venv/lib/python3.12/site-packages'),
+        expected_checkout_path=install_env['hermes_home'] / 'hermes-agent',
+        editable_source_path=Path('/tmp/checkout'),
+        active_runtime_is_site_packages=True,
+        ui_tui_path=Path('/tmp/fake-venv/lib/python3.12/site-packages/ui-tui'),
+    )
+    all_lib_mocks['inspect_hermes_runtime'].side_effect = [before, before, after_gateway, before]
+    all_lib_mocks['reassert_editable_hermes_if_needed'].side_effect = [False, True]
+
+    result = runner.invoke(app, ['install', '--non-interactive', '--service', 'none'])
+
+    assert result.exit_code == 0, f'stdout: {result.stdout}\nexc: {result.exception}'
+    assert all_lib_mocks['reassert_editable_hermes_if_needed'].call_args_list[1] == call(before, after_gateway)
+    all_lib_mocks['verify_hermes_tui_integrity'].assert_called_once_with(before)
+
+
+def test_install_attempts_repair_when_plugin_install_raises_after_runtime_regression(
+    install_env, all_lib_mocks
+) -> None:
+    before = HermesRuntimeState(
+        venv_path=Path('/tmp/fake-venv'),
+        hermes_home=install_env['hermes_home'],
+        import_path=Path('/tmp/checkout/hermes_cli/__init__.py'),
+        active_project_path=Path('/tmp/checkout'),
+        expected_checkout_path=install_env['hermes_home'] / 'hermes-agent',
+        editable_source_path=Path('/tmp/checkout'),
+        active_runtime_is_site_packages=False,
+        ui_tui_path=Path('/tmp/checkout/ui-tui'),
+    )
+    after_failure = HermesRuntimeState(
+        venv_path=Path('/tmp/fake-venv'),
+        hermes_home=install_env['hermes_home'],
+        import_path=Path('/tmp/fake-venv/lib/python3.12/site-packages/hermes_cli/__init__.py'),
+        active_project_path=Path('/tmp/fake-venv/lib/python3.12/site-packages'),
+        expected_checkout_path=install_env['hermes_home'] / 'hermes-agent',
+        editable_source_path=Path('/tmp/checkout'),
+        active_runtime_is_site_packages=True,
+        ui_tui_path=Path('/tmp/fake-venv/lib/python3.12/site-packages/ui-tui'),
+    )
+    repaired = before
+    all_lib_mocks['inspect_hermes_runtime'].side_effect = [before, after_failure, repaired]
+    all_lib_mocks['pip_install_plugin_at_sha'].side_effect = RuntimeError('pip exploded')
+    all_lib_mocks['reassert_editable_hermes_if_needed'].return_value = True
+
+    result = runner.invoke(app, ['install', '--non-interactive', '--service', 'none'])
+
+    assert result.exit_code == 1
+    all_lib_mocks['reassert_editable_hermes_if_needed'].assert_called_once_with(before, after_failure)
+    all_lib_mocks['enable_myah_platform'].assert_not_called()
+
+
+def test_install_fails_before_config_merge_when_tui_integrity_broken(install_env, all_lib_mocks) -> None:
+    all_lib_mocks['verify_hermes_tui_integrity'].side_effect = RuntimeError('hermes --tui broken')
+
+    result = runner.invoke(app, ['install', '--non-interactive', '--service', 'none'])
+
+    assert result.exit_code == 1
+    assert 'hermes --tui broken' in result.stdout
+    all_lib_mocks['enable_myah_platform'].assert_not_called()
 
 
 def test_install_registers_plugin_with_gateway_phase_5b(install_env, all_lib_mocks) -> None:
@@ -185,6 +326,128 @@ def test_install_registers_plugin_with_gateway_phase_5b(install_env, all_lib_moc
     assert kwargs['adapter_auth_key'], (
         'register_plugin_with_gateway must receive a non-empty adapter_auth_key'
     )
+    assert mock.call_args.args[0] == Path('/tmp/fake-venv/bin/hermes')
+    assert kwargs['hermes_home'] == install_env['hermes_home']
+
+
+def test_non_interactive_named_profile_writes_to_selected_home(
+    monkeypatch: pytest.MonkeyPatch,
+    fake_repo: Path,
+    tmp_path: Path,
+    all_lib_mocks,
+) -> None:
+    """``--profile myah`` scopes all Hermes-side writes to that named profile."""
+    monkeypatch.setenv('HOME', str(tmp_path))
+    monkeypatch.delenv('HERMES_HOME', raising=False)
+    profile_home = tmp_path / '.hermes' / 'profiles' / 'myah'
+    profile_home.mkdir(parents=True)
+    monkeypatch.chdir(fake_repo)
+    monkeypatch.setattr(
+        'myah.cli.install.shutil.which',
+        lambda name: '/usr/local/bin/hermes' if name == 'hermes' else None,
+    )
+
+    result = runner.invoke(
+        app,
+        ['install', '--non-interactive', '--service', 'none', '--profile', 'myah'],
+    )
+
+    assert result.exit_code == 0, f'stdout: {result.stdout}\nexc: {result.exception}'
+    assert (profile_home / '.env').is_file()
+    assert parse_env_file(profile_home / '.env').get('MYAH_AGENT_BEARER_TOKEN')
+    all_lib_mocks['materialize_dashboard_shim'].assert_called_once_with(Path('/tmp/fake-venv'), profile_home)
+    all_lib_mocks['enable_myah_platform'].assert_called_once_with(profile_home / 'config.yaml')
+    assert all_lib_mocks['register_plugin_with_gateway'].call_args.args[0] == Path('/tmp/fake-venv/bin/hermes')
+    assert all_lib_mocks['register_plugin_with_gateway'].call_args.kwargs['hermes_home'] == profile_home
+    all_lib_mocks['post_install_doctor_run'].assert_called_once_with(
+        services_started=False,
+        hermes_home=str(profile_home),
+    )
+
+
+def test_missing_profile_fails_before_partial_writes(
+    monkeypatch: pytest.MonkeyPatch,
+    fake_repo: Path,
+    tmp_path: Path,
+    all_lib_mocks,
+) -> None:
+    """Missing explicit profiles fail before platform/Hermes writes or subprocess helpers."""
+    monkeypatch.setenv('HOME', str(tmp_path))
+    monkeypatch.delenv('HERMES_HOME', raising=False)
+    monkeypatch.chdir(fake_repo)
+    monkeypatch.setattr(
+        'myah.cli.install.shutil.which',
+        lambda name: '/usr/local/bin/hermes' if name == 'hermes' else None,
+    )
+
+    result = runner.invoke(
+        app,
+        ['install', '--non-interactive', '--service', 'none', '--profile', 'missing'],
+    )
+
+    assert result.exit_code == 2
+    assert 'missing' in result.stdout
+    assert not (tmp_path / '.hermes' / 'profiles' / 'missing').exists()
+    assert not (tmp_path / '.hermes' / '.env').exists()
+    assert not (fake_repo / 'platform-oss' / '.env').exists()
+    all_lib_mocks['detect_hermes_venv'].assert_not_called()
+    all_lib_mocks['bootstrap_pip'].assert_not_called()
+    all_lib_mocks['enable_myah_platform'].assert_not_called()
+
+
+def test_create_profile_requires_profile_name(install_env, all_lib_mocks) -> None:
+    result = runner.invoke(
+        app,
+        ['install', '--non-interactive', '--service', 'none', '--create-profile'],
+    )
+
+    assert result.exit_code == 2
+    assert '--create-profile requires --profile' in result.stdout
+    all_lib_mocks['detect_hermes_venv'].assert_not_called()
+
+
+def test_create_named_profile_non_interactive(
+    monkeypatch: pytest.MonkeyPatch,
+    fake_repo: Path,
+    tmp_path: Path,
+    all_lib_mocks,
+) -> None:
+    monkeypatch.setenv('HOME', str(tmp_path))
+    monkeypatch.delenv('HERMES_HOME', raising=False)
+    monkeypatch.chdir(fake_repo)
+    monkeypatch.setattr(
+        'myah.cli.install.shutil.which',
+        lambda name: '/usr/local/bin/hermes' if name == 'hermes' else None,
+    )
+    profile_home = tmp_path / '.hermes' / 'profiles' / 'myah'
+
+    result = runner.invoke(
+        app,
+        [
+            'install', '--non-interactive', '--service', 'none',
+            '--profile', 'myah', '--create-profile',
+        ],
+    )
+
+    assert result.exit_code == 0, f'stdout: {result.stdout}\nexc: {result.exception}'
+    assert profile_home.is_dir()
+    assert (profile_home / '.env').is_file()
+
+
+def test_non_interactive_without_profile_does_not_prompt(
+    install_env,
+    all_lib_mocks,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prompt_mock = monkeypatch.setattr(
+        'typer.prompt',
+        lambda *args, **kwargs: pytest.fail('non-interactive install must not prompt'),
+    )
+
+    result = runner.invoke(app, ['install', '--non-interactive', '--service', 'none'])
+
+    assert result.exit_code == 0, result.stdout
+    assert prompt_mock is None
 
 
 # ── failure-mode flags ────────────────────────────────────────────────
@@ -442,8 +705,10 @@ def test_post_install_renders_status_indicators(install_env, mocker) -> None:
     # Mock all the system-touching lib helpers so we don't need install_env
     for name in (
         'detect_hermes_venv', 'bootstrap_pip', 'pip_install_plugin_at_sha',
-        'materialize_dashboard_shim', 'enable_myah_platform',
-        'verify_dashboard_plugin_mounted',
+        'inspect_hermes_runtime', 'reassert_editable_hermes_if_needed',
+        'verify_myah_plugin_importable', 'verify_hermes_tui_integrity',
+        'materialize_dashboard_shim', 'register_plugin_with_gateway',
+        'enable_myah_platform', 'verify_dashboard_plugin_mounted',
     ):
         if name == 'detect_hermes_venv':
             mocker.patch(f'myah.cli.install.{name}', return_value=Path('/tmp/v'))
@@ -472,8 +737,10 @@ def test_post_install_renders_status_indicators(install_env, mocker) -> None:
 def test_post_install_fail_exits_one(install_env, mocker) -> None:
     """Scenario 14: any FAIL result → exit code 1."""
     for name in (
-        'bootstrap_pip', 'pip_install_plugin_at_sha', 'materialize_dashboard_shim',
-        'verify_dashboard_plugin_mounted',
+        'bootstrap_pip', 'pip_install_plugin_at_sha', 'inspect_hermes_runtime',
+        'reassert_editable_hermes_if_needed', 'verify_myah_plugin_importable',
+        'verify_hermes_tui_integrity', 'materialize_dashboard_shim',
+        'register_plugin_with_gateway', 'verify_dashboard_plugin_mounted',
     ):
         if name == 'verify_dashboard_plugin_mounted':
             mocker.patch(f'myah.cli.install.{name}', return_value=True)
@@ -593,10 +860,142 @@ def test_interactive_service_prompt_accepts_default(
     # Force linux default so systemd is the platform-appropriate default.
     monkeypatch.setattr('myah.cli.install.sys.platform', 'linux')
 
-    # `input='\n'` accepts the default via CliRunner.
-    result = runner.invoke(app, ['install'], input='\n')
+    # First newline accepts the profile default, second accepts the service default.
+    result = runner.invoke(app, ['install'], input='\n\n')
     assert result.exit_code == 0, f'stdout: {result.stdout}\nexc: {result.exception}'
     all_lib_mocks['install_systemd_user_units'].assert_called_once()
+
+
+def test_interactive_existing_named_profile_selection(
+    monkeypatch: pytest.MonkeyPatch,
+    fake_repo: Path,
+    tmp_path: Path,
+    all_lib_mocks,
+) -> None:
+    """Interactive setup shows and accepts an existing named Hermes profile."""
+    monkeypatch.setenv('HOME', str(tmp_path))
+    monkeypatch.delenv('HERMES_HOME', raising=False)
+    profile_home = tmp_path / '.hermes' / 'profiles' / 'work'
+    profile_home.mkdir(parents=True)
+    monkeypatch.chdir(fake_repo)
+    monkeypatch.setattr('myah.cli.install._stdin_is_tty', lambda: True)
+    monkeypatch.setattr(
+        'myah.cli.install.shutil.which',
+        lambda name: '/usr/local/bin/hermes' if name == 'hermes' else None,
+    )
+
+    result = runner.invoke(app, ['install'], input='work\nnone\n')
+
+    assert result.exit_code == 0, f'stdout: {result.stdout}\nexc: {result.exception}'
+    assert 'work' in result.stdout
+    assert (profile_home / '.env').is_file()
+    all_lib_mocks['materialize_dashboard_shim'].assert_called_once_with(Path('/tmp/fake-venv'), profile_home)
+    all_lib_mocks['enable_myah_platform'].assert_called_once_with(profile_home / 'config.yaml')
+    assert all_lib_mocks['register_plugin_with_gateway'].call_args.args[0] == Path('/tmp/fake-venv/bin/hermes')
+    assert all_lib_mocks['register_plugin_with_gateway'].call_args.kwargs['hermes_home'] == profile_home
+
+
+def test_interactive_current_hermes_home_is_default(
+    monkeypatch: pytest.MonkeyPatch,
+    fake_repo: Path,
+    tmp_path: Path,
+    all_lib_mocks,
+) -> None:
+    """If HERMES_HOME is set, empty interactive input keeps that current profile."""
+    custom_home = tmp_path / 'custom-current-hermes'
+    monkeypatch.setenv('HOME', str(tmp_path / 'home'))
+    monkeypatch.setenv('HERMES_HOME', str(custom_home))
+    monkeypatch.chdir(fake_repo)
+    monkeypatch.setattr('myah.cli.install._stdin_is_tty', lambda: True)
+    monkeypatch.setattr(
+        'myah.cli.install.shutil.which',
+        lambda name: '/usr/local/bin/hermes' if name == 'hermes' else None,
+    )
+
+    result = runner.invoke(app, ['install'], input='\nnone\n')
+
+    assert result.exit_code == 0, f'stdout: {result.stdout}\nexc: {result.exception}'
+    assert 'current' in result.stdout
+    assert (custom_home / '.env').is_file()
+    all_lib_mocks['enable_myah_platform'].assert_called_once_with(custom_home / 'config.yaml')
+
+
+def test_interactive_create_profile(
+    monkeypatch: pytest.MonkeyPatch,
+    fake_repo: Path,
+    tmp_path: Path,
+    all_lib_mocks,
+) -> None:
+    """Interactive setup can create a new Myah-specific Hermes profile."""
+    monkeypatch.setenv('HOME', str(tmp_path))
+    monkeypatch.delenv('HERMES_HOME', raising=False)
+    monkeypatch.chdir(fake_repo)
+    monkeypatch.setattr('myah.cli.install._stdin_is_tty', lambda: True)
+    monkeypatch.setattr(
+        'myah.cli.install.shutil.which',
+        lambda name: '/usr/local/bin/hermes' if name == 'hermes' else None,
+    )
+    profile_home = tmp_path / '.hermes' / 'profiles' / 'myah'
+
+    result = runner.invoke(app, ['install'], input='create\n\nnone\n')
+
+    assert result.exit_code == 0, f'stdout: {result.stdout}\nexc: {result.exception}'
+    assert profile_home.is_dir()
+    assert (profile_home / '.env').is_file()
+    all_lib_mocks['enable_myah_platform'].assert_called_once_with(profile_home / 'config.yaml')
+
+
+def test_interactive_create_reprompts_when_myah_exists(
+    monkeypatch: pytest.MonkeyPatch,
+    fake_repo: Path,
+    tmp_path: Path,
+    all_lib_mocks,
+) -> None:
+    """If the default new name `myah` exists, interactive create asks for another name."""
+    monkeypatch.setenv('HOME', str(tmp_path))
+    monkeypatch.delenv('HERMES_HOME', raising=False)
+    (tmp_path / '.hermes' / 'profiles' / 'myah').mkdir(parents=True)
+    other_home = tmp_path / '.hermes' / 'profiles' / 'myah-oss'
+    monkeypatch.chdir(fake_repo)
+    monkeypatch.setattr('myah.cli.install._stdin_is_tty', lambda: True)
+    monkeypatch.setattr(
+        'myah.cli.install.shutil.which',
+        lambda name: '/usr/local/bin/hermes' if name == 'hermes' else None,
+    )
+
+    result = runner.invoke(app, ['install'], input='create\n\nmyah-oss\nnone\n')
+
+    assert result.exit_code == 0, f'stdout: {result.stdout}\nexc: {result.exception}'
+    assert 'already exists' in result.stdout
+    assert other_home.is_dir()
+    assert (other_home / '.env').is_file()
+    all_lib_mocks['enable_myah_platform'].assert_called_once_with(other_home / 'config.yaml')
+
+
+def test_interactive_create_reprompts_for_invalid_profile_name(
+    monkeypatch: pytest.MonkeyPatch,
+    fake_repo: Path,
+    tmp_path: Path,
+    all_lib_mocks,
+) -> None:
+    """Invalid new profile names are rejected without aborting the installer."""
+    monkeypatch.setenv('HOME', str(tmp_path))
+    monkeypatch.delenv('HERMES_HOME', raising=False)
+    valid_home = tmp_path / '.hermes' / 'profiles' / 'myah-oss'
+    monkeypatch.chdir(fake_repo)
+    monkeypatch.setattr('myah.cli.install._stdin_is_tty', lambda: True)
+    monkeypatch.setattr(
+        'myah.cli.install.shutil.which',
+        lambda name: '/usr/local/bin/hermes' if name == 'hermes' else None,
+    )
+
+    result = runner.invoke(app, ['install'], input='create\nbad name\nmyah-oss\nnone\n')
+
+    assert result.exit_code == 0, f'stdout: {result.stdout}\nexc: {result.exception}'
+    assert 'Invalid Hermes profile name' in result.stdout
+    assert valid_home.is_dir()
+    assert (valid_home / '.env').is_file()
+    all_lib_mocks['enable_myah_platform'].assert_called_once_with(valid_home / 'config.yaml')
 
 
 # ── invalid --service value ──────────────────────────────────────────
@@ -666,6 +1065,9 @@ def test_install_command_help_works() -> None:
     assert '--non-interactive' in result.stdout
     assert '--service' in result.stdout
     assert '--rotate' in result.stdout
+    assert '--profile' in result.stdout
+    assert '--create-profile' in result.stdout
+    assert '--skip-start' in result.stdout
 
 
 # ── Task C.1: auto-kickstart services after Phase 7 ──────────────────
