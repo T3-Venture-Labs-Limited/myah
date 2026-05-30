@@ -3,6 +3,14 @@
 
 import type { Process } from '$lib/apis/processes';
 
+export interface ChatLike {
+	id: string;
+	title?: string | null;
+	updated_at?: number | null;
+	folder_id?: string | null;
+	meta?: { files?: TaskFile[] };
+}
+
 export type TaskStatus = 'active' | 'needs_input' | 'scheduled' | 'completed';
 export type TaskType = 'chat' | 'recurring';
 
@@ -17,8 +25,12 @@ export interface TaskItem {
 	updated_at: number;
 	process?: Process;
 	files: TaskFile[];
-	chat?: any;
+	chat?: ChatLike;
 	folder_id?: string;
+	// ── Adopt Legacy Crons (Phase 6): whether to show the "Adopt into Myah"
+	// affordance, and which copy variant to use. Populated for recurring tasks.
+	adoptable?: boolean;
+	adoptionState?: Process['adoption_state'];
 }
 
 export interface TaskFile {
@@ -32,6 +44,18 @@ export function stripProcessPrefix(title: string): string {
 		return title.slice(9);
 	}
 	return title ?? '';
+}
+
+/**
+ * Whether a process should surface the "Adopt into Myah" affordance.
+ *
+ * Trusts the backend-derived `adoptable` flag when present; falls back to
+ * "no linked Myah chat → adoptable" for older backends that don't emit it.
+ */
+export function isProcessAdoptable(process: Process | null | undefined): boolean {
+	if (!process) return false;
+	if (typeof process.adoptable === 'boolean') return process.adoptable;
+	return !process.chat_id;
 }
 
 export function getTaskStatus(
@@ -55,18 +79,18 @@ export function getTaskStatus(
 	return 'completed';
 }
 
-export function getTaskFiles(chatOrProcess: any): TaskFile[] {
+export function getTaskFiles(chatOrProcess: ChatLike | Process): TaskFile[] {
 	if (chatOrProcess?.meta?.files && Array.isArray(chatOrProcess.meta.files)) {
 		return chatOrProcess.meta.files;
 	}
 	return [];
 }
 
-export function mergeChatsAndProcesses(chats: any[], processes: Process[]): TaskItem[] {
+export function mergeChatsAndProcesses(chats: ChatLike[], processes: Process[]): TaskItem[] {
 	// Match processes to their linked chats by title convention "Process: {name}".
 	// The API never returns chat_id on process objects, so we look up by title.
 	// Build a map: process name → chat object
-	const processChatByName = new Map<string, any>();
+	const processChatByName = new Map<string, ChatLike>();
 	const processChatIds = new Set<string>();
 
 	for (const chat of chats) {
@@ -131,7 +155,7 @@ export function mergeChatsAndProcesses(chats: any[], processes: Process[]): Task
 
 		tasks.push({
 			id: taskId,
-			chatId: originChatId,  // navigate here when present (Bug A fix)
+			chatId: originChatId, // navigate here when present (Bug A fix)
 			title: stripProcessPrefix(proc.name),
 			type: 'recurring',
 			status: 'scheduled',
@@ -144,7 +168,10 @@ export function mergeChatsAndProcesses(chats: any[], processes: Process[]): Task
 						: 0),
 			processId: proc.id,
 			process: proc,
-			files: []
+			files: [],
+			// Adopt Legacy Crons (Phase 6): surface adoption affordance state.
+			adoptable: isProcessAdoptable(proc),
+			adoptionState: proc.adoption_state
 		});
 	}
 
@@ -169,10 +196,12 @@ export function filterTasks(
 ): TaskItem[] {
 	let filtered = tasks;
 
-	// Update live status before filtering
+	// Update live status before filtering. Key off the navigation target
+	// (chatId) rather than the Svelte key (id) — for crons sharing one origin
+	// chat, `id` is disambiguated to the JOB_ID, which is never in activeChatIds.
 	filtered = filtered.map((task) => ({
 		...task,
-		status: getTaskStatus(task.id, task.process ?? null, activeChatIds)
+		status: getTaskStatus(task.chatId ?? task.id, task.process ?? null, activeChatIds)
 	}));
 
 	if (filters.status && filters.status.length > 0) {

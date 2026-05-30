@@ -12,16 +12,16 @@ Authoritative source: docs/oss-launch/processes-py-gate-classification.md
 from __future__ import annotations
 
 import datetime as dt
-from urllib.parse import urlparse
 from unittest.mock import patch
+from urllib.parse import urlparse
 
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+
 from myah.models.users import UserModel
 from myah.routers import processes as processes_module
 from myah.utils.auth import get_verified_user
-
 
 VALID_JOB_ID = 'abcdef012345'
 
@@ -50,6 +50,10 @@ CO_ROUTES: list[tuple[str, str, dict | None]] = [
     ('POST', f'/api/v1/processes/{VALID_JOB_ID}/ui-action',
      {'action_type': 'submit', 'action': 'go', 'payload': {}}),                                    # CO 792
     ('POST', f'/api/v1/processes/{VALID_JOB_ID}/sync-chat', None),                                 # CO 1394
+    # Adoption reads run-output files from the per-user agent container
+    # (backfill), so it is container-only and 501s in OSS like /sync-chat.
+    # OSS adoption against a host Hermes is a deliberate follow-up.
+    ('POST', f'/api/v1/processes/{VALID_JOB_ID}/adopt', {'backfill_limit': 0}),                    # CO adopt
 ]
 
 

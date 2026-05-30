@@ -1,12 +1,15 @@
 import { describe, it, expect } from 'vitest';
+import { get } from 'svelte/store';
 import {
 	mergeChatsAndProcesses,
 	getTaskStatus,
 	getTaskFiles,
 	filterTasks,
-	stripProcessPrefix
+	stripProcessPrefix,
+	isProcessAdoptable
 } from '$lib/utils/tasks';
 import type { TaskItem } from '$lib/utils/tasks';
+import { allTasks, applyAdoptedProcessToTasks } from '$lib/stores/tasks';
 
 describe('stripProcessPrefix', () => {
 	it('removes "Process: " prefix', () => {
@@ -139,9 +142,7 @@ describe('mergeChatsAndProcesses', () => {
 
 	// ── Bug A: chatId is the navigation target, distinct from id (Svelte key)
 	it('exposes origin chat_id as task.chatId so navigation reaches the originating chat', () => {
-		const chats = [
-			{ id: 'origin-chat', title: 'My Active Chat', updated_at: 1000 }
-		];
+		const chats = [{ id: 'origin-chat', title: 'My Active Chat', updated_at: 1000 }];
 		const processes = [
 			{ id: 'p1', name: 'My Cron', chat_id: 'origin-chat', created_at: '2026-01-01T00:00:00Z' }
 		];
@@ -152,9 +153,7 @@ describe('mergeChatsAndProcesses', () => {
 	});
 
 	it('multiple crons sharing one origin chat all navigate there even when ids disambiguate', () => {
-		const chats = [
-			{ id: 'shared-chat', title: 'Active Chat', updated_at: 1000 }
-		];
+		const chats = [{ id: 'shared-chat', title: 'Active Chat', updated_at: 1000 }];
 		const processes = [
 			{ id: 'pA', name: 'Cron A', chat_id: 'shared-chat', created_at: '2026-01-01T00:00:00Z' },
 			{ id: 'pB', name: 'Cron B', chat_id: 'shared-chat', created_at: '2026-01-01T01:00:00Z' }
@@ -236,5 +235,114 @@ describe('filterTasks', () => {
 		const tasks = [baseTask({ id: 'chat-active' })];
 		const result = filterTasks(tasks, {}, new Set(['chat-active']));
 		expect(result[0].status).toBe('active');
+	});
+
+	// ── Adopt Legacy Crons (Phase 6): active status must key off the
+	// navigation target (chatId), not the Svelte key (id, which is the
+	// JOB_ID for disambiguated crons sharing one origin chat).
+	it('marks a disambiguated cron task active by chatId, not processId', () => {
+		const tasks = [
+			baseTask({
+				id: 'p1', // Svelte key = processId after disambiguation
+				chatId: 'shared-chat', // real navigation target
+				processId: 'p1',
+				type: 'recurring',
+				process: { has_pending_input: false, enabled: true, state: 'scheduled' } as any
+			})
+		];
+		const result = filterTasks(tasks, {}, new Set(['shared-chat']));
+		expect(result[0].status).toBe('active');
+	});
+});
+
+describe('adoption classification (Adopt Legacy Crons — Phase 6)', () => {
+	it('legacy_unowned process is adoptable with no navigation chat', () => {
+		const procs = [
+			{
+				id: 'p1',
+				name: 'Legacy Cron',
+				adoptable: true,
+				adoption_state: 'legacy_unowned',
+				created_at: '2026-01-01T00:00:00Z'
+			}
+		];
+		const result = mergeChatsAndProcesses([], procs as any);
+		const task = result.find((t) => t.type === 'recurring')!;
+		expect(task.adoptable).toBe(true);
+		expect(task.adoptionState).toBe('legacy_unowned');
+		// No chat to navigate to → the UI shows the Adopt affordance instead of
+		// routing to a fake empty chat.
+		expect(task.chatId).toBeUndefined();
+		expect(isProcessAdoptable(procs[0] as any)).toBe(true);
+	});
+
+	it('external_origin process is adoptable and carries the warning state', () => {
+		const procs = [
+			{
+				id: 'p1',
+				name: 'Telegram Bot',
+				adoptable: true,
+				adoption_state: 'external_origin',
+				origin: { platform: 'telegram', chat_id: 'tg-1' },
+				created_at: '2026-01-01T00:00:00Z'
+			}
+		];
+		const result = mergeChatsAndProcesses([], procs as any);
+		const task = result.find((t) => t.type === 'recurring')!;
+		expect(task.adoptable).toBe(true);
+		expect(task.adoptionState).toBe('external_origin');
+		expect(isProcessAdoptable(procs[0] as any)).toBe(true);
+	});
+
+	it('adopted (myah_linked) process navigates to its chat_id and is not adoptable', () => {
+		const procs = [
+			{
+				id: 'p1',
+				name: 'Adopted Cron',
+				chat_id: 'chat-xyz',
+				adoptable: false,
+				adoption_state: 'myah_linked',
+				created_at: '2026-01-01T00:00:00Z'
+			}
+		];
+		const result = mergeChatsAndProcesses([], procs as any);
+		const task = result.find((t) => t.type === 'recurring')!;
+		expect(task.chatId).toBe('chat-xyz');
+		expect(task.adoptable).toBe(false);
+		expect(task.adoptionState).toBe('myah_linked');
+		expect(isProcessAdoptable(procs[0] as any)).toBe(false);
+	});
+
+	it('isProcessAdoptable falls back to absence of chat_id when adoptable is absent', () => {
+		expect(isProcessAdoptable({ id: 'p', name: 'x' } as any)).toBe(true);
+		expect(isProcessAdoptable({ id: 'p', name: 'x', chat_id: 'c' } as any)).toBe(false);
+		expect(isProcessAdoptable(null)).toBe(false);
+	});
+
+	it('updates task-store shape after adoption so the card does not remain stale', () => {
+		const task = {
+			id: 'p1',
+			processId: 'p1',
+			title: 'Legacy Cron',
+			type: 'recurring',
+			status: 'scheduled',
+			updated_at: 0,
+			files: [],
+			adoptable: true,
+			adoptionState: 'legacy_unowned',
+			process: { id: 'p1', name: 'Legacy Cron', adoptable: true } as any
+		} satisfies TaskItem;
+
+		const next = applyAdoptedProcessToTasks([task], task.process as any, 'chat-1');
+		expect(next[0].id).toBe('chat-1');
+		expect(next[0].chatId).toBe('chat-1');
+		expect(next[0].adoptable).toBe(false);
+		expect(next[0].adoptionState).toBe('myah_linked');
+		expect(next[0].process?.chat_id).toBe('chat-1');
+		expect(next[0].process?.adoptable).toBe(false);
+
+		allTasks.set([task]);
+		allTasks.update((tasks) => applyAdoptedProcessToTasks(tasks, task.process as any, 'chat-1'));
+		expect(get(allTasks)[0].chatId).toBe('chat-1');
 	});
 });

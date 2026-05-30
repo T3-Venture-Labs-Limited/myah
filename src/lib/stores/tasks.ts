@@ -5,6 +5,29 @@ import { writable } from 'svelte/store';
 import type { Process } from '$lib/apis/processes';
 import type { TaskItem, TaskStatus } from '$lib/utils/tasks';
 
+export function applyAdoptedProcessToTasks(tasks: TaskItem[], process: Process, chatId?: string): TaskItem[] {
+	return tasks.map((task) => {
+		if (task.processId !== process.id && task.process?.id !== process.id) {
+			return task;
+		}
+		const linked = {
+			...(task.process ?? process),
+			...process,
+			chat_id: chatId,
+			adoptable: false,
+			adoption_state: 'myah_linked'
+		} as Process;
+		return {
+			...task,
+			id: chatId ?? task.id,
+			chatId,
+			process: linked,
+			adoptable: false,
+			adoptionState: 'myah_linked'
+		};
+	});
+}
+
 // Map of chatId -> Process for quick lookups
 export const processMap = writable<Map<string, Process>>(new Map());
 
