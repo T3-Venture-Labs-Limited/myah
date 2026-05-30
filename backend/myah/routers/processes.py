@@ -233,6 +233,356 @@ async def _hermes_delete(url: str) -> Any:
     return resp.json()
 
 
+# ─── Myah adoption: safe job-metadata patch primitive (Phase 0) ────────────────
+#
+# Native Hermes ``PATCH /api/jobs/{id}`` (the ``_hermes_patch`` path above)
+# silently DROPS any field outside its ``_UPDATE_ALLOWED_FIELDS`` allowlist
+# (name/schedule/prompt/deliver/skills/skill/repeat/enabled) — verified in
+# upstream ``gateway/platforms/api_server.py``. So ``origin`` / ``chat_id`` /
+# ``myah`` cannot be persisted through it.
+#
+# Myah-owned routing metadata (``job.myah.chat_id`` etc.) is instead persisted
+# through the myah-admin dashboard plugin, which runs *inside* the Hermes
+# runtime and can call ``cron.jobs.update_job`` directly. ``update_job`` only
+# blocks the immutable ``id`` field, so a ``{"myah": {...}}`` merge keeps
+# native ``origin`` and ``deliver`` intact.
+#
+# This helper is the platform side of that contract; the dashboard endpoint
+# ships in myah-hermes-plugin (see the plan's plugin follow-up). Until a plugin
+# build exposes it, the helper fails *clearly* (501) rather than silently.
+JOB_ID_RE = re.compile(r'^[a-f0-9]{12}$')
+_ALLOWED_MYAH_METADATA_KEYS = frozenset({'myah'})
+MYAH_METADATA_ENDPOINT_UNAVAILABLE = (
+    'Cannot persist Myah cron metadata: the myah-admin dashboard job-metadata '
+    'endpoint is unavailable. Upgrade myah-hermes-plugin to a build that exposes '
+    'POST /api/plugins/myah-admin/cron/jobs/{job_id}/myah-metadata.'
+)
+
+
+def _validate_hermes_job_id(job_id: str) -> None:
+    """Reject anything that is not a canonical 12-hex Hermes job id.
+
+    Job ids are filesystem path components under the cron output dir, so a
+    crafted id (path traversal, separators, wrong charset) must never reach a
+    helper that interpolates it into a URL or filesystem path.
+    """
+    if not isinstance(job_id, str) or not JOB_ID_RE.match(job_id):
+        raise HTTPException(status_code=400, detail='Invalid job ID format')
+
+
+async def _patch_job_myah_metadata(user: UserModel, job_id: str, metadata: dict) -> Any:
+    """Persist Myah-owned routing metadata onto a Hermes cron job.
+
+    ``metadata`` must be shaped ``{"myah": {...}}`` — only the Myah-owned
+    namespace is patchable here. Native ``origin`` / ``deliver`` are never
+    transmitted, so a plugin-side merge cannot clobber them.
+
+    Raises HTTPException(400) for an invalid job id or payload shape, and a
+    clear non-2xx when the dashboard endpoint is unavailable (rather than
+    pretending the write succeeded).
+    """
+    _validate_hermes_job_id(job_id)
+
+    if not isinstance(metadata, dict) or not metadata:
+        raise HTTPException(status_code=400, detail='metadata must be a non-empty object')
+    unknown = set(metadata) - _ALLOWED_MYAH_METADATA_KEYS
+    if unknown:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f'metadata may only patch Myah-owned keys {sorted(_ALLOWED_MYAH_METADATA_KEYS)}; '
+                f'rejected {sorted(unknown)} (native origin/deliver are preserved, never patched here)'
+            ),
+        )
+    if not isinstance(metadata.get('myah'), dict):
+        raise HTTPException(status_code=400, detail="metadata['myah'] must be an object")
+
+    from myah.utils.hermes_web import web_call
+
+    try:
+        result = await web_call(
+            user,
+            'POST',
+            f'/api/plugins/myah-admin/cron/jobs/{job_id}/myah-metadata',
+            json_body=metadata,
+            timeout=10.0,
+        )
+    except HTTPException:
+        # web_call already mapped connect/timeout/read errors to a clean status.
+        raise
+    except Exception as exc:
+        # Any other transport quirk (e.g. an empty dashboard token producing an
+        # illegal Authorization header in single-tenant OSS setups) must not
+        # crash the request with an opaque 500 — surface it as retryable.
+        logger.warning(f'Myah metadata patch transport error for job {job_id}: {exc}')
+        raise HTTPException(
+            status_code=503,
+            detail='Could not reach the Hermes dashboard to persist Myah metadata',
+        )
+    status = result.get('status') if isinstance(result, dict) else None
+    if status == 404:
+        # Plugin too old / endpoint not mounted — surface clearly, don't swallow.
+        raise HTTPException(status_code=501, detail=MYAH_METADATA_ENDPOINT_UNAVAILABLE)
+    if status is None or status >= 400:
+        detail = result.get('body') if isinstance(result, dict) else None
+        if isinstance(detail, str):
+            detail = detail[:200]
+        raise HTTPException(status_code=status or 502, detail=detail or 'Failed to patch job metadata')
+    return result.get('body') if isinstance(result, dict) else None
+
+
+def _build_myah_adoption_metadata(job: dict, chat_id: str, adopted_at: str) -> dict:
+    """Build the ``{"myah": {...}}`` patch payload for an adopted cron.
+
+    Snapshots the legacy ``origin`` (so we never lose where the cron used to
+    deliver) under ``myah.legacy_origin`` — but never emits a top-level
+    ``origin`` / ``deliver``, so native external delivery is preserved.
+    """
+    name = job.get('name') if isinstance(job, dict) else None
+    myah: dict = {'chat_id': chat_id, 'adopted_at': adopted_at}
+    if name:
+        myah['chat_name'] = f'Process: {name}'
+    origin = job.get('origin') if isinstance(job, dict) else None
+    if isinstance(origin, dict) and (origin.get('platform') or origin.get('chat_id')):
+        myah['legacy_origin'] = {
+            'platform': origin.get('platform'),
+            'chat_id': origin.get('chat_id'),
+        }
+    return {'myah': myah}
+
+
+def _process_chat_title(job: dict) -> str:
+    job_name = (job.get('name') if isinstance(job, dict) else None) or (
+        job.get('id') if isinstance(job, dict) else None
+    ) or 'cron'
+    return f'Process: {job_name}'
+
+
+def _resolve_process_chat_id(user: UserModel, job: dict) -> str | None:
+    """Resolve an existing, owned Myah chat for a job — never creates one.
+
+    Resolution order (first owned hit wins):
+      1. ``job.myah.chat_id``                           (already-adopted job);
+      2. ``job.origin.chat_id`` when ``origin.platform == 'myah'`` (native);
+      3. top-level ``job.chat_id``                      (forward-compat);
+      4. existing chat titled ``Process: {job_name}``   (legacy convention).
+
+    Returns the chat id, or ``None`` if nothing resolves.
+    """
+    from myah.models.chats import Chats
+
+    def _owned(cid):
+        if not cid or not isinstance(cid, str) or cid.startswith('local:'):
+            return None
+        return Chats.get_chat_by_id_and_user_id(cid, user.id)
+
+    myah = job.get('myah') if isinstance(job, dict) else None
+    if isinstance(myah, dict):
+        chat = _owned(myah.get('chat_id'))
+        if chat:
+            return chat.id
+
+    origin = job.get('origin') if isinstance(job, dict) else None
+    if isinstance(origin, dict) and origin.get('platform') == 'myah':
+        chat = _owned(origin.get('chat_id'))
+        if chat:
+            return chat.id
+
+    if isinstance(job, dict):
+        chat = _owned(job.get('chat_id'))
+        if chat:
+            return chat.id
+
+    chat_title = _process_chat_title(job)
+    chats = Chats.get_chat_list_by_user_id(user_id=user.id, filter={'query': chat_title}, limit=5)
+    for chat in chats:
+        if chat.title == chat_title:
+            return chat.id
+    return None
+
+
+def _find_or_create_process_chat(
+    user: UserModel,
+    job: dict,
+    explicit_chat_id: str | None = None,
+) -> tuple[str, bool]:
+    """Resolve (or create) the Myah chat a cron should be adopted into.
+
+    Resolution order (first owned hit wins):
+      1. explicit request ``chat_id`` (caller-validated; re-checked here);
+      2-4. the metadata/origin/title order in ``_resolve_process_chat_id``;
+      5. create a new ``Process: {job_name}`` chat.
+
+    Returns ``(chat_id, created)``.
+    """
+    from myah.models.chats import ChatForm, Chats
+
+    # 1. explicit chat_id
+    if explicit_chat_id:
+        if not isinstance(explicit_chat_id, str) or explicit_chat_id.startswith('local:'):
+            raise HTTPException(status_code=404, detail=f'Chat {explicit_chat_id} not found')
+        chat = Chats.get_chat_by_id_and_user_id(explicit_chat_id, user.id)
+        if not chat:
+            raise HTTPException(status_code=404, detail=f'Chat {explicit_chat_id} not found')
+        return (chat.id, False)
+
+    # 2-4. resolve an existing owned chat without creating.
+    resolved = _resolve_process_chat_id(user, job)
+    if resolved:
+        return (resolved, False)
+
+    # 5. create new chat
+    chat_title = _process_chat_title(job)
+    form = ChatForm(chat={'title': chat_title, 'history': {'messages': {}, 'currentId': None}})
+    new_chat = Chats.insert_new_chat(user.id, form)
+    return (new_chat.id, True)
+
+
+def _backfill_runs_to_chat(
+    chat_id: str,
+    job_id: str,
+    job_name: str,
+    runs: list[dict],
+) -> tuple[int, int]:
+    """Insert historical cron run outputs into a chat, oldest-to-newest.
+
+    ``runs`` is newest-first (as ``_fetch_run_outputs`` returns); we insert in
+    reverse so the chat reads chronologically and ``parentId`` chains forward.
+
+    Message ids are deterministic — ``cron_{job_id}_{run_stem}`` — so reruns
+    skip messages that already exist without re-parenting or duplicating child
+    pointers. Returns ``(backfilled, skipped_existing)``.
+    """
+    import time as _time
+
+    from myah.models.chats import Chats
+
+    process_chat = Chats.get_chat_by_id(chat_id)
+    if not process_chat:
+        return (0, 0)
+
+    history = process_chat.chat.get('history', {})
+    messages = history.get('messages', {})
+    current_id = history.get('currentId')
+
+    backfilled = 0
+    skipped = 0
+    for run in reversed(runs):
+        stem = run.get('id', '')
+        if not stem:
+            continue
+        msg_id = f'cron_{job_id}_{stem}'
+        if msg_id in messages:
+            # Already backfilled/delivered — skip without touching links.
+            skipped += 1
+            continue
+
+        status_prefix = '⚠️ ' if run.get('status') == 'error' else ''
+        ran_at = run.get('ran_at', '')
+        response = (run.get('response') or '').strip() or '(no output)'
+        content = f'{status_prefix}**Cron run** ({ran_at})\n\n{response}'
+        new_msg = {
+            'id': msg_id,
+            'role': 'assistant',
+            'content': content,
+            'parentId': current_id,
+            'childrenIds': [],
+            'timestamp': int(_time.time()),
+            'done': True,
+        }
+
+        if current_id and current_id in messages:
+            children = messages[current_id].get('childrenIds', [])
+            if msg_id not in children:
+                children.append(msg_id)
+                Chats.upsert_message_to_chat_by_id_and_message_id(
+                    id=process_chat.id,
+                    message_id=current_id,
+                    message={'childrenIds': children},
+                )
+
+        Chats.upsert_message_to_chat_by_id_and_message_id(
+            id=process_chat.id,
+            message_id=msg_id,
+            message=new_msg,
+        )
+
+        messages[msg_id] = new_msg
+        current_id = msg_id
+        backfilled += 1
+
+    if backfilled:
+        logger.info(f'Backfilled {backfilled} cron outputs for job "{job_name}" into chat {chat_id}')
+    return (backfilled, skipped)
+
+
+def _normalize_process_for_myah(job: dict, user: UserModel | None = None) -> dict:
+    """Annotate a Hermes job with consistent Myah adoption fields (in place).
+
+    Adds:
+      - ``chat_id``        — navigation target: only ever a *real, owned* Myah
+        chat. Derived from ``job.myah.chat_id`` first, then a native Myah
+        ``origin.chat_id``. Never a non-Myah origin's chat id.
+      - ``adoptable``      — show the "Adopt into Myah" affordance.
+      - ``adoption_state`` — one of:
+          * ``myah_linked``              — has a valid, owned Myah chat;
+          * ``legacy_unowned``           — no Myah/external origin; safe 1-click;
+          * ``external_origin``          — non-Myah origin; adopt preserves it;
+          * ``myah_origin_missing_chat`` — claims a Myah chat that is gone/
+            not owned; needs repair via (re-)adoption.
+
+    Ownership is verified against the DB when ``user`` is provided; without a
+    user, a present chat id is trusted (best-effort) so the helper stays usable
+    in user-less contexts.
+    """
+    if not isinstance(job, dict):
+        return job
+
+    myah = job.get('myah') if isinstance(job.get('myah'), dict) else None
+    origin = job.get('origin') if isinstance(job.get('origin'), dict) else None
+
+    myah_chat_id = myah.get('chat_id') if myah else None
+    origin_is_myah = bool(origin and origin.get('platform') == 'myah')
+    origin_chat_id = origin.get('chat_id') if origin else None
+
+    # Derive the candidate chat: Myah metadata first, then native Myah origin.
+    candidate_chat_id = myah_chat_id or (origin_chat_id if origin_is_myah else None)
+
+    def _is_owned(cid) -> bool:
+        if not cid or not isinstance(cid, str):
+            return False
+        if user is None:
+            return True  # cannot verify without a user — trust presence
+        from myah.models.chats import Chats
+
+        return Chats.get_chat_by_id_and_user_id(cid, getattr(user, 'id', None)) is not None
+
+    claims_myah_chat = bool(candidate_chat_id)
+    chat_owned = _is_owned(candidate_chat_id)
+    has_external_origin = bool(
+        origin and origin.get('platform') and origin.get('platform') != 'myah'
+    )
+
+    if claims_myah_chat and chat_owned:
+        job['chat_id'] = candidate_chat_id
+        job['adoption_state'] = 'myah_linked'
+        job['adoptable'] = False
+    elif claims_myah_chat and not chat_owned:
+        job['chat_id'] = None
+        job['adoption_state'] = 'myah_origin_missing_chat'
+        job['adoptable'] = True
+    elif has_external_origin:
+        job['chat_id'] = None
+        job['adoption_state'] = 'external_origin'
+        job['adoptable'] = True
+    else:
+        job['chat_id'] = None
+        job['adoption_state'] = 'legacy_unowned'
+        job['adoptable'] = True
+
+    return job
+
+
 # ─── Request / Response models ─────────────────────────────────────────────────
 
 
@@ -261,6 +611,25 @@ class ProcessUpdateForm(BaseModel):
     skills: list[str] | None = None
     repeat: bool | None = None
     enabled: bool | None = None
+
+
+class ProcessAdoptForm(BaseModel):
+    """Request body for ``POST /processes/{job_id}/adopt``.
+
+    All fields optional — an empty body adopts into a freshly-created
+    ``Process: {name}`` chat and backfills the latest 50 runs.
+    """
+    # Adopt into this existing (owned) chat instead of creating a new one.
+    chat_id: str | None = None
+    # How many historical run outputs to backfill (newest kept). 0 = none.
+    backfill_limit: int | None = 50
+    # v1 always preserves native deliver/origin; kept for forward-compat so a
+    # future explicit-reroute can opt out without a wire change.
+    preserve_deliver: bool | None = True
+
+
+class LinkChatForm(BaseModel):
+    chat_id: str
 
 
 # ─── Routes ───────────────────────────────────────────────────────────────────
@@ -345,22 +714,16 @@ async def list_processes(
     vite_port = container.vite_port if container else None
     for job in jobs:
         job['vite_port'] = vite_port
-        # ── Myah: Bug A — surface origin.chat_id as top-level chat_id ──
-        # The frontend Tasks sidebar (TaskItem.svelte) links each entry to
-        # `/c/{task.id}` — for cron jobs, ``task.id`` was falling through to
-        # the JOB_ID because ``chat_id`` was never populated at the top
-        # level.  Result: clicking a cron entry navigated to a non-existent
-        # chat with the JOB_ID as URL param → 401 → empty chat panel.
-        # Hermes stores the origin chat under ``job.origin.chat_id`` only.
-        # Copy it to a top-level ``chat_id`` so the sidebar can route the
-        # click to the originating conversation (where deliveries land via
-        # the webhook).  Only set when not already populated by a prior
-        # ``/processes/{id}/link-chat`` call (which writes top-level too).
-        if not job.get('chat_id'):
-            origin = job.get('origin') if isinstance(job.get('origin'), dict) else None
-            if origin and origin.get('chat_id'):
-                job['chat_id'] = origin['chat_id']
-        # ────────────────────────────────────────────────────────────────
+        # ── Myah adoption: derive chat_id + adoption_state consistently ──
+        # Replaces the old "Bug A" heuristic that copied ANY origin.chat_id
+        # (including external telegram/discord ids) to a top-level chat_id —
+        # which made the sidebar navigate to a non-existent Myah chat for
+        # external-origin crons. The normalizer only ever exposes a real,
+        # owned Myah chat as the navigation target; everything else is marked
+        # adoptable with the right adoption_state. See Phase 2 of
+        # docs/superpowers/plans/2026-05-29-adopt-legacy-crons-into-myah.md.
+        _normalize_process_for_myah(job, user)
+        # ─────────────────────────────────────────────────────────────────
 
     return jobs
 
@@ -424,7 +787,11 @@ async def get_process(
     """Get a single process by ID."""
     host_port = await _ensure_container(user)
     raw = await _hermes_get(_jobs_url(host_port, f'/{job_id}'))
-    return raw.get('job', raw) if isinstance(raw, dict) else raw
+    job = raw.get('job', raw) if isinstance(raw, dict) else raw
+    # Expose the same adoption fields the list route does (Phase 2).
+    if isinstance(job, dict):
+        _normalize_process_for_myah(job, user)
+    return job
 
 
 @router.patch('/{job_id}')
@@ -475,46 +842,134 @@ async def resume_process(
 @router.post('/{job_id}/link-chat')
 async def link_process_to_chat(
     job_id: str,
-    request: Request,
+    form_data: LinkChatForm,
     user: UserModel = Depends(get_verified_user),
 ):
     """
     Associate a chat with a process so the task list shows it as a
-    recurring (clock-icon) task.  PATCHes the Hermes job to store the
-    chat_id alongside other job metadata.
+    recurring (clock-icon) task — this is "adoption-lite".
 
-    Validates the chat_id is a real UUID that belongs to this user before
-    storing it on the job — prevents garbage values (e.g. temp-chat IDs
-    like 'local:...') from being persisted and silently breaking delivery.
+    Persists Myah routing under ``job.myah.chat_id`` through the SAME safe
+    metadata primitive that ``/adopt`` uses. The previous implementation
+    PATCHed a top-level ``chat_id`` via ``/api/jobs/{id}``, which native
+    Hermes SILENTLY DROPS (it is outside ``_UPDATE_ALLOWED_FIELDS``) — so the
+    link never actually persisted. Native ``origin`` / ``deliver`` are
+    preserved (never sent). Does not backfill history — use ``/adopt`` for
+    that.
+
+    Validates the chat_id belongs to this user and is not a temporary
+    ('local:') id before doing any container work.
     """
-    body = await request.json()
-    chat_id = body.get('chat_id', '')
+    chat_id = (form_data.chat_id or '').strip()
     if not chat_id:
         raise HTTPException(status_code=400, detail='chat_id is required')
-
-    # Reject temporary/local chat IDs that are not real DB records
+    # Reject temporary/local chat IDs that are not real DB records.
     if chat_id.startswith('local:'):
         raise HTTPException(
             status_code=400,
             detail='Cannot link process to a temporary chat session',
         )
+    _validate_hermes_job_id(job_id)
 
-    # Verify the chat exists and belongs to the requesting user
+    # Verify the chat exists and belongs to the requesting user.
     from myah.models.chats import Chats
 
-    chat = Chats.get_chat_by_id_and_user_id(chat_id, user.id)
-    if not chat:
-        raise HTTPException(
-            status_code=404,
-            detail=f'Chat {chat_id} not found',
-        )
+    if not Chats.get_chat_by_id_and_user_id(chat_id, user.id):
+        raise HTTPException(status_code=404, detail=f'Chat {chat_id} not found')
+
+    # Fetch the job first so we can snapshot its legacy origin into metadata.
+    host_port = await _ensure_container(user)
+    raw = await _hermes_get(_jobs_url(host_port, f'/{job_id}'))
+    job = raw.get('job', raw) if isinstance(raw, dict) else raw
+    if not isinstance(job, dict):
+        job = {'id': job_id}
+
+    adopted_at = dt.datetime.now(dt.UTC).isoformat()
+    metadata = _build_myah_adoption_metadata(job, chat_id, adopted_at)
+    await _patch_job_myah_metadata(user, job_id, metadata)
+
+    return {'ok': True, 'job': {'id': job_id}, 'chat_id': chat_id}
+
+
+@router.post('/{job_id}/adopt')
+async def adopt_process(
+    job_id: str,
+    form_data: ProcessAdoptForm | None = None,
+    user: UserModel = Depends(get_verified_user),
+):
+    """Explicitly adopt a pre-existing Hermes cron into a Myah chat.
+
+    Creates (or reuses) a Myah chat for the cron, persists Myah routing
+    metadata (``job.myah.chat_id``) through the safe metadata primitive, and
+    backfills historical run outputs into the chat with deterministic message
+    ids so reruns are idempotent.
+
+    Native ``origin`` / ``deliver`` are preserved by default — adoption never
+    reroutes existing external delivery (Telegram, Discord, local files, …).
+    This is container-only (it reads run-output files from the user's agent
+    container), so it 501s in OSS mode like the other container-only routes.
+    """
+    _raise_if_oss_mode()
+    _validate_hermes_job_id(job_id)
+    form_data = form_data or ProcessAdoptForm()
+
+    explicit_chat_id = (form_data.chat_id or '').strip() or None
+
+    # Validate explicit chat ownership BEFORE any container work, so a bad
+    # chat_id fails fast (and never wakes a hibernated container).
+    if explicit_chat_id:
+        if explicit_chat_id.startswith('local:'):
+            raise HTTPException(
+                status_code=400,
+                detail='Cannot adopt a cron into a temporary chat session',
+            )
+        from myah.models.chats import Chats
+
+        if not Chats.get_chat_by_id_and_user_id(explicit_chat_id, user.id):
+            raise HTTPException(status_code=404, detail=f'Chat {explicit_chat_id} not found')
+
+    # Clamp backfill limit to a sane range.
+    try:
+        backfill_limit = int(form_data.backfill_limit if form_data.backfill_limit is not None else 50)
+    except (TypeError, ValueError):
+        backfill_limit = 50
+    backfill_limit = max(0, min(backfill_limit, 500))
 
     host_port = await _ensure_container(user)
-    raw = await _hermes_patch(
-        _jobs_url(host_port, f'/{job_id}'),
-        {'chat_id': chat_id},
-    )
-    return raw.get('job', raw) if isinstance(raw, dict) else raw
+    raw = await _hermes_get(_jobs_url(host_port, f'/{job_id}'))
+    job = raw.get('job', raw) if isinstance(raw, dict) else raw
+    if not isinstance(job, dict) or not job:
+        raise HTTPException(status_code=404, detail=f'Process {job_id} not found')
+    job_name = job.get('name') or job_id
+
+    chat_id, created = _find_or_create_process_chat(user, job, explicit_chat_id)
+
+    adopted_at = dt.datetime.now(dt.UTC).isoformat()
+    metadata = _build_myah_adoption_metadata(job, chat_id, adopted_at)
+
+    backfilled = 0
+    skipped_existing = 0
+    truncated = False
+    if backfill_limit > 0:
+        container = await asyncio.to_thread(Containers.get_by_user_id, user.id)
+        if container and getattr(container, 'container_name', None):
+            runs = await _fetch_run_outputs(container.container_name, job_id, limit=backfill_limit)
+            backfilled, skipped_existing = _backfill_runs_to_chat(chat_id, job_id, job_name, runs)
+            # Conservative truncation signal: we fetched up to the limit and
+            # filled it, so older history may exist beyond what we backfilled.
+            truncated = len(runs) >= backfill_limit
+
+    await _patch_job_myah_metadata(user, job_id, metadata)
+
+    return {
+        'ok': True,
+        'job': {'id': job_id},
+        'chat_id': chat_id,
+        'created_chat': created,
+        'backfilled': backfilled,
+        'skipped_existing': skipped_existing,
+        'truncated': truncated,
+    }
 
 
 @router.post('/{job_id}/trigger')
@@ -840,8 +1295,9 @@ async def process_ui_action(
     )
     _, stderr_out = await proc.communicate(input=action_json.encode())
     if proc.returncode != 0:
-        log.warning(
-            'ui-action write to container failed (exit %d): %s', proc.returncode, stderr_out.decode(errors='replace')
+        logger.warning(
+            f'ui-action write to container failed (exit {proc.returncode}): '
+            f'{stderr_out.decode(errors="replace")}'
         )
 
     if action_type == 'submit' and form_data:
@@ -984,6 +1440,7 @@ async def cron_run_complete_webhook(
     response = payload.get('response', '')
     status = payload.get('status', 'ok')
     ran_at = payload.get('ran_at', '')
+    run_id = payload.get('run_id')
     tool_calls_log = payload.get('tool_calls_log')
 
     if not user_id or not job_id:
@@ -1022,6 +1479,7 @@ async def cron_run_complete_webhook(
                         {
                             'job_name': job_name,
                             'status': status,
+                            'run_id': run_id,
                             'tool_calls_log': tool_calls_log,
                         }
                     ),
@@ -1046,6 +1504,7 @@ async def cron_run_complete_webhook(
     # Legacy direct-write path: active in legacy + shadow modes.
     delivered = False
     if mode in ('legacy', 'shadow'):
+        run_msg_id = f'cron_{job_id}_{run_id}' if isinstance(run_id, str) and run_id else None
         delivered = await _inject_cron_output_to_chat(
             user_id,
             job_name,
@@ -1054,6 +1513,7 @@ async def cron_run_complete_webhook(
             ran_at,
             tool_calls_log,
             chat_id=chat_id,
+            msg_id=run_msg_id,
         )
         if outbox_row_id and mode == 'shadow':
             # Per plan-review C-D: stamp `legacy_delivered_at` UNCONDITIONALLY
@@ -1279,9 +1739,11 @@ async def _inject_cron_output_to_chat(
 
         process_chat = None
 
-        # Prefer explicit chat_id (set by linkProcessToChat or origin)
+        # Prefer explicit chat_id (set by linkProcessToChat or origin).  Treat
+        # the webhook user_id as authoritative so a compromised/misconfigured
+        # plugin cannot inject cron output into another user's chat.
         if chat_id:
-            process_chat = Chats.get_chat_by_id(chat_id)
+            process_chat = Chats.get_chat_by_id_and_user_id(chat_id, user_id)
 
         # Fall back to title convention: "Process: {job_name}" — kept for
         # backward compat with older jobs that predate the linking mechanism.
@@ -1330,6 +1792,15 @@ async def _inject_cron_output_to_chat(
 
         msg_id = msg_id or str(uuid.uuid4())
         status_prefix = '⚠️ ' if status == 'error' else ''
+
+        # Deterministic webhook IDs allow live watcher delivery to dedupe with
+        # adoption backfill. If the exact run was already written, report
+        # success without touching parent/child links or rewriting content.
+        if msg_id in messages:
+            logger.info(
+                f'Cron output for job "{job_name}" already present in chat {process_chat.id} as {msg_id}'
+            )
+            return True
 
         if tool_calls_log:
             from myah.utils.output import serialize_output
@@ -1446,13 +1917,18 @@ async def sync_process_chat(
     user: UserModel = Depends(get_verified_user),
 ):
     """
-    Backfill any missing cron run outputs into the process's dedicated chat.
+    Backfill any missing cron run outputs into the process's chat.
     Called by the frontend when opening the process detail page to ensure
     all historical cron outputs appear as messages in the chat.
+
+    Metadata-aware (Phase 4): resolves the chat via ``job.myah.chat_id`` →
+    native Myah ``origin.chat_id`` → top-level ``chat_id`` → title fallback,
+    so adopted and native jobs both recover history. Uses the shared
+    deterministic-id backfill helper, so reruns never duplicate messages or
+    corrupt child pointers.
     """
     _raise_if_oss_mode()
-    if not re.match(r'^[a-f0-9]{12}$', job_id):
-        raise HTTPException(status_code=400, detail='Invalid job ID format')
+    _validate_hermes_job_id(job_id)
 
     container = await asyncio.to_thread(Containers.get_by_user_id, user.id)
     if not container or not container.container_name:
@@ -1465,109 +1941,24 @@ async def sync_process_chat(
 
     raw = await _hermes_get(_jobs_url(host_port, f'/{job_id}'))
     job = raw.get('job', raw) if isinstance(raw, dict) else raw
-    job_name = job.get('name', job_id) if isinstance(job, dict) else job_id
+    if not isinstance(job, dict):
+        job = {'id': job_id}
+    job_name = job.get('name') or job_id
+
+    chat_id = _resolve_process_chat_id(user, job)
+    if not chat_id:
+        # Nothing to sync into yet — adoption (which creates a chat) hasn't run.
+        return {'ok': True}
 
     runs = await _fetch_run_outputs(container.container_name, job_id, limit=50)
 
     try:
-        from myah.models.chats import Chats
-
-        chat_title = f'Process: {job_name}'
-        chats = Chats.get_chat_list_by_user_id(
-            user_id=user.id,
-            filter={'query': chat_title},
-            limit=5,
-        )
-        process_chat = None
-        for c in chats:
-            if c.title == chat_title:
-                process_chat = c
-                break
-
-        if not process_chat:
-            return {'ok': True}
-
-        history = process_chat.chat.get('history', {})
-        messages = history.get('messages', {})
-
-        existing_ran_ats = set()
-        for msg in messages.values():
-            content = msg.get('content', '')
-            if 'Cron run' in content:
-                import re as _re
-
-                match = _re.search(r'\*\*Cron run\*\* \(([^)]+)\)', content)
-                if match:
-                    existing_ran_ats.add(match.group(1))
-
-        injected = 0
-        original_current_id = history.get('currentId')
-        current_id = original_current_id
-        import time as _time
-        import uuid as _uuid
-
-        for run in runs:
-            if run.get('ran_at', '') in existing_ran_ats:
-                continue
-
-            msg_id = str(_uuid.uuid4())
-            status_prefix = '⚠️' if run.get('status') == 'error' else ''
-            run_content = f'**Cron run** ({run["ran_at"]})\n\n{run["response"].strip()}'
-            full_content = f'{status_prefix}{run_content}'
-
-            new_msg = {
-                'id': msg_id,
-                'role': 'assistant',
-                'content': full_content,
-                'parentId': current_id,
-                'childrenIds': [],
-                'timestamp': int(_time.time()),
-                'done': True,
-            }
-
-            if current_id and current_id in messages:
-                children = messages[current_id].get('childrenIds', [])
-                if msg_id not in children:
-                    children.append(msg_id)
-                Chats.upsert_message_to_chat_by_id_and_message_id(
-                    id=process_chat.id,
-                    message_id=current_id,
-                    message={'childrenIds': children},
-                )
-
-            Chats.upsert_message_to_chat_by_id_and_message_id(
-                id=process_chat.id,
-                message_id=msg_id,
-                message=new_msg,
-            )
-
-            messages[msg_id] = new_msg
-            current_id = msg_id
-            existing_ran_ats.add(run.get('ran_at', ''))
-            injected += 1
-
-        if injected:
-            refreshed = Chats.get_chat_by_id(process_chat.id)
-            if refreshed:
-                all_msgs = refreshed.chat.get('history', {}).get('messages', {})
-                latest_id = None
-                latest_ts = 0
-                for mid, m in all_msgs.items():
-                    ts = m.get('timestamp', 0)
-                    if ts > latest_ts:
-                        latest_ts = ts
-                        latest_id = mid
-                if latest_id:
-                    Chats.upsert_message_to_chat_by_id_and_message_id(
-                        id=process_chat.id,
-                        message_id=latest_id,
-                        message={},
-                    )
-            logger.info(f'Backfilled {injected} cron outputs for job "{job_name}" into chat {process_chat.id}')
+        backfilled, skipped = _backfill_runs_to_chat(chat_id, job_id, job_name, runs)
     except Exception as exc:
         logger.warning(f'Failed to sync process chat: {exc}')
+        return {'ok': True}
 
-    return {'ok': True}
+    return {'ok': True, 'backfilled': backfilled, 'skipped_existing': skipped}
 
 
 async def _write_artifact_to_vite_project(

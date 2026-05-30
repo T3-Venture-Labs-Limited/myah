@@ -9,13 +9,13 @@
 
 	$: firstSelectableTask = $allTasks[0] ?? null;
 	$: if ($page.route.id === '/(app)/c' && firstSelectableTask && !selectedTaskId) {
-		goto(`/c/${firstSelectableTask.id}`, { replaceState: true });
+		goto(`/c/${firstSelectableTask.chatId ?? firstSelectableTask.id}`, { replaceState: true });
 	}
 
 	function handleTaskSelect(e: CustomEvent) {
 		const task = e.detail;
 		if ($mobile) showTaskList.set(false);
-		goto(`/c/${task.id}`);
+		goto(`/c/${task.chatId ?? task.id}`);
 	}
 
 	let isResizing = false;
@@ -56,10 +56,11 @@
 		>
 			<TaskList {selectedTaskId} on:select={handleTaskSelect} />
 
+			<!-- svelte-ignore a11y-no-static-element-interactions -->
 			<div
 				class="absolute top-0 end-0 h-full w-1 cursor-col-resize hover:bg-gray-300 dark:hover:bg-gray-700 transition-colors z-10"
 				on:mousedown={resizeStart}
-			/>
+			></div>
 		</div>
 	{/if}
 
@@ -68,12 +69,12 @@
 	</div>
 </div>
 
-<!-- svelte-ignore a11y-no-static-element-interactions -->
 {#if $showTaskList && $mobile}
+	<!-- svelte-ignore a11y-no-static-element-interactions -->
 	<div
 		class="fixed z-40 top-0 right-0 left-0 bottom-0 bg-black/60 w-full min-h-screen h-screen overscroll-contain"
 		on:mousedown={() => showTaskList.set(false)}
-	/>
+	></div>
 	<div
 		class="fixed z-50 top-0 left-0 h-screen max-h-[100dvh] min-h-screen select-none bg-gray-50 text-gray-900 dark:bg-gray-950 dark:text-gray-200 text-sm overflow-x-hidden flex-shrink-0"
 		style="width: min(320px, 100vw)"

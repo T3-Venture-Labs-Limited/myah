@@ -15,7 +15,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { getProcesses } from './index';
+import { getProcesses, adoptProcess } from './index';
 
 function jsonResponse(status: number, body: unknown = {}) {
 	return {
@@ -63,9 +63,7 @@ describe('getProcesses — OSS 501 resilience', () => {
 		// failures (network, 4xx auth, 5xx that's not 503/501).
 		const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 
-		global.fetch = vi.fn().mockResolvedValue(
-			jsonResponse(501, { detail: 'oss' })
-		) as any;
+		global.fetch = vi.fn().mockResolvedValue(jsonResponse(501, { detail: 'oss' })) as any;
 
 		await getProcesses('test-token');
 
@@ -74,7 +72,13 @@ describe('getProcesses — OSS 501 resilience', () => {
 
 	it('returns the parsed array on a normal 200 success', async () => {
 		const sample = [
-			{ id: 'job1', name: 'daily summary', schedule: '0 9 * * *', prompt: 'summarize', enabled: true }
+			{
+				id: 'job1',
+				name: 'daily summary',
+				schedule: '0 9 * * *',
+				prompt: 'summarize',
+				enabled: true
+			}
 		];
 		global.fetch = vi.fn().mockResolvedValue(jsonResponse(200, sample)) as any;
 
@@ -86,10 +90,51 @@ describe('getProcesses — OSS 501 resilience', () => {
 	it('still throws on a non-501 error (e.g. 401 auth failure)', async () => {
 		// A real auth error must still bubble up — the OSS 501 path
 		// must not mask other failure modes.
-		global.fetch = vi.fn().mockResolvedValue(
-			jsonResponse(401, { detail: 'unauthorized' })
-		) as any;
+		global.fetch = vi.fn().mockResolvedValue(jsonResponse(401, { detail: 'unauthorized' })) as any;
 
 		await expect(getProcesses('bad-token')).rejects.toBeDefined();
+	});
+});
+
+describe('adoptProcess (Adopt Legacy Crons — Phase 6)', () => {
+	beforeEach(() => {
+		vi.restoreAllMocks();
+	});
+
+	it('POSTs to /processes/{jobId}/adopt and returns the adoption summary', async () => {
+		const summary = {
+			ok: true,
+			job: { id: 'abcdef012345' },
+			chat_id: 'chat-1',
+			created_chat: true,
+			backfilled: 3,
+			skipped_existing: 0,
+			truncated: false
+		};
+		const fetchMock = vi.fn().mockResolvedValue(jsonResponse(200, summary));
+		global.fetch = fetchMock as any;
+
+		const result = await adoptProcess('tok', 'abcdef012345', { backfill_limit: 50 });
+
+		expect(result).toEqual(summary);
+		const [url, init] = fetchMock.mock.calls[0];
+		expect(url).toContain('/processes/abcdef012345/adopt');
+		expect(init.method).toBe('POST');
+		expect(JSON.parse(init.body)).toEqual({ backfill_limit: 50 });
+	});
+
+	it('sends an empty object body when no payload is given', async () => {
+		const fetchMock = vi.fn().mockResolvedValue(jsonResponse(200, { ok: true, chat_id: 'c' }));
+		global.fetch = fetchMock as any;
+
+		await adoptProcess('tok', 'abcdef012345');
+
+		const [, init] = fetchMock.mock.calls[0];
+		expect(JSON.parse(init.body)).toEqual({});
+	});
+
+	it('throws on a non-2xx (e.g. 501 in OSS) so the caller can surface it', async () => {
+		global.fetch = vi.fn().mockResolvedValue(jsonResponse(501, { detail: 'hosted only' })) as any;
+		await expect(adoptProcess('tok', 'abcdef012345')).rejects.toBeDefined();
 	});
 });

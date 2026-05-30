@@ -40,6 +40,18 @@ export interface Process {
 	created_at?: string | null;
 	paused_at?: string | null;
 	vite_port?: number | null;
+	// ── Adopt Legacy Crons: Myah routing + adoption state (Phase 2/6) ──
+	// `origin` is Hermes's native delivery source; `myah` is Myah-owned
+	// routing metadata persisted on adoption. `adoptable` + `adoption_state`
+	// are derived by the backend normalizer and consumed by the task list.
+	origin?: { platform?: string; chat_id?: string; [key: string]: unknown };
+	myah?: { chat_id?: string; chat_name?: string; adopted_at?: string; [key: string]: unknown };
+	adoptable?: boolean;
+	adoption_state?:
+		| 'myah_linked'
+		| 'legacy_unowned'
+		| 'external_origin'
+		| 'myah_origin_missing_chat';
 }
 
 export interface ProcessRun {
@@ -287,6 +299,54 @@ export const linkProcessToChat = async (
 			...(token && { authorization: `Bearer ${token}` })
 		},
 		body: JSON.stringify({ chat_id: chatId })
+	})
+		.then(async (res) => {
+			if (!res.ok) throw await res.json();
+			return res.json();
+		})
+		.catch((err) => {
+			console.error(err);
+			error = 'detail' in err ? err.detail : err;
+			return null;
+		});
+	if (error) throw error;
+	return res;
+};
+
+export interface AdoptProcessPayload {
+	chat_id?: string;
+	backfill_limit?: number;
+	preserve_deliver?: boolean;
+}
+
+export interface AdoptProcessResult {
+	ok: boolean;
+	job?: { id: string };
+	chat_id: string;
+	created_chat?: boolean;
+	backfilled?: number;
+	skipped_existing?: number;
+	truncated?: boolean;
+}
+
+// Explicitly adopt a pre-existing Hermes cron into a Myah chat: creates/reuses
+// a chat, persists `job.myah.chat_id`, and backfills history. Native external
+// delivery (Telegram/Discord/…) is preserved. Throws on non-2xx (e.g. 501 in
+// OSS) so the caller can surface it.
+export const adoptProcess = async (
+	token: string,
+	jobId: string,
+	payload?: AdoptProcessPayload
+): Promise<AdoptProcessResult> => {
+	let error = null;
+	const res = await fetch(`${MYAH_API_BASE_URL}/processes/${jobId}/adopt`, {
+		method: 'POST',
+		headers: {
+			Accept: 'application/json',
+			'Content-Type': 'application/json',
+			...(token && { authorization: `Bearer ${token}` })
+		},
+		body: JSON.stringify(payload ?? {})
 	})
 		.then(async (res) => {
 			if (!res.ok) throw await res.json();
