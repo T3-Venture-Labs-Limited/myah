@@ -44,6 +44,7 @@ import typer
 # (`myah.cli.platform_.run`, `myah.cli.platform_.find_repo_root`,
 # `myah.cli.platform_.shutil.which`). Mirrors Slices 2-4 mocking
 # discipline; never patch source modules.
+from myah.cli.upgrade import _compose_platform_uses_local_build
 from myah.lib.cli.output import emit_result_or_exit
 from myah.lib.cli.repo import find_repo_root
 from myah.lib.cli.shell import run
@@ -67,7 +68,7 @@ def _preflight_or_exit() -> list[str]:
 
         Console().print(
             '[red bold]docker is not installed or not in PATH.[/]\n'
-            '[dim]Install Docker Desktop (macOS / Windows) or your distro\'s docker '
+            "[dim]Install Docker Desktop (macOS / Windows) or your distro's docker "
             'package (Linux), then re-run.[/]'
         )
         raise typer.Exit(code=2)
@@ -229,6 +230,24 @@ def platform_restart() -> None:
     """Restart the platform container."""
     base = _preflight_or_exit()
     emit_result_or_exit(run([*base, 'restart']))
+
+
+@platform_app.command('update')
+def platform_update() -> None:
+    """Update the platform image and recreate the platform container.
+
+    For the default OSS compose file, this rebuilds the local platform image.
+    Registry-backed compose files use `docker compose pull`. In both cases,
+    the container is force-recreated afterward so the running platform picks
+    up the updated image.
+    """
+    base = _preflight_or_exit()
+    compose_file = Path(base[-1])
+    if _compose_platform_uses_local_build(compose_file):
+        emit_result_or_exit(run([*base, 'build', 'platform']))
+    else:
+        emit_result_or_exit(run([*base, 'pull']))
+    emit_result_or_exit(run([*base, 'up', '-d', '--force-recreate', 'platform']))
 
 
 __all__ = ['platform_app']

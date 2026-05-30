@@ -50,6 +50,8 @@ from myah.lib.cli.output import emit_result_or_exit
 from myah.lib.cli.repo import find_repo_root
 from myah.lib.cli.shell import run
 
+MYAH_PLUGIN_NAME = 'myah'
+
 plugins_app = typer.Typer(
     name='plugins',
     help='Manage Hermes plugins (wraps `hermes plugins`).',
@@ -191,7 +193,10 @@ def plugins_install(
 
 @plugins_app.command('update')
 def plugins_update(
-    identifier: str = typer.Argument(..., help='Plugin to update.'),
+    identifier: str = typer.Argument(
+        MYAH_PLUGIN_NAME,
+        help='Plugin to update. Defaults to the Myah Hermes plugin.',
+    ),
 ) -> None:
     """Update an installed Hermes plugin (wraps `hermes plugins update`)."""
     hermes_bin = resolve_hermes_binary_or_exit(command_hint='for `myah plugins update`')

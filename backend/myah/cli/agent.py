@@ -215,6 +215,32 @@ def agent_restart() -> None:
         _no_supervisor_exit()
 
 
+@agent_app.command('update')
+def agent_update(
+    check: bool = typer.Option(
+        False,
+        '--check',
+        help='Only check if a Hermes update is available.',
+    ),
+    yes: bool = typer.Option(
+        False,
+        '--yes',
+        '-y',
+        help='Skip Hermes update confirmation prompts.',
+    ),
+) -> None:
+    """Update the Hermes Agent runtime (wraps `hermes update`)."""
+    hermes_bin = resolve_hermes_binary_or_exit(command_hint='for `myah agent update`')
+    argv = [str(hermes_bin), 'update']
+    if check:
+        argv.append('--check')
+    if yes:
+        argv.append('--yes')
+    completed = subprocess.run(argv, check=False)  # noqa: S603 — hermes path is resolved
+    if completed.returncode != 0:
+        raise typer.Exit(code=completed.returncode)
+
+
 # ---------------------------------------------------------------------------
 # config: show / edit / validate
 # ---------------------------------------------------------------------------

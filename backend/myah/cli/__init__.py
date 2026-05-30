@@ -189,6 +189,7 @@ def _register_plugins(app: typer.Typer) -> None:
     from myah.cli.plugins import plugins_app
 
     app.add_typer(plugins_app, name='plugins')
+    app.add_typer(plugins_app, name='plugin', hidden=True)
 
 
 def _register_platform(app: typer.Typer) -> None:
@@ -256,7 +257,7 @@ def _register_upgrade(app: typer.Typer) -> None:
 
     app.command(
         name='upgrade',
-        help='Upgrade Hermes runtime + plugin, refresh Myah source, pull latest platform image.',
+        help='Upgrade Hermes runtime, Myah plugin, source, and platform image.',
     )(upgrade_command)
 
 
