@@ -24,6 +24,16 @@
 	// the user with no recourse), we expose a Retry affordance that
 	// re-sends the original prompt via the parent chain.
 	let interrupted = false;
+	let lastInterruptKey = `${item.id}:${item.run_id}:${localStatus}`;
+	$: {
+		const interruptKey = `${item.id}:${item.run_id}:${localStatus}`;
+		if (interruptKey !== lastInterruptKey) {
+			lastInterruptKey = interruptKey;
+			if (localStatus !== 'pending') {
+				interrupted = false;
+			}
+		}
+	}
 
 	// Keys are typed as ``ApprovalOption`` so adding a new approval option
 	// upstream lights up a TS error here until we provide a label for it.
@@ -43,6 +53,36 @@
 		: item.options;
 	// ────────────────────────────────────────────────────────────────────
 
+	function parseKnownExecApprovalDescription(description: string): { command: string; reason: string } {
+		const match = description.match(/^Command requires approval:\n([^\n]+(?:\n(?!\n).+)*)\n\nReason: (.+)$/s);
+		if (!match) return { command: '', reason: '' };
+		return { command: match[1].trim(), reason: match[2].trim() };
+	}
+
+	function metadataString(key: string): string {
+		const value = item.metadata?.[key];
+		return typeof value === 'string' ? value : '';
+	}
+
+	function confirmRequestBody(choice: ApprovalOption): Record<string, unknown> {
+		const body: Record<string, unknown> = {
+			run_id: item.run_id,
+			choice
+		};
+		if (item.confirmation_id) {
+			body.confirmation_id = item.confirmation_id;
+		}
+		return body;
+	}
+
+	$: isExecApproval = item.action_type === 'exec_approval';
+	$: parsedExec = isExecApproval ? parseKnownExecApprovalDescription(item.description) : { command: '', reason: '' };
+	$: command = isExecApproval ? metadataString('command') || parsedExec.command : '';
+	$: cwd = isExecApproval ? metadataString('cwd') : '';
+	$: risk = isExecApproval ? metadataString('risk_level') : '';
+	$: reason = isExecApproval ? metadataString('reason') || parsedExec.reason : '';
+	$: shouldShowPlainDescription = !isExecApproval || !command;
+
 	async function choose(choice: ApprovalOption) {
 		if (submitting || localStatus !== 'pending') return;
 		submitting = true;
@@ -55,14 +95,7 @@
 					'Content-Type': 'application/json',
 					Authorization: `Bearer ${localStorage.token}`
 				},
-				body: JSON.stringify({
-					run_id: item.run_id,
-					// Bug B follow-on: include confirmation_id so the
-					// agent can resolve action confirmations precisely
-					// instead of relying on the session_key fallback.
-					confirmation_id: item.confirmation_id,
-					choice
-				})
+				body: JSON.stringify(confirmRequestBody(choice))
 			});
 
 			if (!res.ok) {
@@ -110,7 +143,23 @@
 >
 	<!-- Header -->
 	<div class="px-4 py-3 border-b border-gray-100 dark:border-gray-700/60">
-		<p class="font-medium text-gray-900 dark:text-gray-100">{item.description}</p>
+		{#if shouldShowPlainDescription}
+			<p class="font-medium text-gray-900 dark:text-gray-100">{item.description}</p>
+		{:else}
+			<p class="font-medium text-gray-900 dark:text-gray-100">Command requires approval</p>
+			<pre
+				class="mt-2 overflow-x-auto rounded-lg bg-gray-50 dark:bg-gray-900 px-3 py-2 text-xs font-mono text-gray-900 dark:text-gray-100"
+			><code>{command}</code></pre>
+			{#if cwd}
+				<p class="mt-1 text-xs text-gray-500 dark:text-gray-400">cwd: {cwd}</p>
+			{/if}
+			{#if risk}
+				<p class="mt-1 text-xs text-amber-600 dark:text-amber-400">Risk: {risk}</p>
+			{/if}
+			{#if reason}
+				<p class="mt-1 text-xs text-gray-500 dark:text-gray-400">Reason: {reason}</p>
+			{/if}
+		{/if}
 		{#if item.metadata?.schedule_display}
 			<p class="mt-0.5 text-xs text-gray-500 dark:text-gray-400">
 				Schedule: {String(item.metadata.schedule_display)}

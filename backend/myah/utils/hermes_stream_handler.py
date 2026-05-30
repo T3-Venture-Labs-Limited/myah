@@ -801,6 +801,16 @@ async def handle_hermes_stream(response, ctx: dict) -> StreamingResponse | None:
                     await _emit_completion()
                     _update_live_state()
 
+                # ── status ─────────────────────────────────────────────────
+                elif event_type == 'status':
+                    # Hermes status pings are known typed events, but they are
+                    # not persisted as assistant output. Keep an explicit no-op
+                    # branch so they don't fall through to unknown-event logs.
+                    log.debug(
+                        '[HERMES] status event ignored: {}',
+                        event_data.get('text') or event_data.get('status') or '',
+                    )
+
                 # ── approval.request / approval.responded ─────────────────
                 elif event_type in ('approval.request', 'approval.responded'):
                     # The Hermes API server emits these for /v1/runs approval
@@ -1133,14 +1143,6 @@ async def handle_hermes_stream(response, ctx: dict) -> StreamingResponse | None:
                     # ─────────────────────────────────────────────────────
 
                     yield _sse_chunk(done=True)
-
-                # ── status ───────────────────────────────────────────────
-                elif event_type == 'status':
-                    # Hermes emits status pings while a run is still alive.
-                    # Treat them as known no-op progress events so they do
-                    # not look like unknown-event failures or terminate the
-                    # visual stream before a terminal run.* event arrives.
-                    continue
 
                 # ── unknown event type ───────────────────────────────────
                 # Tactical observability gap closer (Workstream I pre-Phase 2):

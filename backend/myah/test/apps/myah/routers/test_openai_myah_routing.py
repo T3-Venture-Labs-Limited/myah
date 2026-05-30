@@ -11,6 +11,12 @@ class _FakeAiohttpResponse:
         self._json_data = json_data or {}
         self._text_data = text_data
 
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
     async def json(self):
         return self._json_data
 
@@ -25,6 +31,13 @@ class _FakeMyahClientSession:
         self.posts = []
         self.gets = []
         self.closed = False
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        await self.close()
+        return False
 
     async def post(self, url, **kwargs):
         self.posts.append({'url': url, **kwargs})
