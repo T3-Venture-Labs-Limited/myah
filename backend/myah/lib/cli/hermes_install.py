@@ -32,6 +32,7 @@ import json
 import os
 import shutil
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 from myah.lib.cli.shell import ShellError, run
@@ -62,18 +63,125 @@ _DASHBOARD_DEFAULT_PORT = 9119
 _HTTP_REQUEST_TIMEOUT_S = 2.0
 
 
-def detect_hermes_venv() -> Path:
+@dataclass(frozen=True, slots=True)
+class HermesRuntimeState:
+    """Import-path snapshot for the Hermes runtime inside a venv."""
+
+    venv_path: Path
+    hermes_home: Path
+    import_path: Path | None
+    active_project_path: Path | None
+    expected_checkout_path: Path | None
+    editable_source_path: Path | None
+    active_runtime_is_site_packages: bool
+    ui_tui_path: Path | None
+
+
+def _project_path_from_import_path(import_path: Path | None) -> Path | None:
+    if import_path is None:
+        return None
+    if import_path.name == '__init__.py' and import_path.parent.name == 'hermes_cli':
+        return import_path.parent.parent
+    if import_path.parent.name == 'hermes_cli':
+        return import_path.parent.parent
+    return None
+
+
+def _valid_editable_source(path: Path | None) -> Path | None:
+    if path is None:
+        return None
+    if (path / 'pyproject.toml').is_file() and (path / 'ui-tui').is_dir():
+        return path
+    return None
+
+
+def inspect_hermes_runtime(venv_path: Path, hermes_home: Path) -> HermesRuntimeState:
+    """Inspect where the Hermes venv imports ``hermes_cli`` from.
+
+    Returns a best-effort snapshot; malformed probe output yields an unknown
+    import path instead of raising so callers can decide whether unknown state
+    should be warning-only or fatal.
+    """
+    venv_python = venv_path / 'bin' / 'python'
+    probe = (
+        'import hermes_cli, inspect, json; '
+        'print(json.dumps({"hermes_cli_file": inspect.getfile(hermes_cli)}))'
+    )
+    import_path: Path | None = None
+    result = run([str(venv_python), '-c', probe])
+    if result.returncode == 0:
+        try:
+            payload = json.loads(result.stdout.strip())
+            raw_import_path = payload.get('hermes_cli_file') if isinstance(payload, dict) else None
+            if isinstance(raw_import_path, str) and raw_import_path:
+                import_path = Path(raw_import_path)
+        except json.JSONDecodeError:
+            import_path = None
+
+    active_project_path = _project_path_from_import_path(import_path)
+    expected_checkout_path = hermes_home / 'hermes-agent'
+    editable_source_path = _valid_editable_source(active_project_path) or _valid_editable_source(
+        expected_checkout_path
+    )
+    return HermesRuntimeState(
+        venv_path=venv_path,
+        hermes_home=hermes_home,
+        import_path=import_path,
+        active_project_path=active_project_path,
+        expected_checkout_path=expected_checkout_path if expected_checkout_path.exists() else None,
+        editable_source_path=editable_source_path,
+        active_runtime_is_site_packages=bool(import_path and 'site-packages' in import_path.parts),
+        ui_tui_path=(active_project_path / 'ui-tui') if active_project_path is not None else None,
+    )
+
+
+def reassert_editable_hermes_if_needed(
+    before: HermesRuntimeState,
+    after: HermesRuntimeState,
+) -> bool:
+    """Reinstall Hermes editable if a mutating step moved runtime away from source."""
+    editable_source = before.editable_source_path
+    if editable_source is None or after.active_project_path == editable_source:
+        return False
+    if not (editable_source / 'pyproject.toml').is_file():
+        raise RuntimeError(
+            'Hermes runtime changed during Myah install, but the original editable '
+            f'source is no longer valid. HERMES_HOME={before.hermes_home}; '
+            f'venv={before.venv_path}; active_import={after.import_path}; '
+            f'expected_editable_source={editable_source}. This can break `hermes --tui`.'
+        )
+
+    venv_python = before.venv_path / 'bin' / 'python'
+    run([str(venv_python), '-m', 'pip', 'uninstall', '-y', 'hermes-agent'], check=False)
+    run(
+        [
+            str(venv_python),
+            '-m',
+            'pip',
+            'install',
+            '-e',
+            str(editable_source),
+            '--config-settings',
+            'editable_mode=compat',
+        ],
+        check=True,
+    )
+    return True
+
+
+def detect_hermes_venv(hermes_home: Path | None = None) -> Path:  # noqa: C901
     """Locate the Python venv where hermes-agent is installed.
 
     Mirrors setup-myah-oss.sh:183-227. Resolution order:
 
       1. `MYAH_HERMES_VENV` env override — must have an executable
          `bin/python` or RuntimeError.
-      2. Three candidate paths in `_HERMES_VENV_CANDIDATES` — first one
+      2. If ``hermes_home`` is provided, ``<hermes_home>/hermes-agent/venv``.
+      3. Three candidate paths in `_HERMES_VENV_CANDIDATES` — first one
          with an executable `bin/python` wins.
-      3. Fallback: resolve `hermes` on PATH, read its shebang, return
+      4. Fallback: resolve `hermes` on PATH, read its shebang, return
          the venv root two dirname()s above the interpreter.
-      4. None of the above: RuntimeError listing the candidates.
+      5. None of the above: RuntimeError listing the candidates.
     """
     override = os.environ.get('MYAH_HERMES_VENV')
     if override:
@@ -85,6 +193,12 @@ def detect_hermes_venv() -> Path:
             f'MYAH_HERMES_VENV={override} is set but {python} is not executable. '
             f'Either unset the override or point it at a venv with bin/python.'
         )
+
+    if hermes_home is not None:
+        selected_venv = hermes_home / 'hermes-agent' / 'venv'
+        selected_python = selected_venv / 'bin' / 'python'
+        if selected_python.is_file() and os.access(selected_python, os.X_OK):
+            return selected_venv
 
     for candidate in _HERMES_VENV_CANDIDATES:
         python = candidate / 'bin' / 'python'
@@ -186,9 +300,56 @@ def pip_install_plugin_at_sha(
     requirement = f'myah-hermes-plugin @ {url}'
 
     run(
-        [str(venv_python), '-m', 'pip', 'install', '--quiet', '--upgrade', requirement],
+        [
+            str(venv_python),
+            '-m',
+            'pip',
+            'install',
+            '--quiet',
+            '--upgrade',
+            '--no-deps',
+            requirement,
+        ],
         check=True,
     )
+
+
+def verify_myah_plugin_importable(venv_path: Path) -> None:
+    """Verify the plugin imports without installing extra dependencies."""
+    run([str(venv_path / 'bin' / 'python'), '-c', 'import myah_hermes_plugin'], check=True)
+
+
+def verify_hermes_tui_integrity(state: HermesRuntimeState) -> None:
+    """Raise when the active Hermes project lacks the TUI directory."""
+    if state.import_path is None or state.ui_tui_path is None:
+        return
+    if state.ui_tui_path.is_dir():
+        return
+
+    repair_hint = ''
+    if state.editable_source_path is not None:
+        repair_hint = (
+            f' Repair with: cd {state.editable_source_path} && '
+            f'{state.venv_path / "bin" / "python"} -m pip install -e . '
+            f'--config-settings editable_mode=compat'
+        )
+
+    if state.active_runtime_is_site_packages:
+        raise RuntimeError(
+            'Hermes runtime imports from site-packages and its ui-tui directory is missing; '
+            '`hermes --tui` would fail. '
+            f'HERMES_HOME={state.hermes_home}; venv={state.venv_path}; '
+            f'active_import={state.import_path}; active_project={state.active_project_path}; '
+            f'expected_editable_source={state.editable_source_path}.{repair_hint}'
+        )
+
+    if state.editable_source_path is not None or state.active_project_path == state.expected_checkout_path:
+        raise RuntimeError(
+            'Hermes checkout appears incomplete: ui-tui directory is missing. '
+            f'HERMES_HOME={state.hermes_home}; venv={state.venv_path}; '
+            f'active_import={state.import_path}; active_project={state.active_project_path}; '
+            f'expected_ui_tui={state.ui_tui_path}.'
+        )
 
 
 def materialize_dashboard_shim(venv_path: Path, hermes_home: Path) -> None:
@@ -402,6 +563,7 @@ def register_plugin_with_gateway(
     hermes_bin: Path,
     *,
     adapter_auth_key: str | None = None,
+    hermes_home: Path | None = None,
     repo: str = 'T3-Venture-Labs-Limited/myah-hermes-plugin',
 ) -> None:
     """Register the Myah plugin with the Hermes gateway + enable it.
@@ -432,6 +594,9 @@ def register_plugin_with_gateway(
         prompt — required for ``--non-interactive`` installs. Defaults
         to inheriting the parent env (which already has the value if
         ``write_token_to_all_slots`` ran first).
+      hermes_home: Optional selected Hermes home. When provided, forwards
+        ``HERMES_HOME`` to both ``hermes plugins`` subprocesses so profile-
+        aware installs do not mutate the wrong profile.
       repo: Plugin repo slug. The default points at the public Myah
         plugin; override only for fork testing.
 
@@ -444,6 +609,8 @@ def register_plugin_with_gateway(
     install_env: dict[str, str] = {**os.environ}
     if adapter_auth_key:
         install_env['MYAH_ADAPTER_AUTH_KEY'] = adapter_auth_key
+    if hermes_home is not None:
+        install_env['HERMES_HOME'] = str(hermes_home)
 
     install_result = run(
         [str(hermes_bin), 'plugins', 'install', repo],

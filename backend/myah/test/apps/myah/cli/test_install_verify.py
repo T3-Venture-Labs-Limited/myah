@@ -12,7 +12,6 @@ behavior is exercised in isolation.
 from __future__ import annotations
 
 import pytest
-
 from myah.lib.cli.doctor_checks import (
     CheckResult,
     CheckStatus,
@@ -146,7 +145,7 @@ def _fail(name: str) -> CheckResult:
 
 
 def _patch_named_checks(monkeypatch: pytest.MonkeyPatch, fail_name: str | None = None) -> None:
-    """Patch all 5 named doctor predicates + probe_required_ports.
+    """Patch all 6 named doctor predicates + probe_required_ports.
 
     Each named check returns OK unless its name matches `fail_name`. The
     port probe is patched to return 4 sentinel results so the aggregator
@@ -154,6 +153,7 @@ def _patch_named_checks(monkeypatch: pytest.MonkeyPatch, fail_name: str | None =
     """
     named = (
         ('check_hermes_binary_on_path', 'hermes binary'),
+        ('check_hermes_runtime_integrity', 'hermes runtime integrity'),
         ('check_hermes_plugin_installed', 'myah-hermes-plugin'),
         ('check_plugin_sha_drift', 'plugin SHA pin'),
         ('check_platform_container_running', 'myah-platform container'),
@@ -163,7 +163,7 @@ def _patch_named_checks(monkeypatch: pytest.MonkeyPatch, fail_name: str | None =
         result = _fail(label) if fail_name == attr else _ok(label)
         # `r=result` captures the value at lambda-definition time; without
         # the default arg, all lambdas would close over the final loop value.
-        monkeypatch.setattr(f'myah.lib.cli.doctor_checks.{attr}', lambda r=result: r)
+        monkeypatch.setattr(f'myah.lib.cli.doctor_checks.{attr}', lambda *args, r=result, **kwargs: r)
 
     sentinel_ports = [
         CheckResult(name=f'port-probe-{i}', status=CheckStatus.OK, message='sentinel')
@@ -175,29 +175,30 @@ def _patch_named_checks(monkeypatch: pytest.MonkeyPatch, fail_name: str | None =
     )
 
 
-def test_aggregator_happy_path_returns_nine_results(monkeypatch: pytest.MonkeyPatch) -> None:
-    """5 named checks + 4 port probes = 9 CheckResults."""
+def test_aggregator_happy_path_returns_ten_results(monkeypatch: pytest.MonkeyPatch) -> None:
+    """6 named checks + 4 port probes = 10 CheckResults."""
     _patch_named_checks(monkeypatch)
 
     results = post_install_doctor_run()
 
-    assert len(results) == 9
+    assert len(results) == 10
 
 
 def test_aggregator_preserves_documented_order(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Order: hermes binary, plugin, SHA drift, platform container, agent env, then 4 port probes."""
+    """Order: binary, runtime integrity, plugin, SHA drift, platform, agent env, then ports."""
     _patch_named_checks(monkeypatch)
 
     results = post_install_doctor_run()
 
     assert results[0].name == 'hermes binary'
-    assert results[1].name == 'myah-hermes-plugin'
-    assert results[2].name == 'plugin SHA pin'
-    assert results[3].name == 'myah-platform container'
-    assert results[4].name == 'agent container env injection'
+    assert results[1].name == 'hermes runtime integrity'
+    assert results[2].name == 'myah-hermes-plugin'
+    assert results[3].name == 'plugin SHA pin'
+    assert results[4].name == 'myah-platform container'
+    assert results[5].name == 'agent container env injection'
     # Last 4 are the sentinel port-probe results
     for i in range(4):
-        assert results[5 + i].name == f'port-probe-{i}'
+        assert results[6 + i].name == f'port-probe-{i}'
 
 
 def test_aggregator_does_not_bail_early_on_individual_fail(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -206,10 +207,10 @@ def test_aggregator_does_not_bail_early_on_individual_fail(monkeypatch: pytest.M
 
     results = post_install_doctor_run()
 
-    assert len(results) == 9
+    assert len(results) == 10
     assert results[0].status == CheckStatus.FAIL
     assert results[0].name == 'hermes binary'
-    # The remaining 8 are still present
+    # The remaining 9 are still present
     for r in results[1:]:
         assert r.status == CheckStatus.OK
 
@@ -223,7 +224,7 @@ def test_aggregator_delegates_to_probe_required_ports(monkeypatch: pytest.Monkey
     # The 4 port-probe sentinels are the proof of delegation; if the
     # aggregator reimplemented port binding it would emit `port 8642`-
     # shaped results instead.
-    port_results = results[5:]
+    port_results = results[6:]
     assert all(r.name.startswith('port-probe-') for r in port_results)
     assert all(r.message == 'sentinel' for r in port_results)
 

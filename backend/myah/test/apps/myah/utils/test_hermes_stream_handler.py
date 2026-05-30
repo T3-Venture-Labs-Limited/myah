@@ -684,6 +684,212 @@ def _final_output(ctx) -> list[dict]:
     return completions[-1]['data'].get('output') or []
 
 
+# ── Terminal/action event mapping tests (T3-1092 S2/S9) ───────────────────
+
+
+@pytest.mark.asyncio
+async def test_background_path_handles_run_cancelled_without_hanging():
+    """run.cancelled must terminate the UI/DB message instead of leaving it in progress."""
+    sse_lines = _make_sse_lines(
+        {'event': 'message.delta', 'run_id': 'run-cancelled', 'delta': 'partial answer'},
+        {'event': 'run.cancelled', 'run_id': 'run-cancelled'},
+    )
+    response = _make_upstream_response(sse_lines)
+    ctx = _make_ctx(with_event_caller=True)
+    upsert_calls = []
+    status_calls = []
+
+    with (
+        patch('myah.utils.hermes_stream_handler.Chats') as mock_chats,
+        patch('myah.utils.hermes_stream_handler.background_tasks_handler', new=AsyncMock()),
+    ):
+        mock_chats.upsert_message_to_chat_by_id_and_message_id.side_effect = lambda chat_id, message_id, update: (
+            upsert_calls.append(update)
+        )
+        mock_chats.add_message_status_to_chat_by_id_and_message_id.side_effect = (
+            lambda chat_id, message_id, status: status_calls.append(status)
+        )
+        from myah.utils.hermes_stream_handler import handle_hermes_stream
+
+        result = await handle_hermes_stream(response, ctx)
+
+    assert result is None
+    completions = [e for e in ctx['_emitted'] if e.get('type') == 'chat:completion']
+    assert any(e['data'].get('done') is True for e in completions), (
+        'run.cancelled must emit a terminal chat:completion event with done=True.'
+    )
+    final_output = _final_output(ctx)
+    assert not [item for item in final_output if item.get('status') == 'in_progress'], (
+        f'run.cancelled left output items in progress: {final_output!r}'
+    )
+    assert any(call.get('done') is True and 'output' in call for call in upsert_calls), (
+        f'run.cancelled must persist the final output plus done=True; upserts={upsert_calls!r}'
+    )
+    assert {'type': 'cancelled', 'description': 'Run cancelled'} in status_calls
+
+
+@pytest.mark.asyncio
+async def test_background_path_cancels_pending_confirmation_on_run_cancelled():
+    """A pending confirmation card must be cancelled and persisted when the run is cancelled."""
+    sse_lines = _make_sse_lines(
+        {
+            'event': 'tool.confirmation_required',
+            'stream_id': 'stream-confirm',
+            'confirmation_id': 'confirm-123',
+            'action_type': 'exec_approval',
+            'description': 'Run shell command?',
+            'options': ['approve', 'deny'],
+            'metadata': {'command': 'rm -rf /tmp/example'},
+        },
+        {'event': 'run.cancelled', 'stream_id': 'stream-confirm'},
+    )
+    response = _make_upstream_response(sse_lines)
+    ctx = _make_ctx(with_event_caller=True)
+    upsert_calls = []
+
+    with (
+        patch('myah.utils.hermes_stream_handler.Chats') as mock_chats,
+        patch('myah.utils.hermes_stream_handler.background_tasks_handler', new=AsyncMock()),
+    ):
+        mock_chats.upsert_message_to_chat_by_id_and_message_id.side_effect = lambda chat_id, message_id, update: (
+            upsert_calls.append(update)
+        )
+        from myah.utils.hermes_stream_handler import handle_hermes_stream
+
+        await handle_hermes_stream(response, ctx)
+
+    confirmations = [item for item in _final_output(ctx) if item.get('type') == 'confirmation']
+    assert len(confirmations) == 1
+    confirmation = confirmations[0]
+    assert confirmation == {
+        'type': 'confirmation',
+        'id': confirmation['id'],
+        'confirmation_id': 'confirm-123',
+        'run_id': 'stream-confirm',
+        'action_type': 'exec_approval',
+        'description': 'Run shell command?',
+        'options': ['approve', 'deny'],
+        'metadata': {'command': 'rm -rf /tmp/example'},
+        'status': 'cancelled',
+    }
+    persisted_outputs = [call.get('output') for call in upsert_calls if call.get('done') is True and call.get('output')]
+    assert persisted_outputs, f'cancelled confirmation output was not persisted; upserts={upsert_calls!r}'
+    assert any(
+        item.get('type') == 'confirmation' and item.get('status') == 'cancelled'
+        for output in persisted_outputs
+        for item in output
+    )
+
+
+@pytest.mark.asyncio
+async def test_background_path_marks_pending_secret_terminal_on_run_cancelled():
+    """A pending secret prompt must not remain pending after run.cancelled terminates the stream."""
+    sse_lines = _make_sse_lines(
+        {
+            'event': 'secret.required',
+            'stream_id': 'stream-secret',
+            'var_name': 'OPENROUTER_API_KEY',
+            'prompt': 'Enter your OpenRouter API key',
+            'help': 'https://openrouter.ai/keys',
+            'skill_name': 'openrouter',
+        },
+        {'event': 'run.cancelled', 'stream_id': 'stream-secret'},
+    )
+    response = _make_upstream_response(sse_lines)
+    ctx = _make_ctx(with_event_caller=True)
+    upsert_calls = []
+
+    with (
+        patch('myah.utils.hermes_stream_handler.Chats') as mock_chats,
+        patch('myah.utils.hermes_stream_handler.background_tasks_handler', new=AsyncMock()),
+    ):
+        mock_chats.upsert_message_to_chat_by_id_and_message_id.side_effect = lambda chat_id, message_id, update: (
+            upsert_calls.append(update)
+        )
+        from myah.utils.hermes_stream_handler import handle_hermes_stream
+
+        await handle_hermes_stream(response, ctx)
+
+    secrets = [item for item in _final_output(ctx) if item.get('type') == 'secret_input']
+    assert len(secrets) == 1
+    secret = secrets[0]
+    assert secret == {
+        'type': 'secret_input',
+        'id': secret['id'],
+        'run_id': 'stream-secret',
+        'var_name': 'OPENROUTER_API_KEY',
+        'prompt': 'Enter your OpenRouter API key',
+        'help': 'https://openrouter.ai/keys',
+        'skill_name': 'openrouter',
+        'status': 'timeout',
+    }
+    persisted_outputs = [call.get('output') for call in upsert_calls if call.get('done') is True and call.get('output')]
+    assert persisted_outputs, f'terminal secret output was not persisted; upserts={upsert_calls!r}'
+    assert any(
+        item.get('type') == 'secret_input' and item.get('status') == 'timeout'
+        for output in persisted_outputs
+        for item in output
+    )
+
+
+@pytest.mark.parametrize('resolved_status', ['stored', 'timeout'])
+@pytest.mark.asyncio
+async def test_background_path_updates_pending_secret_on_secret_resolved(resolved_status):
+    """secret.resolved must update the matching pending secret prompt and persist it."""
+    sse_lines = _make_sse_lines(
+        {
+            'event': 'secret.required',
+            'stream_id': 'stream-secret-resolved',
+            'var_name': 'OPENROUTER_API_KEY',
+            'prompt': 'Enter your OpenRouter API key',
+            'help': 'https://openrouter.ai/keys',
+            'skill_name': 'openrouter',
+        },
+        {
+            'event': 'secret.resolved',
+            'stream_id': 'stream-secret-resolved',
+            'var_name': 'OPENROUTER_API_KEY',
+            'status': resolved_status,
+        },
+        {'event': 'run.completed', 'stream_id': 'stream-secret-resolved', 'usage': None},
+    )
+    response = _make_upstream_response(sse_lines)
+    ctx = _make_ctx(with_event_caller=True)
+    upsert_calls = []
+
+    with (
+        patch('myah.utils.hermes_stream_handler.Chats') as mock_chats,
+        patch('myah.utils.hermes_stream_handler.background_tasks_handler', new=AsyncMock()),
+    ):
+        mock_chats.upsert_message_to_chat_by_id_and_message_id.side_effect = lambda chat_id, message_id, update: (
+            upsert_calls.append(update)
+        )
+        from myah.utils.hermes_stream_handler import handle_hermes_stream
+
+        await handle_hermes_stream(response, ctx)
+
+    secrets = [item for item in _final_output(ctx) if item.get('type') == 'secret_input']
+    assert len(secrets) == 1
+    secret = secrets[0]
+    assert secret == {
+        'type': 'secret_input',
+        'id': secret['id'],
+        'run_id': 'stream-secret-resolved',
+        'var_name': 'OPENROUTER_API_KEY',
+        'prompt': 'Enter your OpenRouter API key',
+        'help': 'https://openrouter.ai/keys',
+        'skill_name': 'openrouter',
+        'status': resolved_status,
+    }
+    persisted_outputs = [call.get('output') for call in upsert_calls if call.get('done') is True and call.get('output')]
+    assert persisted_outputs, f'resolved secret output was not persisted; upserts={upsert_calls!r}'
+    assert any(
+        item.get('type') == 'secret_input' and item.get('status') == resolved_status
+        for output in persisted_outputs
+        for item in output
+    )
+
+
 @pytest.mark.asyncio
 async def test_artifact_card_appended_on_write_file():
     """tool.completed with write_file + .docx path must append an artifact_card."""

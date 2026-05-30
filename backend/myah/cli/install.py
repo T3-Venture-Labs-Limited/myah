@@ -35,15 +35,26 @@ import typer
 
 from myah.lib.cli.config_merge import enable_myah_platform
 from myah.lib.cli.doctor_checks import CheckResult, CheckStatus, post_install_doctor_run
+from myah.lib.cli.env_loader import parse_env_file
 from myah.lib.cli.hermes_install import (
     bootstrap_pip,
     detect_hermes_venv,
+    inspect_hermes_runtime,
     materialize_dashboard_shim,
     pip_install_plugin_at_sha,
     read_pinned_plugin_sha_from_dockerfile,
+    reassert_editable_hermes_if_needed,
     register_plugin_with_gateway,
     verify_dashboard_plugin_mounted,
     verify_gateway_plugin_bound,
+    verify_hermes_tui_integrity,
+    verify_myah_plugin_importable,
+)
+from myah.lib.cli.hermes_profiles import (
+    HermesProfile,
+    base_hermes_home,
+    list_hermes_profiles,
+    resolve_hermes_profile,
 )
 from myah.lib.cli.repo import find_platform_env_path, find_repo_root
 from myah.lib.cli.service_units import install_launchd_plists, install_systemd_user_units
@@ -55,9 +66,7 @@ from myah.lib.cli.token_gen import (
     migrate_legacy_url,
     write_token_to_all_slots,
 )
-from myah.lib.cli.env_loader import parse_env_file
 from myah.lib.cli.worktree_setup import set_env_var
-
 
 # ─── Repo-root detection ────────────────────────────────────────────────
 #
@@ -132,17 +141,62 @@ def _resolve_plugin_sha(repo_root: Path) -> str:
 
 
 def _hermes_home() -> Path:
-    """Return the Hermes home directory (HERMES_HOME env or ~/.hermes).
+    """Return the current Hermes home directory (HERMES_HOME env or ~/.hermes).
 
-    Always passes the value through ``os.path.expanduser`` because
-    Python does NOT auto-expand tildes in env-var values — a user who
-    sets ``HERMES_HOME=~/.hermes`` would otherwise get a literal
-    ``~/.hermes`` directory relative to CWD.
+    Compatibility wrapper retained for tests and callers; profile-aware
+    install paths should use ``resolve_hermes_profile`` instead.
     """
-    override = os.environ.get('HERMES_HOME')
-    if override:
-        return Path(os.path.expanduser(override))
-    return Path(os.path.expanduser('~/.hermes'))
+    return base_hermes_home()
+
+
+def _select_interactive_profile(console) -> HermesProfile:
+    """Prompt for the Hermes profile to configure during interactive install."""
+    from rich.table import Table
+
+    current_home = base_hermes_home()
+    profiles = list_hermes_profiles()
+    by_name = {p.name: p for p in profiles}
+    current_is_default = current_home == by_name['default'].home
+
+    table = Table(title='Hermes profiles available for Myah', show_header=True, header_style='bold')
+    table.add_column('Choice', style='cyan')
+    table.add_column('Hermes home', style='dim')
+    table.add_column('Notes')
+    if not current_is_default:
+        table.add_row('current', str(current_home), 'current $HERMES_HOME; default selection')
+    for profile in profiles:
+        note = 'default selection' if current_is_default and profile.name == 'default' else ''
+        if profile.name == 'default':
+            note = (note + '; ' if note else '') + 'default Hermes profile'
+        table.add_row(profile.name, str(profile.home), note)
+    table.add_row('create', '~/.hermes/profiles/<name>', 'create a new Myah-specific profile')
+    console.print(table)
+
+    default_choice = 'default' if current_is_default else 'current'
+    choice = typer.prompt('Hermes profile for Myah', default=default_choice).strip()
+    if choice == 'current':
+        return HermesProfile(
+            name='current',
+            home=current_home,
+            exists=current_home.exists(),
+            is_default=current_is_default,
+        )
+    if choice == 'create':
+        while True:
+            requested = typer.prompt('New Hermes profile name', default='myah').strip()
+            try:
+                candidate = resolve_hermes_profile(profile=requested, create_profile=False)
+            except ValueError:
+                try:
+                    return resolve_hermes_profile(profile=requested, create_profile=True)
+                except ValueError as invalid:
+                    console.print(f'[yellow]{invalid}[/]')
+                    continue
+            console.print(
+                f'[yellow]Hermes profile {candidate.name!r} already exists at {candidate.home}. '
+                f'Choose a different name.[/]'
+            )
+    return resolve_hermes_profile(profile=choice, create_profile=False)
 
 
 def _default_service_for_platform() -> str:
@@ -232,13 +286,15 @@ def _resolve_web_session_token(
     return generate_bearer_token()
 
 
-def install_command(
+def install_command(  # noqa: C901
     *,
     non_interactive: bool = False,
     service: str | None = None,
     openrouter_key: str | None = None,
     rotate: bool = False,
     keep_data: bool = False,
+    profile: str | None = None,
+    create_profile: bool = False,
     skip_start: bool = False,
 ) -> None:
     """Install the Myah OSS stack: tokens, Hermes plugin, config, services, doctor.
@@ -276,6 +332,27 @@ def install_command(
             '  --rotate regenerates them.'
         )
         raise typer.Exit(code=2)
+
+    # ─── Profile choice resolution (before any writes/subprocesses) ───
+    try:
+        if profile is None and create_profile:
+            raise ValueError('--create-profile requires --profile <name>.')
+        if profile is None and not non_interactive and _stdin_is_tty():
+            selected_profile = _select_interactive_profile(console)
+        else:
+            selected_profile = resolve_hermes_profile(
+                profile=profile,
+                create_profile=create_profile,
+            )
+    except ValueError as err:
+        console.print(f'[red]{err}[/]')
+        raise typer.Exit(code=2) from err
+
+    hermes_home = selected_profile.home
+    console.print(
+        f'  Hermes profile: [bold]{selected_profile.name}[/] '
+        f'[dim]({hermes_home})[/]'
+    )
 
     # ─── Service choice resolution (early, before any writes) ────────
     if service is not None:
@@ -326,7 +403,6 @@ def install_command(
         raise typer.Exit(code=1) from err
     console.print(f'  repo root: {repo_root}')
 
-    hermes_home = _hermes_home()
     hermes_home.mkdir(parents=True, exist_ok=True)
     hermes_env = hermes_home / '.env'
     # Layout-aware: monorepo → <root>/platform-oss/.env; public mirror →
@@ -402,7 +478,7 @@ def install_command(
     console.print('[bold cyan]Phase 5:[/] plugin install')
 
     try:
-        venv_path = detect_hermes_venv()
+        venv_path = detect_hermes_venv(hermes_home=hermes_home)
     except RuntimeError as err:
         console.print(f'[red]✗ {err}[/]')
         raise typer.Exit(code=1) from err
@@ -418,12 +494,33 @@ def install_command(
         console.print(f'[red]✗ {err}[/]')
         raise typer.Exit(code=1) from err
 
-    pip_install_plugin_at_sha(
-        plugin_sha,
-        venv_python,
-        auth_token=os.environ.get('MYAH_PLUGIN_AUTH_TOKEN'),
-    )
-    materialize_dashboard_shim(venv_path, hermes_home)
+    runtime_before = inspect_hermes_runtime(venv_path, hermes_home)
+    runtime_current = runtime_before
+
+    def _repair_runtime_after_failure() -> None:
+        failure_state = inspect_hermes_runtime(venv_path, hermes_home)
+        if reassert_editable_hermes_if_needed(runtime_before, failure_state):
+            failure_state = inspect_hermes_runtime(venv_path, hermes_home)
+        verify_hermes_tui_integrity(failure_state)
+
+    try:
+        pip_install_plugin_at_sha(
+            plugin_sha,
+            venv_python,
+            auth_token=os.environ.get('MYAH_PLUGIN_AUTH_TOKEN'),
+        )
+        runtime_current = inspect_hermes_runtime(venv_path, hermes_home)
+        if reassert_editable_hermes_if_needed(runtime_before, runtime_current):
+            runtime_current = inspect_hermes_runtime(venv_path, hermes_home)
+        verify_myah_plugin_importable(venv_path)
+        materialize_dashboard_shim(venv_path, hermes_home)
+    except Exception as err:  # noqa: BLE001 — repair before surfacing install failure
+        try:
+            _repair_runtime_after_failure()
+        except Exception as repair_err:  # noqa: BLE001 — secondary context only
+            console.print(f'[red]✗ Hermes runtime repair/check failed after plugin install error:[/] {repair_err}')
+        console.print(f'[red]✗ plugin install failed:[/] {err}')
+        raise typer.Exit(code=1) from err
 
     # ─── Phase 5b — Register plugin with the Hermes gateway ──────────
     #
@@ -435,15 +532,30 @@ def install_command(
     # leaves the OSS probe reporting ``plugin_installed: false`` and
     # port 8643 unbound. See PR #16 review C-3 for the VM transcript.
     console.print('[bold cyan]Phase 5b:[/] register plugin with gateway')
-    hermes_bin_path = Path(shutil.which('hermes') or '')
+    hermes_bin_path = venv_path / 'bin' / 'hermes'
     try:
-        register_plugin_with_gateway(hermes_bin_path, adapter_auth_key=token)
-    except Exception as err:  # noqa: BLE001 — surface as Rich error
+        register_plugin_with_gateway(hermes_bin_path, adapter_auth_key=token, hermes_home=hermes_home)
+    except Exception as err:  # noqa: BLE001 — registration failure is warning-only after repair/check
+        try:
+            _repair_runtime_after_failure()
+        except Exception as repair_err:  # noqa: BLE001 — TUI/runtime damage is blocking
+            console.print(f'[red]✗ Hermes runtime repair/check failed after gateway plugin error:[/] {repair_err}')
+            raise typer.Exit(code=1) from repair_err
         console.print(
             f'[yellow]⚠ `hermes plugins install/enable` step failed:[/] {err}\n'
-            f'[dim]Run manually: hermes plugins install '
-            f'T3-Venture-Labs-Limited/myah-hermes-plugin && hermes plugins enable myah[/]'
+            f'[dim]Run manually: HERMES_HOME={hermes_home} hermes plugins install '
+            f'T3-Venture-Labs-Limited/myah-hermes-plugin && '
+            f'HERMES_HOME={hermes_home} hermes plugins enable myah[/]'
         )
+    else:
+        runtime_current = inspect_hermes_runtime(venv_path, hermes_home)
+        if reassert_editable_hermes_if_needed(runtime_before, runtime_current):
+            runtime_current = inspect_hermes_runtime(venv_path, hermes_home)
+        try:
+            verify_hermes_tui_integrity(runtime_current)
+        except Exception as err:  # noqa: BLE001 — block before config merge
+            console.print(f'[red]✗ Hermes TUI integrity check failed:[/] {err}')
+            raise typer.Exit(code=1) from err
 
     # ─── Phase 6 — Hermes config merge ────────────────────────────────
     console.print('[bold cyan]Phase 6:[/] Hermes config.yaml merge')
@@ -454,7 +566,7 @@ def install_command(
     # ─── Phase 7 — Service units + dashboard verification ─────────────
     console.print(f'[bold cyan]Phase 7:[/] service units ({chosen_service})')
 
-    hermes_bin = shutil.which('hermes') or ''
+    hermes_bin = str(venv_path / 'bin' / 'hermes')
     if chosen_service == 'systemd':
         install_systemd_user_units(hermes_bin, hermes_home)
     elif chosen_service == 'launchd':
@@ -509,7 +621,10 @@ def install_command(
     # spuriously WARN on the ports the install just brought up. See
     # PR #16 review M-2.
     services_started = chosen_service in ('systemd', 'launchd')
-    results: list[CheckResult] = post_install_doctor_run(services_started=services_started)
+    results: list[CheckResult] = post_install_doctor_run(
+        services_started=services_started,
+        hermes_home=str(hermes_home),
+    )
 
     table = Table(title='Post-install verification', show_header=True, header_style='bold')
     table.add_column('Check', style='cyan')
@@ -541,8 +656,9 @@ def _kickstart_services_after_install(service_name: str) -> None:
     install.py's module load on the cold path. Service-name parameter
     is for logging only — the agent commands resolve the OS supervisor.
     """
-    from myah.cli.agent import agent_up
     from rich.console import Console
+
+    from myah.cli.agent import agent_up
 
     console = Console()
     console.print(f'[bold cyan]Auto-start:[/] running `myah agent up` ({service_name})')

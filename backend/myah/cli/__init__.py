@@ -138,6 +138,19 @@ def _register_install(app: typer.Typer) -> None:
             help='Documented intent flag — preserves existing tokens/keys (default behavior; '
             'opposite of --rotate). Mutually exclusive with --rotate.',
         ),
+        profile: str | None = typer.Option(
+            None,
+            '--profile',
+            help=(
+                'Hermes profile to configure: default or a name under '
+                '~/.hermes/profiles/. Defaults to current profile.'
+            ),
+        ),
+        create_profile: bool = typer.Option(
+            False,
+            '--create-profile',
+            help='Create the selected Hermes profile if it does not exist. Requires --profile.',
+        ),
         skip_start: bool = typer.Option(
             False,
             '--skip-start',
@@ -156,6 +169,8 @@ def _register_install(app: typer.Typer) -> None:
             openrouter_key=openrouter_key,
             rotate=rotate,
             keep_data=keep_data,
+            profile=profile,
+            create_profile=create_profile,
             skip_start=skip_start,
         )
 
@@ -189,6 +204,7 @@ def _register_plugins(app: typer.Typer) -> None:
     from myah.cli.plugins import plugins_app
 
     app.add_typer(plugins_app, name='plugins')
+    app.add_typer(plugins_app, name='plugin', hidden=True)
 
 
 def _register_platform(app: typer.Typer) -> None:
@@ -256,7 +272,7 @@ def _register_upgrade(app: typer.Typer) -> None:
 
     app.command(
         name='upgrade',
-        help='Upgrade Hermes runtime + plugin, refresh Myah source, pull latest platform image.',
+        help='Upgrade Hermes runtime, Myah plugin, source, and platform image.',
     )(upgrade_command)
 
 

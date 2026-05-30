@@ -145,6 +145,51 @@ def test_plugins_update_forwards_identifier(fake_hermes_venv: Path, no_drift, mo
     assert cmd == [str(fake_hermes_venv / 'bin' / 'hermes'), 'plugins', 'update', 'myah']
 
 
+
+
+def test_plugins_update_defaults_to_myah_plugin(fake_hermes_venv: Path, no_drift, mocker) -> None:
+    """`myah plugins update` is the easy path for updating the Myah plugin."""
+    run_mock = mocker.patch('myah.cli.plugins.run', return_value=_ok())
+
+    result = runner.invoke(app, ['plugins', 'update'])
+
+    assert result.exit_code == 0, result.stdout
+    cmd = run_mock.call_args.args[0]
+    assert cmd == [str(fake_hermes_venv / 'bin' / 'hermes'), 'plugins', 'update', 'myah']
+
+
+def test_plugin_singular_alias_supports_update(fake_hermes_venv: Path, no_drift, mocker) -> None:
+    """`myah plugin update` is a singular alias for the same default Myah plugin update."""
+    run_mock = mocker.patch('myah.cli.plugins.run', return_value=_ok())
+
+    result = runner.invoke(app, ['plugin', 'update'])
+
+    assert result.exit_code == 0, result.stdout
+    cmd = run_mock.call_args.args[0]
+    assert cmd == [str(fake_hermes_venv / 'bin' / 'hermes'), 'plugins', 'update', 'myah']
+
+
+def test_plugins_update_still_forwards_explicit_plugin_name(fake_hermes_venv: Path, no_drift, mocker) -> None:
+    """The default is `myah`, but explicit plugin names still pass through."""
+    run_mock = mocker.patch('myah.cli.plugins.run', return_value=_ok())
+
+    result = runner.invoke(app, ['plugins', 'update', 'other-plugin'])
+
+    assert result.exit_code == 0, result.stdout
+    cmd = run_mock.call_args.args[0]
+    assert cmd == [str(fake_hermes_venv / 'bin' / 'hermes'), 'plugins', 'update', 'other-plugin']
+
+
+def test_plugin_singular_alias_forwards_explicit_plugin_name(fake_hermes_venv: Path, no_drift, mocker) -> None:
+    """The singular alias also preserves explicit plugin names."""
+    run_mock = mocker.patch('myah.cli.plugins.run', return_value=_ok())
+
+    result = runner.invoke(app, ['plugin', 'update', 'other-plugin'])
+
+    assert result.exit_code == 0, result.stdout
+    cmd = run_mock.call_args.args[0]
+    assert cmd == [str(fake_hermes_venv / 'bin' / 'hermes'), 'plugins', 'update', 'other-plugin']
+
 def test_plugins_remove_forwards_identifier(fake_hermes_venv: Path, no_drift, mocker) -> None:
     run_mock = mocker.patch('myah.cli.plugins.run', return_value=_ok())
 
