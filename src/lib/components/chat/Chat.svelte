@@ -116,6 +116,9 @@
 	import { applyDurableFinalMessageEvent } from '$lib/utils/chatEventFallback';
 	import type { InflightSnapshot } from '$lib/types';
 	import ReconnectBanner from './ReconnectBanner.svelte';
+	import TodoPlanStrip from './TodoPlanStrip.svelte';
+	import { getPinnedTodoPlan } from './todoPlanSelection';
+	import type { TodoPlanItem } from '$lib/types/contract';
 
 	export let chatIdProp = '';
 	export let embedded = false;
@@ -147,6 +150,8 @@
 	let selectedModels = [''];
 	let atSelectedModel: Model | undefined;
 	let selectedModelIds = [];
+	let pinnedTodoPlan: TodoPlanItem | null = null;
+	$: pinnedTodoPlan = getPinnedTodoPlan(history);
 	$: if (atSelectedModel !== undefined) {
 		selectedModelIds = [atSelectedModel.id];
 	} else {
@@ -360,8 +365,9 @@
 	const chatEventHandler = async (event, cb) => {
 		if (event.chat_id === $chatId) {
 			if (applyDurableFinalMessageEvent(event, $chatId, { history }, { clearInflightSnapshot })) {
-				await tick();
+				const message = (history.messages as Record<string, any>)[event.message_id];
 				await saveChatHandler($chatId, history);
+				await finalizeCompletedAssistantMessage($chatId, message, { runBackgroundCompletion: false });
 				return;
 			}
 
@@ -681,7 +687,9 @@
 				if (active.run_id === null) {
 					return null; // no active run — DB load wins
 				}
-				const live = await getChatLiveState(localStorage.token, chatId, active.message_id!);
+				const live = active.message_id
+					? await getChatLiveState(localStorage.token, chatId, active.message_id)
+					: null;
 				if (isStale()) return null;
 				return live ? { ...active, ...live } : null;
 			} catch (err) {
@@ -1429,6 +1437,90 @@
 		}
 	};
 
+	const finalizeCompletedAssistantMessage = async (
+		chatId: string,
+		message: Record<string, any>,
+		{ runBackgroundCompletion = true } = {}
+	) => {
+		message.done = true;
+		bumpArtifactExplorerRefresh();
+
+		if (chatId && !chatId.startsWith('local:')) {
+			setTimeout(() => clearInflightSnapshot(chatId), 10_000);
+		}
+
+		if ($settings.responseAutoCopy) {
+			copyToClipboard(message.content);
+		}
+
+		if ($settings.responseAutoPlayback) {
+			await tick();
+			document.getElementById(`speak-button-${message.id}`)?.click();
+		}
+
+		eventTarget.dispatchEvent(
+			new CustomEvent('chat:finish', {
+				detail: {
+					id: message.id,
+					content: message.content
+				}
+			})
+		);
+
+		history.messages[message.id] = message;
+
+		await tick();
+		if (autoScroll) {
+			scrollToBottom();
+		}
+
+		if (runBackgroundCompletion) {
+			chatCompletedHandler(chatId, message.model, message.id, createMessagesList(history, message.id));
+		}
+
+		// ── Auto-link chat to cron process ────────────────────────────
+		// When the agent creates a cron job, link this chat to the process
+		// so it shows a clock icon in the task list instead of a checkmark.
+		if (message.output && Array.isArray(message.output)) {
+			for (const item of message.output) {
+				if (item.type !== 'function_call_output' || !item.call_id) continue;
+				// Find the matching function_call to check the tool name
+				const callItem = message.output.find(
+					(o: any) => o.type === 'function_call' && o.call_id === item.call_id && o.name === 'cronjob'
+				);
+				if (!callItem) continue;
+				// Parse the tool result to find job_id
+				try {
+					const resultText = item.output?.[0]?.text ?? '';
+					const result = JSON.parse(resultText);
+					if (result?.success && result?.job_id) {
+						// Skip temp chats — they have no persistent ID to link against
+						if (!chatId || chatId.startsWith('local:')) continue;
+
+						const attemptLink = async (retryCount = 0): Promise<void> => {
+							try {
+								await linkProcessToChat(localStorage.token, result.job_id, chatId);
+							} catch (e) {
+								if (retryCount < 1) {
+									await new Promise((res) => setTimeout(res, 2000));
+									return attemptLink(retryCount + 1);
+								}
+								console.warn('[chat] Failed to link process to chat after retries:', e);
+								toast.error('Failed to link scheduled task to this chat');
+							}
+						};
+						attemptLink();
+					}
+				} catch {
+					// Not JSON or no job_id — skip
+				}
+			}
+		}
+
+		// Process next queued request if any
+		await processNextInQueue(chatId);
+	};
+
 	const chatCompletionEventHandler = async (data, message, chatId) => {
 		const { id, done, choices, content, output, sources, selected_model_id, error, usage } = data;
 
@@ -1480,21 +1572,6 @@
 		history.messages[message.id] = message;
 
 		if (done) {
-			message.done = true;
-			// 2026-05-05 dogfooding: nudge the ArtifactExplorer to re-fetch
-			// chat files when streaming finishes. The HermesOutputRenderer
-			// already bumps on every artifact_card it sees, but a defensive
-			// final bump on done covers the case where persist_tool_paths
-			// landed files in chat.files for kinds that didn't emit a card
-			// (e.g. media kinds, or any future filter).
-			bumpArtifactExplorerRefresh();
-			// Clear the snapshot 10 s after completion so that a very fast reload
-			// after the done event still sees the completed (DB-saved) state rather
-			// than the stale snapshot.
-			if (chatId && !chatId.startsWith('local:')) {
-				setTimeout(() => clearInflightSnapshot(chatId), 10_000);
-			}
-
 			if (DEBUG_CHAT) {
 				// Dump the complete message content on completion — this contains all
 				// <details type="reasoning">, <details type="tool_calls">, and plain text.
@@ -1509,84 +1586,9 @@
 				console.groupEnd();
 			}
 
-			if ($settings.responseAutoCopy) {
-				copyToClipboard(message.content);
-			}
-
-			if ($settings.responseAutoPlayback) {
-				await tick();
-				document.getElementById(`speak-button-${message.id}`)?.click();
-			}
-
-			eventTarget.dispatchEvent(
-				new CustomEvent('chat:finish', {
-					detail: {
-						id: message.id,
-						content: message.content
-					}
-				})
-			);
-
-			history.messages[message.id] = message;
-
-			await tick();
-			if (autoScroll) {
-				scrollToBottom();
-			}
-
-			// Fire-and-forget: run chatCompletedHandler for background work
-			// (outlet filters, chat save, title gen, follow-ups, tags)
-			// without blocking the user from sending new messages.
-			chatCompletedHandler(
-				chatId,
-				message.model,
-				message.id,
-				createMessagesList(history, message.id)
-			);
-
-			// ── Auto-link chat to cron process ────────────────────────────
-			// When the agent creates a cron job, link this chat to the process
-			// so it shows a clock icon in the task list instead of a checkmark.
-			if (message.output && Array.isArray(message.output)) {
-				for (const item of message.output) {
-					if (item.type !== 'function_call_output' || !item.call_id) continue;
-					// Find the matching function_call to check the tool name
-					const callItem = message.output.find(
-						(o: any) =>
-							o.type === 'function_call' && o.call_id === item.call_id && o.name === 'cronjob'
-					);
-					if (!callItem) continue;
-					// Parse the tool result to find job_id
-					try {
-						const resultText = item.output?.[0]?.text ?? '';
-						const result = JSON.parse(resultText);
-						if (result?.success && result?.job_id) {
-							// Skip temp chats — they have no persistent ID to link against
-							if (!chatId || chatId.startsWith('local:')) continue;
-
-							const attemptLink = async (retryCount = 0): Promise<void> => {
-								try {
-									await linkProcessToChat(localStorage.token, result.job_id, chatId);
-								} catch (e) {
-									if (retryCount < 1) {
-										await new Promise((res) => setTimeout(res, 2000));
-										return attemptLink(retryCount + 1);
-									}
-									console.warn('[chat] Failed to link process to chat after retries:', e);
-									toast.error('Failed to link scheduled task to this chat');
-								}
-							};
-							attemptLink();
-						}
-					} catch {
-						// Not JSON or no job_id — skip
-					}
-				}
-			}
-
-			// Process next queued request if any
-			await processNextInQueue(chatId);
+			await finalizeCompletedAssistantMessage(chatId, message);
 		}
+
 
 		if (DEBUG_CHAT) console.log('[chat:completion] done handler', data);
 		await tick();
@@ -2582,6 +2584,7 @@
 					/>
 
 					<ReconnectBanner />
+					<TodoPlanStrip plan={pinnedTodoPlan} />
 
 					<div id="chat-pane" class="flex flex-col flex-auto z-10 w-full @container overflow-auto">
 						{#if ($settings?.landingPageMode === 'chat' && !$selectedFolder) || createMessagesList(history, history.currentId).length > 0}

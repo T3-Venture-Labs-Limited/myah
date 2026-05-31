@@ -7,9 +7,10 @@ import type {
 	ReasoningItem,
 	CodeInterpreterItem,
 	ConfirmationItem,
-	SecretInputItem
+	SecretInputItem,
+	ArtifactCardItem,
+	TodoPlanItem
 } from './types';
-
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 let _id = 0;
@@ -97,6 +98,18 @@ function secret(overrides?: Partial<SecretInputItem>): SecretInputItem {
 		help: '',
 		skill_name: 'test_skill',
 		status: 'pending',
+		...overrides
+	};
+}
+
+function todoPlan(overrides?: Partial<TodoPlanItem>): TodoPlanItem {
+	return {
+		type: 'todo_plan',
+		id: uid(),
+		call_id: uid(),
+		title: 'Plan',
+		todos: [{ id: '1', content: 'Build pinned strip', status: 'in_progress' }],
+		status: 'in_progress',
 		...overrides
 	};
 }
@@ -234,6 +247,41 @@ describe('groupChronologically', () => {
 			expect(groups[0].items).toHaveLength(1);
 			expect(groups[0].items[0]).toBe(t1);
 		}
+	});
+
+	it('todo_plan is consumed by pinned strip and skipped from transcript groups', () => {
+		const plan = todoPlan();
+		const m = msg();
+
+		const groups = groupChronologically([plan, m]);
+
+		expect(groups).toHaveLength(1);
+		expect(groups[0].kind).toBe('message');
+		if (groups[0].kind === 'message') expect(groups[0].item).toBe(m);
+	});
+
+	it('generic todo tool rows are defensively hidden when a todo_plan exists', () => {
+		const callId = 'call_todo_1';
+		const todoCall = tool({ name: 'todo', call_id: callId });
+		const todoOut = toolOutput(callId);
+		const plan = todoPlan({ call_id: callId });
+		const m = msg();
+
+		const groups = groupChronologically([todoCall, todoOut, plan, m]);
+
+		expect(groups).toHaveLength(1);
+		expect(groups[0].kind).toBe('message');
+		if (groups[0].kind === 'message') expect(groups[0].item).toBe(m);
+	});
+
+	it('malformed todo tool rows still render when no todo_plan exists', () => {
+		const todoCall = tool({ name: 'todo', call_id: 'call_todo_bad' });
+
+		const groups = groupChronologically([todoCall]);
+
+		expect(groups).toHaveLength(1);
+		expect(groups[0].kind).toBe('chain');
+		if (groups[0].kind === 'chain') expect(groups[0].items[0]).toBe(todoCall);
 	});
 
 	it('phantom function_call with empty call_id is filtered out', () => {

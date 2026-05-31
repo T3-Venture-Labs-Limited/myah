@@ -47,6 +47,7 @@ import mimetypes
 import os
 import time
 from pathlib import Path as _Path
+from typing import Any
 
 try:
     import sentry_sdk as sentry_sdk
@@ -175,6 +176,52 @@ def _sse_chunk(delta: str = '', done: bool = False) -> str:
     return f'data: {json.dumps(payload)}\n\n'
 
 
+def _parse_todo_result(result: Any) -> list[dict] | None:
+    """Parse a Hermes todo tool result into normalized TodoPlanEntry dicts.
+
+    Hermes returns todo results as a JSON string containing ``{"todos": [...]}``.
+    Dict input is accepted defensively for tests/future emitters. Malformed
+    payloads return None so the generic tool rows remain available for debugging.
+    """
+    if isinstance(result, str):
+        try:
+            data = json.loads(result)
+        except json.JSONDecodeError:
+            return None
+    elif isinstance(result, dict):
+        data = result
+    else:
+        return None
+
+    if not isinstance(data, dict):
+        return None
+    todos = data.get('todos')
+    if not isinstance(todos, list):
+        return None
+
+    normalized: list[dict] = []
+    for raw in todos:
+        if not isinstance(raw, dict):
+            continue
+        status = str(raw.get('status') or 'pending').strip().lower()
+        if status not in {'pending', 'in_progress', 'completed', 'cancelled'}:
+            status = 'pending'
+        normalized.append(
+            {
+                'id': str(raw.get('id') or '?'),
+                'content': str(raw.get('content') or '(no description)'),
+                'status': status,
+            }
+        )
+    return normalized
+
+
+def _todo_plan_status(todos: list[dict]) -> str:
+    if todos and all(todo.get('status') in {'completed', 'cancelled'} for todo in todos):
+        return 'completed'
+    return 'in_progress'
+
+
 async def handle_hermes_stream(response, ctx: dict) -> StreamingResponse | None:  # noqa: C901
     """Process a /myah/v1/events/{stream_id} SSE stream and return a StreamingResponse.
 
@@ -269,6 +316,22 @@ async def handle_hermes_stream(response, ctx: dict) -> StreamingResponse | None:
             }
             output.append(msg_item)
             return msg_item
+
+        def _upsert_todo_plan(call_id: str, todos: list[dict]) -> dict:
+            existing: dict | None = next((item for item in output if item.get('type') == 'todo_plan'), None)
+            if existing is None:
+                existing = {
+                    'type': 'todo_plan',
+                    'id': output_id('todo_plan'),
+                    'title': 'Plan',
+                }
+                output.append(existing)
+            existing['call_id'] = call_id
+            existing['title'] = existing.get('title') or 'Plan'
+            existing['todos'] = todos
+            existing['status'] = _todo_plan_status(todos)
+            existing['updated_at'] = time.time()
+            return existing
 
         # ── Helper: detect echo-style <think> blocks ──────────────────────
         # Some models (kimi-k2.5 notably) emit their visible response and then
@@ -619,6 +682,23 @@ async def handle_hermes_stream(response, ctx: dict) -> StreamingResponse | None:
                     for item in output:
                         if item.get('type') == 'function_call' and item.get('call_id') == call_id:
                             item['status'] = 'completed' if not is_error else 'failed'
+
+                    if tool_name == 'todo' and not is_error:
+                        todos = _parse_todo_result(result)
+                        if todos is not None:
+                            _upsert_todo_plan(call_id, todos)
+                            output[:] = [
+                                item
+                                for item in output
+                                if not (
+                                    item.get('type') == 'function_call'
+                                    and item.get('call_id') == call_id
+                                    and item.get('name') == 'todo'
+                                )
+                            ]
+                            await _emit_completion()
+                            _update_live_state()
+                            continue
 
                     result_text = result if isinstance(result, str) else json.dumps(result)
                     fco_item: dict = {

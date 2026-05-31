@@ -32,6 +32,7 @@ from shared.contract.output_items import (
     OutputItem,
     ReasoningItem,
     SecretInputItem,
+    TodoPlanItem,
 )
 
 # A single TypeAdapter is reused so pydantic v2 does not rebuild the
@@ -123,6 +124,21 @@ ITEM_SAMPLES: dict[str, tuple[dict, type]] = {
         },
         SecretInputItem,
     ),
+    'todo_plan': (
+        {
+            'type': 'todo_plan',
+            'id': 'todo_abc',
+            'call_id': 'call_todo_1',
+            'title': 'Plan',
+            'todos': [
+                {'id': '1', 'content': 'Inspect design', 'status': 'completed'},
+                {'id': '2', 'content': 'Build strip', 'status': 'in_progress'},
+                {'id': '3', 'content': 'Verify runtime', 'status': 'pending'},
+            ],
+            'status': 'in_progress',
+        },
+        TodoPlanItem,
+    ),
 }
 
 
@@ -165,6 +181,7 @@ def test_completeness_every_known_item_has_a_sample() -> None:
         CodeInterpreterItem,
         ConfirmationItem,
         SecretInputItem,
+        TodoPlanItem,
     }
     assert sampled_classes == declared_classes, (
         f'Test matrix drift: missing samples for '

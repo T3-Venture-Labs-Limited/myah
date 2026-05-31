@@ -742,6 +742,141 @@ async def test_repeated_same_tool_calls_with_distinct_call_ids_render_distinct_r
     assert [item.get('call_id') for item in outputs] == ['call_1', 'call_2']
 
 
+@pytest.mark.asyncio
+async def test_todo_tool_completion_emits_single_todo_plan_and_suppresses_generic_rows():
+    """A successful todo result becomes one first-class todo_plan output item."""
+    _clear_registries()
+    todo_result = {
+        'todos': [
+            {'id': '1', 'content': 'Read the task', 'status': 'completed'},
+            {'id': '2', 'content': 'Implement stream normalization', 'status': 'in_progress'},
+            {'id': '3', 'content': 'Run tests', 'status': 'pending'},
+        ]
+    }
+    sse_lines = _make_sse_lines(
+        {
+            'event': 'tool.started',
+            'run_id': 'stream-todo',
+            'tool': 'todo',
+            'call_id': 'call_todo_1',
+            'args': {'todos': []},
+        },
+        {
+            'event': 'tool.completed',
+            'run_id': 'stream-todo',
+            'tool': 'todo',
+            'call_id': 'call_todo_1',
+            'result': json.dumps(todo_result),
+        },
+    )
+    response = _make_upstream_response(sse_lines)
+    ctx = _make_ctx(with_event_caller=True)
+
+    with (
+        patch('myah.utils.hermes_stream_handler.Chats'),
+        patch('myah.utils.hermes_stream_handler.background_tasks_handler', new=AsyncMock()),
+    ):
+        from myah.utils.hermes_stream_handler import handle_hermes_stream
+
+        await handle_hermes_stream(response, ctx)
+
+    final_output = _final_output(ctx)
+    plans = [item for item in final_output if item.get('type') == 'todo_plan']
+    assert len(plans) == 1
+    assert plans[0]['call_id'] == 'call_todo_1'
+    assert plans[0]['title'] == 'Plan'
+    assert plans[0]['status'] == 'in_progress'
+    assert plans[0]['todos'] == todo_result['todos']
+    assert plans[0]['todos'][1]['status'] == 'in_progress'
+    assert not [item for item in final_output if item.get('type') == 'function_call' and item.get('name') == 'todo']
+    assert not [item for item in final_output if item.get('type') == 'function_call_output' and item.get('call_id') == 'call_todo_1']
+
+    from myah.utils import hermes_stream_handler as _mod
+
+    live = _mod._live_state[('test-chat-id', 'test-message-id')]
+    live_plans = [item for item in live['output'] if item.get('type') == 'todo_plan']
+    assert live_plans == plans
+
+
+@pytest.mark.asyncio
+async def test_repeated_todo_tool_completions_update_existing_todo_plan():
+    """Later todo completions replace the existing plan instead of appending."""
+    _clear_registries()
+    first_result = {'todos': [{'id': '1', 'content': 'Plan work', 'status': 'in_progress'}]}
+    second_result = {
+        'todos': [
+            {'id': '1', 'content': 'Plan work', 'status': 'completed'},
+            {'id': '2', 'content': 'Verify behavior', 'status': 'in_progress'},
+        ]
+    }
+    sse_lines = _make_sse_lines(
+        {'event': 'tool.started', 'run_id': 'stream-todo', 'tool': 'todo', 'call_id': 'call_todo_1', 'args': {}},
+        {
+            'event': 'tool.completed',
+            'run_id': 'stream-todo',
+            'tool': 'todo',
+            'call_id': 'call_todo_1',
+            'result': json.dumps(first_result),
+        },
+        {'event': 'tool.started', 'run_id': 'stream-todo', 'tool': 'todo', 'call_id': 'call_todo_2', 'args': {}},
+        {
+            'event': 'tool.completed',
+            'run_id': 'stream-todo',
+            'tool': 'todo',
+            'call_id': 'call_todo_2',
+            'result': json.dumps(second_result),
+        },
+    )
+    response = _make_upstream_response(sse_lines)
+    ctx = _make_ctx(with_event_caller=True)
+
+    with (
+        patch('myah.utils.hermes_stream_handler.Chats'),
+        patch('myah.utils.hermes_stream_handler.background_tasks_handler', new=AsyncMock()),
+    ):
+        from myah.utils.hermes_stream_handler import handle_hermes_stream
+
+        await handle_hermes_stream(response, ctx)
+
+    final_output = _final_output(ctx)
+    plans = [item for item in final_output if item.get('type') == 'todo_plan']
+    assert len(plans) == 1
+    assert plans[0]['call_id'] == 'call_todo_2'
+    assert plans[0]['todos'] == second_result['todos']
+    assert plans[0]['todos'][1]['status'] == 'in_progress'
+    assert not [item for item in final_output if item.get('type') == 'function_call' and item.get('name') == 'todo']
+
+
+@pytest.mark.asyncio
+async def test_malformed_todo_tool_completion_preserves_generic_rows_for_debugging():
+    """Malformed todo results keep the generic tool rows visible."""
+    sse_lines = _make_sse_lines(
+        {'event': 'tool.started', 'run_id': 'stream-todo', 'tool': 'todo', 'call_id': 'call_todo_bad', 'args': {}},
+        {
+            'event': 'tool.completed',
+            'run_id': 'stream-todo',
+            'tool': 'todo',
+            'call_id': 'call_todo_bad',
+            'result': 'not json',
+        },
+    )
+    response = _make_upstream_response(sse_lines)
+    ctx = _make_ctx(with_event_caller=True)
+
+    with (
+        patch('myah.utils.hermes_stream_handler.Chats'),
+        patch('myah.utils.hermes_stream_handler.background_tasks_handler', new=AsyncMock()),
+    ):
+        from myah.utils.hermes_stream_handler import handle_hermes_stream
+
+        await handle_hermes_stream(response, ctx)
+
+    final_output = _final_output(ctx)
+    assert not [item for item in final_output if item.get('type') == 'todo_plan']
+    assert [item for item in final_output if item.get('type') == 'function_call' and item.get('name') == 'todo']
+    assert [item for item in final_output if item.get('type') == 'function_call_output' and item.get('call_id') == 'call_todo_bad']
+
+
 # ── Terminal/action event mapping tests (T3-1092 S2/S9) ───────────────────
 
 

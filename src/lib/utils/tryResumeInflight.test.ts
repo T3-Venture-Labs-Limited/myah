@@ -51,9 +51,11 @@ async function tryResumeInflight(chatId: string, deps: Deps): Promise<void> {
 				throw new Error('malformed active_run response');
 			}
 			if (active.run_id === null) {
-				return null;
+				return null; // no active run — DB load wins
 			}
-			const live = await deps.getChatLiveState(deps.token, chatId, active.message_id!);
+			const live = active.message_id
+				? await deps.getChatLiveState(deps.token, chatId, active.message_id)
+				: null;
 			return live ? { ...active, ...live } : null;
 		} catch (err) {
 			deps.setBanner('Reconnect failed — refresh to retry');
@@ -182,6 +184,25 @@ describe('tryResumeInflight', () => {
 
 		expect(deps.applyHistory).toHaveLength(1);
 		expect((deps.applyHistory[0] as any).message_content).toBe('partial text');
+		expect(deps.bannerHistory.at(-1)).toBeNull();
+		expect(deps.loadChat).not.toHaveBeenCalled();
+	});
+
+	it('fast path (<200ms): active run without message_id returns null instead of failing live_state fetch', async () => {
+		const deps = makeDeps({
+			getActiveRun: vi.fn().mockResolvedValue({
+				run_id: 'run-settling',
+				started_at: 1000,
+				message_id: null
+			}),
+			getChatLiveState: vi.fn()
+		});
+
+		const p = tryResumeInflight('chat-1', deps);
+		await vi.runAllTimersAsync();
+		await p;
+
+		expect(deps.getChatLiveState).not.toHaveBeenCalled();
 		expect(deps.bannerHistory.at(-1)).toBeNull();
 		expect(deps.loadChat).not.toHaveBeenCalled();
 	});

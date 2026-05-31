@@ -18,12 +18,7 @@ describe('applyDurableFinalMessageEvent', () => {
 				message_id: 'msg-1',
 				data: {
 					type: 'chat:completion',
-					data: {
-						content: 'final answer',
-						done: true,
-						message_id: 'msg-1',
-						chat_id: 'chat-1'
-					}
+					data: { content: 'final answer', done: true, chat_id: 'chat-1', message_id: 'msg-1' }
 				}
 			},
 			'chat-1',
@@ -50,13 +45,141 @@ describe('applyDurableFinalMessageEvent', () => {
 				message_id: 'msg-1',
 				data: {
 					type: 'chat:completion',
+					data: { content: 'wrong', done: true, chat_id: 'other-chat', message_id: 'msg-1' }
+				}
+			},
+			'chat-1',
+			chat
+		);
+
+		expect(applied).toBe(false);
+		expect(chat.history.messages['msg-1'].content).toBe('');
+		expect(chat.history.messages['msg-1'].done).toBe(false);
+	});
+
+	it('removes stale structured output when durable final event has text but no output', () => {
+		const chat = {
+			history: {
+				currentId: 'msg-1',
+				messages: {
+					'msg-1': {
+						id: 'msg-1',
+						role: 'assistant',
+						content: '',
+						done: false,
+						output: [{ type: 'function_call', name: 'terminal' }]
+					}
+				}
+			}
+		};
+
+		const applied = applyDurableFinalMessageEvent(
+			{
+				chat_id: 'chat-1',
+				message_id: 'msg-1',
+				data: {
+					type: 'chat:completion',
+					data: { content: 'final answer', done: true, chat_id: 'chat-1', message_id: 'msg-1' }
+				}
+			},
+			'chat-1',
+			chat
+		);
+
+		expect(applied).toBe(true);
+		expect(chat.history.messages['msg-1'].content).toBe('final answer');
+		expect(chat.history.messages['msg-1'].done).toBe(true);
+		expect('output' in chat.history.messages['msg-1']).toBe(false);
+	});
+
+	it('preserves authoritative structured output when durable final event includes output', () => {
+		const authoritativeOutput = [{ type: 'message', content: 'final answer' }];
+		const chat = {
+			history: {
+				currentId: 'msg-1',
+				messages: {
+					'msg-1': {
+						id: 'msg-1',
+						role: 'assistant',
+						content: '',
+						done: false,
+						output: [{ type: 'function_call', name: 'terminal' }]
+					}
+				}
+			}
+		};
+
+		const applied = applyDurableFinalMessageEvent(
+			{
+				chat_id: 'chat-1',
+				message_id: 'msg-1',
+				data: {
+					type: 'chat:completion',
+					data: {
+						content: 'final answer',
+						done: true,
+						chat_id: 'chat-1',
+						message_id: 'msg-1',
+						output: authoritativeOutput
+					}
+				}
+			},
+			'chat-1',
+			chat
+		);
+
+		expect(applied).toBe(true);
+		expect(chat.history.messages['msg-1'].output).toBe(authoritativeOutput);
+	});
+
+	it('ignores durable-looking events when inner markers disagree with outer ids', () => {
+		const chat = {
+			history: {
+				currentId: 'msg-1',
+				messages: {
+					'msg-1': { id: 'msg-1', role: 'assistant', content: '', done: false }
+				}
+			}
+		};
+
+		const applied = applyDurableFinalMessageEvent(
+			{
+				chat_id: 'chat-1',
+				message_id: 'msg-1',
+				data: {
+					type: 'chat:completion',
 					data: {
 						content: 'wrong',
 						done: true,
-						message_id: 'msg-1',
-						chat_id: 'other-chat'
+						chat_id: 'chat-1',
+						message_id: 'other-message'
 					}
 				}
+			},
+			'chat-1',
+			chat
+		);
+
+		expect(applied).toBe(false);
+		expect(chat.history.messages['msg-1'].content).toBe('');
+		expect(chat.history.messages['msg-1'].done).toBe(false);
+	});
+
+	it('ignores ordinary done content events without inner durable fallback markers', () => {
+		const chat = {
+			history: {
+				currentId: 'msg-1',
+				messages: {
+					'msg-1': { id: 'msg-1', role: 'assistant', content: '', done: false }
+				}
+			}
+		};
+
+		const applied = applyDurableFinalMessageEvent(
+			{
+				chat_id: 'chat-1',
+				message_id: 'msg-1',
+				data: { type: 'chat:completion', data: { content: 'ordinary final', done: true } }
 			},
 			'chat-1',
 			chat
