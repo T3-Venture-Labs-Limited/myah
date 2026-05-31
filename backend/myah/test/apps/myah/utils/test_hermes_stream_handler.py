@@ -684,6 +684,64 @@ def _final_output(ctx) -> list[dict]:
     return completions[-1]['data'].get('output') or []
 
 
+# ── Tool timeline mapping tests ───────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_repeated_same_tool_calls_with_distinct_call_ids_render_distinct_rows():
+    """Repeated tool names must not collapse when Hermes provides real call IDs."""
+    sse_lines = _make_sse_lines(
+        {
+            'event': 'tool.started',
+            'run_id': 'stream-tools',
+            'tool': 'search_files',
+            'call_id': 'call_1',
+            'args': {'pattern': 'tool_start'},
+        },
+        {
+            'event': 'tool.completed',
+            'run_id': 'stream-tools',
+            'tool': 'search_files',
+            'call_id': 'call_1',
+            'result': 'first result',
+        },
+        {
+            'event': 'tool.started',
+            'run_id': 'stream-tools',
+            'tool': 'search_files',
+            'call_id': 'call_2',
+            'args': {'pattern': 'tool_complete'},
+        },
+        {
+            'event': 'tool.completed',
+            'run_id': 'stream-tools',
+            'tool': 'search_files',
+            'call_id': 'call_2',
+            'result': 'second result',
+        },
+        {'event': 'run.completed', 'run_id': 'stream-tools', 'usage': None},
+    )
+    response = _make_upstream_response(sse_lines)
+    ctx = _make_ctx(with_event_caller=True)
+
+    with (
+        patch('myah.utils.hermes_stream_handler.Chats'),
+        patch('myah.utils.hermes_stream_handler.background_tasks_handler', new=AsyncMock()),
+    ):
+        from myah.utils.hermes_stream_handler import handle_hermes_stream
+
+        await handle_hermes_stream(response, ctx)
+
+    final_output = _final_output(ctx)
+    calls = [item for item in final_output if item.get('type') == 'function_call']
+    outputs = [item for item in final_output if item.get('type') == 'function_call_output']
+
+    assert [item.get('call_id') for item in calls] == ['call_1', 'call_2']
+    assert [item.get('name') for item in calls] == ['search_files', 'search_files']
+    assert all(item.get('status') == 'completed' for item in calls)
+    assert [item.get('call_id') for item in outputs] == ['call_1', 'call_2']
+
+
 # ── Terminal/action event mapping tests (T3-1092 S2/S9) ───────────────────
 
 
