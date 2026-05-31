@@ -505,6 +505,110 @@ async def test_adopt_rejects_local_temp_chat_id(db_session, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_adopt_legacy_process_in_oss_uses_dashboard_outputs_for_backfill(db_session, monkeypatch):
+    monkeypatch.setenv('MYAH_DEPLOYMENT_MODE', 'oss')
+    from myah.routers import processes as processes_module
+    from myah.routers.processes import ProcessAdoptForm, adopt_process
+
+    user = _make_user(db_session)
+    job = {'id': VALID_JOB_ID, 'name': 'OSS Digest'}
+    metadata_calls: list = []
+
+    async def fake_patch(user_arg, job_id, metadata):
+        metadata_calls.append({'job_id': job_id, 'metadata': metadata})
+        return {'job': {'id': job_id, **metadata}}
+
+    web_calls: list = []
+
+    async def fake_web_call(user_arg, method, path, **kwargs):
+        web_calls.append((method, path, kwargs))
+        assert method == 'GET'
+        assert path == f'/api/plugins/myah-admin/cron/jobs/{VALID_JOB_ID}/outputs'
+        assert kwargs.get('params') == {'limit': 2}
+        return {
+            'status': 200,
+            'body': {
+                'runs': [
+                    {
+                        'id': '2026-05-31_09-00-00',
+                        'ran_at': '2026-05-31T09:00:00+00:00',
+                        'status': 'ok',
+                        'response': 'newest response',
+                        'prompt': 'newest prompt',
+                    },
+                    {
+                        'id': '2026-05-31_08-00-00',
+                        'ran_at': '2026-05-31T08:00:00+00:00',
+                        'status': 'ok',
+                        'response': 'oldest response',
+                        'prompt': 'oldest prompt',
+                    },
+                ]
+            },
+        }
+
+    with (
+        patch('myah.routers.processes._ensure_container', new=AsyncMock(return_value=8642)),
+        patch('myah.routers.processes._hermes_get', new=AsyncMock(return_value={'job': job})),
+        patch('myah.routers.processes._patch_job_myah_metadata', side_effect=fake_patch),
+        patch('myah.utils.hermes_web.web_call', new=AsyncMock(side_effect=fake_web_call)),
+    ):
+        resp = await adopt_process(VALID_JOB_ID, ProcessAdoptForm(backfill_limit=2), user)
+
+    assert resp['ok'] is True
+    assert resp['created_chat'] is True
+    assert resp['backfilled'] == 2
+    assert resp['skipped_existing'] == 0
+    assert web_calls
+    assert metadata_calls[0]['metadata']['myah']['chat_id'] == resp['chat_id']
+
+
+@pytest.mark.asyncio
+async def test_adopt_legacy_process_in_oss_with_zero_backfill_skips_dashboard_outputs(db_session, monkeypatch):
+    monkeypatch.setenv('MYAH_DEPLOYMENT_MODE', 'oss')
+    from myah.routers import processes as processes_module
+    from myah.routers.processes import ProcessAdoptForm, adopt_process
+
+    user = _make_user(db_session)
+    job = {'id': VALID_JOB_ID, 'name': 'OSS Digest'}
+
+    async def fake_patch(user_arg, job_id, metadata):
+        return {'job': {'id': job_id, **metadata}}
+
+    with (
+        patch('myah.routers.processes._ensure_container', new=AsyncMock(return_value=8642)),
+        patch('myah.routers.processes._hermes_get', new=AsyncMock(return_value={'job': job})),
+        patch('myah.routers.processes._patch_job_myah_metadata', side_effect=fake_patch),
+        patch('myah.utils.hermes_web.web_call', new=AsyncMock()) as web_call_mock,
+        patch('myah.models.containers.Containers.get_by_user_id') as container_lookup,
+    ):
+        resp = await adopt_process(VALID_JOB_ID, ProcessAdoptForm(backfill_limit=0), user)
+
+    assert resp['ok'] is True
+    assert resp['backfilled'] == 0
+    web_call_mock.assert_not_called()
+    container_lookup.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_oss_fetch_run_outputs_surfaces_old_plugin_endpoint_as_501(db_session, monkeypatch):
+    monkeypatch.setenv('MYAH_DEPLOYMENT_MODE', 'oss')
+    from myah.routers import processes as processes_module
+
+    user = _make_user(db_session)
+
+    async def fake_web_call(user_arg, method, path, **kwargs):
+        return {'status': 404, 'body': {'detail': 'Not Found'}}
+
+    with patch('myah.utils.hermes_web.web_call', new=AsyncMock(side_effect=fake_web_call)):
+        with pytest.raises(HTTPException) as exc:
+            await processes_module._fetch_run_outputs_for_user(user, VALID_JOB_ID, limit=5)
+
+    assert exc.value.status_code == 501
+    assert 'cron output history endpoint is unavailable' in str(exc.value.detail)
+
+
+@pytest.mark.asyncio
 async def test_adopt_missing_job_returns_404(db_session, monkeypatch):
     monkeypatch.setenv('MYAH_DEPLOYMENT_MODE', 'hosted')
     from myah.routers.processes import ProcessAdoptForm, adopt_process

@@ -37,6 +37,10 @@ PC_ROUTES: list[tuple[str, str, dict | None]] = [
     ('POST', f'/api/v1/processes/{VALID_JOB_ID}/resume', None),                           # PC 472
     ('POST', f'/api/v1/processes/{VALID_JOB_ID}/link-chat', {'chat_id': 'some-chat'}),    # PC 493
     ('POST', f'/api/v1/processes/{VALID_JOB_ID}/trigger', None),                          # PC 533
+    # Adoption works in OSS via host-side Hermes + myah-admin dashboard plugin:
+    # metadata is patched through the dashboard and history is backfilled via
+    # the plugin cron-output endpoint instead of docker exec.
+    ('POST', f'/api/v1/processes/{VALID_JOB_ID}/adopt', {'backfill_limit': 0}),                    # PC adopt
 ]
 
 
@@ -50,10 +54,6 @@ CO_ROUTES: list[tuple[str, str, dict | None]] = [
     ('POST', f'/api/v1/processes/{VALID_JOB_ID}/ui-action',
      {'action_type': 'submit', 'action': 'go', 'payload': {}}),                                    # CO 792
     ('POST', f'/api/v1/processes/{VALID_JOB_ID}/sync-chat', None),                                 # CO 1394
-    # Adoption reads run-output files from the per-user agent container
-    # (backfill), so it is container-only and 501s in OSS like /sync-chat.
-    # OSS adoption against a host Hermes is a deliberate follow-up.
-    ('POST', f'/api/v1/processes/{VALID_JOB_ID}/adopt', {'backfill_limit': 0}),                    # CO adopt
 ]
 
 
@@ -127,6 +127,7 @@ def test_pc_route_returns_non_501_in_oss(
          patch.object(processes_module, '_hermes_patch', return_value={'ok': True, 'job': {}}), \
          patch.object(processes_module, '_hermes_delete', return_value={'ok': True}), \
          patch.object(processes_module, '_ensure_container', return_value=8642), \
+         patch.object(processes_module, '_patch_job_myah_metadata', return_value={'ok': True, 'job': {}}), \
          patch('myah.models.containers.Containers.get_by_user_id', return_value=fake_container), \
          patch('myah.models.chats.Chats.get_chat_by_id_and_user_id',
                return_value=type('FakeChat', (), {'title': 'test-chat'})()):
