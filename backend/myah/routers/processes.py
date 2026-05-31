@@ -257,6 +257,11 @@ MYAH_METADATA_ENDPOINT_UNAVAILABLE = (
     'endpoint is unavailable. Upgrade myah-hermes-plugin to a build that exposes '
     'POST /api/plugins/myah-admin/cron/jobs/{job_id}/myah-metadata.'
 )
+MYAH_CRON_OUTPUTS_ENDPOINT_UNAVAILABLE = (
+    'Cannot read Myah cron output history: the myah-admin dashboard cron output '
+    'history endpoint is unavailable. Upgrade myah-hermes-plugin to a build that '
+    'exposes GET /api/plugins/myah-admin/cron/jobs/{job_id}/outputs.'
+)
 
 
 def _validate_hermes_job_id(job_id: str) -> None:
@@ -948,10 +953,9 @@ async def adopt_process(
 
     Native ``origin`` / ``deliver`` are preserved by default — adoption never
     reroutes existing external delivery (Telegram, Discord, local files, …).
-    This is container-only (it reads run-output files from the user's agent
-    container), so it 501s in OSS mode like the other container-only routes.
+    In OSS mode, historical output is read through the host-side Hermes
+    dashboard plugin because there is no per-user agent container to exec into.
     """
-    _raise_if_oss_mode()
     _validate_hermes_job_id(job_id)
     form_data = form_data or ProcessAdoptForm()
 
@@ -993,13 +997,11 @@ async def adopt_process(
     skipped_existing = 0
     truncated = False
     if backfill_limit > 0:
-        container = await asyncio.to_thread(Containers.get_by_user_id, user.id)
-        if container and getattr(container, 'container_name', None):
-            runs = await _fetch_run_outputs(container.container_name, job_id, limit=backfill_limit)
-            backfilled, skipped_existing = _backfill_runs_to_chat(chat_id, job_id, job_name, runs)
-            # Conservative truncation signal: we fetched up to the limit and
-            # filled it, so older history may exist beyond what we backfilled.
-            truncated = len(runs) >= backfill_limit
+        runs = await _fetch_run_outputs_for_user(user, job_id, limit=backfill_limit)
+        backfilled, skipped_existing = _backfill_runs_to_chat(chat_id, job_id, job_name, runs)
+        # Conservative truncation signal: we fetched up to the limit and
+        # filled it, so older history may exist beyond what we backfilled.
+        truncated = len(runs) >= backfill_limit
 
     await _patch_job_myah_metadata(user, job_id, metadata)
 
@@ -1115,6 +1117,49 @@ async def _fetch_run_outputs(
             logger.debug(f'Skipping malformed run file: {exc}')
 
     return runs
+
+
+async def _fetch_run_outputs_for_user(
+    user: UserModel,
+    job_id: str,
+    limit: int = 50,
+) -> list[dict]:
+    """Fetch parsed cron run outputs for hosted containers or OSS host Hermes."""
+    if limit <= 0:
+        return []
+    _validate_hermes_job_id(job_id)
+
+    from myah.utils.hermes_web import is_oss_mode, web_call
+
+    if is_oss_mode():
+        result = await web_call(
+            user,
+            'GET',
+            f'/api/plugins/myah-admin/cron/jobs/{job_id}/outputs',
+            params={'limit': limit},
+            timeout=10.0,
+        )
+        status = result.get('status') if isinstance(result, dict) else None
+        if status == 404:
+            raise HTTPException(status_code=501, detail=MYAH_CRON_OUTPUTS_ENDPOINT_UNAVAILABLE)
+        if status is None or status >= 400:
+            detail = result.get('body') if isinstance(result, dict) else None
+            if isinstance(detail, str):
+                detail = detail[:200]
+            raise HTTPException(status_code=status or 502, detail=detail or 'Failed to read cron output history')
+        body = result.get('body') if isinstance(result, dict) else None
+        if not isinstance(body, dict):
+            raise HTTPException(status_code=502, detail='Invalid cron output history response')
+        runs = body.get('runs', [])
+        if not isinstance(runs, list):
+            raise HTTPException(status_code=502, detail='Invalid cron output history response')
+        return runs
+
+    container = await asyncio.to_thread(Containers.get_by_user_id, user.id)
+    container_name = getattr(container, 'container_name', None) if container else None
+    if not container_name:
+        raise HTTPException(status_code=404, detail='No agent container found')
+    return await _fetch_run_outputs(container_name, job_id, limit=limit)
 
 
 @router.get('/{job_id}/runs')
