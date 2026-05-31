@@ -359,9 +359,10 @@
 
 	const chatEventHandler = async (event, cb) => {
 		if (event.chat_id === $chatId) {
-			if (applyDurableFinalMessageEvent(event, $chatId, { history })) {
+			if (applyDurableFinalMessageEvent(event, $chatId, { history }, { clearInflightSnapshot })) {
 				await tick();
 				await saveChatHandler($chatId, history);
+				return;
 			}
 
 			await tick();

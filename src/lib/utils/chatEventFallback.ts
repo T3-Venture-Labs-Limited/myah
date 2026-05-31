@@ -14,10 +14,15 @@ export type ChatLike = {
 	};
 };
 
+type DurableFinalMessageOptions = {
+	clearInflightSnapshot?: (chatId: string) => void;
+};
+
 export const applyDurableFinalMessageEvent = (
 	event: ChatEventPayload,
 	chatId: string | null | undefined,
-	chat: ChatLike | null | undefined
+	chat: ChatLike | null | undefined,
+	options: DurableFinalMessageOptions = {}
 ): boolean => {
 	if (!event || event.chat_id !== chatId) {
 		return false;
@@ -28,12 +33,15 @@ export const applyDurableFinalMessageEvent = (
 	}
 
 	const data = event.data.data ?? {};
-	if (!data.done || typeof data.content !== 'string') {
-		return false;
-	}
-
 	const messageId = String(event.message_id ?? '');
-	if (!messageId) {
+	const eventChatId = event.chat_id;
+	const isDurableFinalFallback =
+		data.done === true &&
+		typeof data.content === 'string' &&
+		!!messageId &&
+		String(data.message_id ?? '') === messageId &&
+		data.chat_id === eventChatId;
+	if (!isDurableFinalFallback) {
 		return false;
 	}
 
@@ -47,6 +55,14 @@ export const applyDurableFinalMessageEvent = (
 	message.done = true;
 	if (data.error) {
 		message.error = data.error;
+	}
+	if (Array.isArray(data.output)) {
+		message.output = data.output;
+	} else if ('output' in message) {
+		delete message.output;
+	}
+	if (eventChatId && !eventChatId.startsWith('local:')) {
+		options.clearInflightSnapshot?.(eventChatId);
 	}
 	messages[messageId] = message;
 	return true;
