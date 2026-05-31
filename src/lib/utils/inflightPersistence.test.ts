@@ -128,4 +128,12 @@ describe('inflightPersistence', () => {
 		expect(loadInflightSnapshot(staleChat)).toBeNull();
 		expect(loadInflightSnapshot(freshChat)).not.toBeNull();
 	});
+
+	it('pruneStaleSnapshots removes malformed entries', () => {
+		stub.setItem(`${KEY_PREFIX}chat-broken`, 'not-json');
+
+		pruneStaleSnapshots();
+
+		expect(stub.getItem(`${KEY_PREFIX}chat-broken`)).toBeNull();
+	});
 });

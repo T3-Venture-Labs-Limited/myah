@@ -314,6 +314,67 @@ describe('applyDurableFinalMessageEvent', () => {
 		expect(chat.history.messages['msg-1'].output).toBe(staleOutput);
 	});
 
+	it('returns false when durable final event targets a missing local message', () => {
+		const chat = {
+			history: {
+				messages: {}
+			}
+		};
+
+		const applied = applyDurableFinalMessageEvent(
+			{
+				chat_id: 'chat-1',
+				message_id: 'missing-msg',
+				data: {
+					type: 'chat:completion',
+					data: {
+						content: 'final answer',
+						done: true,
+						message_id: 'missing-msg',
+						chat_id: 'chat-1'
+					}
+				}
+			},
+			'chat-1',
+			chat
+		);
+
+		expect(applied).toBe(false);
+		expect(chat.history.messages).toEqual({});
+	});
+
+	it('copies durable final error payloads onto the reconciled message', () => {
+		const chat = {
+			history: {
+				messages: {
+					'msg-1': { id: 'msg-1', role: 'assistant', content: '', done: false }
+				}
+			}
+		};
+
+		const applied = applyDurableFinalMessageEvent(
+			{
+				chat_id: 'chat-1',
+				message_id: 'msg-1',
+				data: {
+					type: 'chat:completion',
+					data: {
+						content: 'final answer',
+						done: true,
+						message_id: 'msg-1',
+						chat_id: 'chat-1',
+						error: { content: 'fallback warning' }
+					}
+				}
+			},
+			'chat-1',
+			chat
+		);
+
+		expect(applied).toBe(true);
+		expect(chat.history.messages['msg-1'].error).toEqual({ content: 'fallback warning' });
+	});
+
 	it('clears inflight snapshot once for applied durable final fallback events', () => {
 		const clearInflightSnapshot = vi.fn();
 		const chat = {
