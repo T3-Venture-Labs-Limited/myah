@@ -15,7 +15,7 @@ from pydantic import BaseModel
 
 from shared.contract.enums import ApprovalOption, AuxTask, HermesPlatform, OAuthStatus
 from shared.contract.events import HermesEvent
-from shared.contract.output_items import ArtifactCardItem, OutputItem
+from shared.contract.output_items import ArtifactCardItem, OutputItem, TodoPlanItem
 
 
 class ContractRoot(BaseModel):
@@ -51,3 +51,7 @@ class ContractRoot(BaseModel):
     # explicit field reference the codegen sometimes omits constituents
     # whose names don't already match an existing TS export.
     artifact_card: 'ArtifactCardItem | None' = None
+    # Explicit field for the pinned todo strip item for the same reason as
+    # artifact_card: keep the generated TS interface stable even if the union
+    # constituent is otherwise elided by codegen.
+    todo_plan: 'TodoPlanItem | None' = None

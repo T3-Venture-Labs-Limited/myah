@@ -11,7 +11,8 @@ import type {
 	CodeInterpreterItem,
 	ConfirmationItem,
 	SecretInputItem,
-	ArtifactCardItem
+	ArtifactCardItem,
+	TodoPlanItem
 } from './types';
 
 export type NonMessageItem = FunctionCallItem | ReasoningItem | CodeInterpreterItem;
@@ -48,6 +49,12 @@ function hasVisibleReasoningContent(item: ReasoningItem): boolean {
 export function groupChronologically(output: OutputItem[]): RenderGroup[] {
 	const groups: RenderGroup[] = [];
 	let currentChain: NonMessageItem[] | null = null;
+	const todoPlanCallIds = new Set(
+		output
+			.filter((item): item is TodoPlanItem => item.type === 'todo_plan')
+			.map((item) => item.call_id)
+			.filter(Boolean)
+	);
 
 	function flushChain() {
 		if (currentChain && currentChain.length > 0) {
@@ -59,6 +66,13 @@ export function groupChronologically(output: OutputItem[]): RenderGroup[] {
 	for (const item of output) {
 		// Skip items that are rendered inline by their parent
 		if (item.type === 'function_call_output') continue;
+		// Skip todo_plan; the pinned strip consumes it outside transcript groups.
+		if (item.type === 'todo_plan') continue;
+		// Defensively hide generic todo rows when a first-class plan for the same
+		// call exists. Backend normally removes these after successful parsing.
+		if (item.type === 'function_call' && item.name === 'todo' && todoPlanCallIds.has(item.call_id)) {
+			continue;
+		}
 		// Skip phantom function_call items (no call_id)
 		if (item.type === 'function_call' && !item.call_id) continue;
 		// Skip empty reasoning items (defensive guard against de-dup leftovers

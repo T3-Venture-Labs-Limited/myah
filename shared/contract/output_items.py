@@ -281,6 +281,37 @@ class SecretInputItem(_BaseOutputItem):
     status: Literal['pending', 'stored', 'timeout']
 
 
+class TodoPlanEntry(BaseModel):
+    """One item from Hermes' ``todo`` tool result.
+
+    Nested entries deliberately are not output items and therefore do not
+    carry a ``type`` discriminator. They mirror the stable Hermes todo shape:
+    ``{id, content, status}``.
+    """
+
+    id: str
+    content: str
+    status: Literal['pending', 'in_progress', 'completed', 'cancelled']
+
+
+class TodoPlanItem(_BaseOutputItem):
+    """Pinned plan/checklist state derived from Hermes ``todo`` tool output.
+
+    Wire source: ``hermes_stream_handler.py`` successful ``tool.completed``
+    branch for ``tool == 'todo'``. The handler parses the tool result JSON and
+    upserts a single latest plan item so the frontend can render a first-class
+    pinned strip instead of a generic function-call row.
+    """
+
+    type: Literal['todo_plan']
+    id: str
+    call_id: str
+    title: str = 'Plan'
+    todos: list[TodoPlanEntry]
+    status: Literal['in_progress', 'completed']
+    updated_at: float | None = None
+
+
 class ArtifactCardItem(_BaseOutputItem):
     """Inline artifact preview card attached to an assistant message.
 
@@ -338,6 +369,7 @@ OutputItem = Annotated[
         CodeInterpreterItem,
         ConfirmationItem,
         SecretInputItem,
+        TodoPlanItem,
         ArtifactCardItem,
     ],
     Field(discriminator='type'),
@@ -358,4 +390,6 @@ __all__ = [
     'ReasoningItem',
     'SecretInputItem',
     'SummaryTextPart',
+    'TodoPlanEntry',
+    'TodoPlanItem',
 ]

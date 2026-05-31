@@ -169,8 +169,10 @@ export interface ContractRoot {
     | CodeInterpreterItem
     | ConfirmationItem
     | SecretInputItem
+    | TodoPlanItem
     | ArtifactCardItem;
   artifact_card?: ArtifactCardItem | null;
+  todo_plan?: TodoPlanItem | null;
 }
 /**
  * A streamed delta of visible assistant text.
@@ -632,5 +634,36 @@ export interface SecretInputItem {
   help: string;
   skill_name: string;
   status: "pending" | "stored" | "timeout";
+  [k: string]: unknown;
+}
+/**
+ * Pinned plan/checklist state derived from Hermes ``todo`` tool output.
+ *
+ * Wire source: ``hermes_stream_handler.py`` successful ``tool.completed``
+ * branch for ``tool == 'todo'``. The handler parses the tool result JSON and
+ * upserts a single latest plan item so the frontend can render a first-class
+ * pinned strip instead of a generic function-call row.
+ */
+export interface TodoPlanItem {
+  type: "todo_plan";
+  id: string;
+  call_id: string;
+  title?: string;
+  todos: TodoPlanEntry[];
+  status: "in_progress" | "completed";
+  updated_at?: number | null;
+  [k: string]: unknown;
+}
+/**
+ * One item from Hermes' ``todo`` tool result.
+ *
+ * Nested entries deliberately are not output items and therefore do not
+ * carry a ``type`` discriminator. They mirror the stable Hermes todo shape:
+ * ``{id, content, status}``.
+ */
+export interface TodoPlanEntry {
+  id: string;
+  content: string;
+  status: "pending" | "in_progress" | "completed" | "cancelled";
   [k: string]: unknown;
 }

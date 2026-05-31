@@ -39,6 +39,8 @@ from shared.contract.output_items import (
     OutputItem,
     ReasoningItem,
     SecretInputItem,
+    TodoPlanEntry,
+    TodoPlanItem,
 )
 from shared.contract.routes import (
     HermesJob,
@@ -89,6 +91,8 @@ __all__ = [
     'SecretRequiredEvent',
     'SecretResolvedEvent',
     'StatusEvent',
+    'TodoPlanEntry',
+    'TodoPlanItem',
     'ToolCompletedEvent',
     'ToolConfirmationRequiredEvent',
     'ToolStartedEvent',

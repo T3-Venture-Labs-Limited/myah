@@ -45,6 +45,14 @@ export const applyDurableFinalMessageEvent = (
 		return false;
 	}
 
+	// Only the durable final-message endpoint emits matching inner markers.
+	// Ordinary streaming completion events can also carry done/content, but
+	// handling those here would race the normal chat completion handler and can
+	// strip legitimate structured output.
+	if (data.chat_id !== event.chat_id || data.message_id !== messageId) {
+		return false;
+	}
+
 	const messages = chat?.history?.messages;
 	const message = messages?.[messageId];
 	if (!message) {
@@ -53,13 +61,13 @@ export const applyDurableFinalMessageEvent = (
 
 	message.content = data.content;
 	message.done = true;
-	if (data.error) {
-		message.error = data.error;
-	}
 	if (Array.isArray(data.output)) {
 		message.output = data.output;
-	} else if ('output' in message) {
+	} else {
 		delete message.output;
+	}
+	if (data.error) {
+		message.error = data.error;
 	}
 	if (eventChatId && !eventChatId.startsWith('local:')) {
 		options.clearInflightSnapshot?.(eventChatId);
