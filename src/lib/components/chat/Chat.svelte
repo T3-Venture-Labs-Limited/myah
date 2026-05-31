@@ -114,6 +114,7 @@
 	} from '$lib/utils/inflightPersistence';
 	import { reconnectBanner } from '$lib/stores';
 	import { applyDurableFinalMessageEvent } from '$lib/utils/chatEventFallback';
+	import { resumeChatAfterCriticalLoad } from '$lib/utils/chatNavigationResume';
 	import type { InflightSnapshot } from '$lib/types';
 	import ReconnectBanner from './ReconnectBanner.svelte';
 	import TodoPlanStrip from './TodoPlanStrip.svelte';
@@ -203,43 +204,56 @@
 			`chat-input${chatIdProp ? `-${chatIdProp}` : ''}`
 		);
 
-		if (chatIdProp && (await loadChat())) {
-			await tick();
-			loading = false;
-			window.setTimeout(() => scrollToBottom(), 0);
+		if (chatIdProp) {
+			const loaded = await resumeChatAfterCriticalLoad({
+				chatId: chatIdProp,
+				loadCriticalChat: loadChat,
+				setLoading: (value) => {
+					loading = value;
+				},
+				afterCriticalRender: async () => {
+					await tick();
+					window.setTimeout(() => scrollToBottom(), 0);
+					await tick();
+				},
+				resumeInflight: tryResumeInflight,
+				loadDeferredMetadata: loadChatMetadata
+			});
 
-			await tick();
+			if (loaded) {
+				// Process any queued requests if the chat is idle
+				const lastMessage = history.currentId
+					? (history.messages as Record<string, any>)[history.currentId]
+					: null;
+				const isIdle = !lastMessage || lastMessage.role !== 'assistant' || lastMessage.done;
+				if (isIdle) {
+					await processNextInQueue(chatIdProp);
+				}
 
-			// Attempt to resume any in-flight run from before the page load.
-			// Only for persisted chats — local/temporary chats have no server state.
-			if (chatIdProp && !chatIdProp.startsWith('local:')) {
-				tryResumeInflight(chatIdProp);
-			}
+				if (storageChatInput) {
+					try {
+						const input = JSON.parse(storageChatInput);
 
-			// Process any queued requests if the chat is idle
-			const lastMessage = history.currentId ? history.messages[history.currentId] : null;
-			const isIdle = !lastMessage || lastMessage.role !== 'assistant' || lastMessage.done;
-			if (isIdle) {
-				await processNextInQueue(chatIdProp);
-			}
+						if (!$temporaryChatEnabled) {
+							messageInput?.setText(input.prompt);
+							files = input.files;
+							selectedToolIds = input.selectedToolIds;
+							webSearchEnabled = input.webSearchEnabled;
+						}
+					} catch (e) {}
+				} else {
+					await setDefaults();
+				}
 
-			if (storageChatInput) {
-				try {
-					const input = JSON.parse(storageChatInput);
-
-					if (!$temporaryChatEnabled) {
-						messageInput?.setText(input.prompt);
-						files = input.files;
-						selectedToolIds = input.selectedToolIds;
-						webSearchEnabled = input.webSearchEnabled;
-					}
-				} catch (e) {}
+				const chatInput = document.getElementById('chat-input');
+				chatInput?.focus();
+			} else if (!embedded) {
+				await goto('/');
 			} else {
-				await setDefaults();
+				// Embedded mode with no chat found — clear loading state so the
+				// panel doesn't show an infinite spinner.
+				loading = false;
 			}
-
-			const chatInput = document.getElementById('chat-input');
-			chatInput?.focus();
 		} else if (!embedded) {
 			await goto('/');
 		} else {
@@ -1082,6 +1096,25 @@
 		setTimeout(() => chatInput?.focus(), 0);
 	};
 
+	const loadChatMetadata = async () => {
+		const currentChatId = $chatId;
+
+		const loadedTags = await getTagsById(localStorage.token, currentChatId).catch(async (error) => {
+			return [];
+		});
+		if (currentChatId === $chatId) {
+			tags = loadedTags;
+		}
+
+		const taskRes = await getTaskIdsByChatId(localStorage.token, currentChatId).catch((error) => {
+			return null;
+		});
+
+		if (taskRes && currentChatId === $chatId) {
+			taskIds = taskRes.task_ids;
+		}
+	};
+
 	const loadChat = async () => {
 		chatId.set(chatIdProp);
 
@@ -1099,10 +1132,6 @@
 		});
 
 		if (chat) {
-			tags = await getTagsById(localStorage.token, $chatId).catch(async (error) => {
-				return [];
-			});
-
 			const chatContent = chat.chat;
 
 			if (chatContent) {
@@ -1133,14 +1162,6 @@
 							message.done = true;
 						}
 					}
-				}
-
-				const taskRes = await getTaskIdsByChatId(localStorage.token, $chatId).catch((error) => {
-					return null;
-				});
-
-				if (taskRes) {
-					taskIds = taskRes.task_ids;
 				}
 
 				await tick();
