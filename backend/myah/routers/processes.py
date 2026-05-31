@@ -775,8 +775,50 @@ async def create_process(
         body.setdefault('deliver', 'origin')
 
     raw = await _hermes_post(_jobs_url(host_port), body=body)
-    # Hermes returns {"job": {...}} on create — unwrap
-    return raw.get('job', raw) if isinstance(raw, dict) else raw
+    # Hermes returns {"job": {...}} on create — unwrap.
+    job = raw.get('job', raw) if isinstance(raw, dict) else raw
+
+    # Hosted/native Myah cron fix (T3-1097 follow-up): upstream Hermes' native
+    # ``POST /api/jobs`` accepts only its explicit create kwargs and currently
+    # does not pass arbitrary platform metadata through. Even though we send a
+    # Myah ``origin`` above, older/pinned agents can return and persist a job
+    # with neither ``origin`` nor ``myah`` metadata. That makes a freshly-created
+    # hosted Myah cron indistinguishable from a legacy unowned cron, so the task
+    # detail route shows the "Adopt into Myah" card. Persist the durable Myah
+    # routing namespace immediately after create using the plugin-owned metadata
+    # endpoint (the same primitive adoption/link-chat use). This keeps hosted
+    # native jobs linked while preserving the explicit adoption path for real
+    # OSS/legacy/external crons.
+    if chat_id and isinstance(job, dict) and job.get('id'):
+        job_id = str(job['id'])
+        adopted_at = dt.datetime.now(dt.UTC).isoformat()
+        metadata = _build_myah_adoption_metadata(job, chat_id, adopted_at)
+        try:
+            patched = await _patch_job_myah_metadata(user, job_id, metadata)
+        except HTTPException:
+            # Avoid leaving a newly-created hosted Myah cron orphaned/adoptable
+            # if the durable metadata write fails. Retrying the UI action should
+            # not create duplicates. Best-effort cleanup; preserve the original
+            # metadata error if cleanup also fails.
+            try:
+                await _hermes_delete(_jobs_url(host_port, f'/{job_id}'))
+            except Exception as cleanup_exc:  # noqa: BLE001
+                logger.warning(
+                    f'Failed to cleanup cron job {job_id} after Myah metadata patch failure: {cleanup_exc}'
+                )
+            raise
+        patched_job = patched.get('job') if isinstance(patched, dict) else None
+        if isinstance(patched_job, dict):
+            job = patched_job
+        else:
+            # Some plugin/proxy versions return only {ok: true}. Keep the
+            # response contract correct for the UI without pretending to mutate
+            # native origin/deliver locally.
+            job = {**job, **metadata}
+
+    if isinstance(job, dict):
+        _normalize_process_for_myah(job, user)
+    return job
 
 
 @router.get('/{job_id}')

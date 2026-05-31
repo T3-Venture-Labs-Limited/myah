@@ -55,10 +55,18 @@ async def test_create_process_with_chat_id_forwards_origin():
     async def fake_ensure_container(_user):
         return 9999
 
+    patched_metadata = {}
+
+    async def fake_patch_metadata(_user, job_id, metadata):
+        patched_metadata['job_id'] = job_id
+        patched_metadata['metadata'] = metadata
+        return {'ok': True, 'job': {'id': job_id, **captured_body, **metadata}}
+
     with patch('myah.routers.processes._hermes_post', side_effect=fake_hermes_post), \
+         patch('myah.routers.processes._patch_job_myah_metadata', side_effect=fake_patch_metadata), \
          patch('myah.routers.processes._ensure_container', side_effect=fake_ensure_container), \
          _make_chat_lookup(chat_obj=chat_obj):
-        await create_process(form, user)
+        result = await create_process(form, user)
 
     assert captured_body.get('origin') is not None, (
         f"expected origin in forwarded body, got: {captured_body!r}"
@@ -78,6 +86,61 @@ async def test_create_process_with_chat_id_forwards_origin():
     # chat_id MUST NOT leak as a top-level field — the agent doesn't know
     # about it, only origin.chat_id.
     assert 'chat_id' not in captured_body
+
+    # Hosted Myah cron creations must also persist durable Myah routing
+    # metadata. The pinned upstream Hermes API may accept origin for delivery
+    # but still return/list a job without Myah-owned metadata, which makes the
+    # normalizer classify a freshly-created hosted cron as legacy/adoptable.
+    assert patched_metadata['job_id'] == 'job1'
+    assert patched_metadata['metadata']['myah']['chat_id'] == 'chat-uuid-1'
+    assert patched_metadata['metadata']['myah']['chat_name'] == 'Process: hourly-summary'
+    assert result['myah']['chat_id'] == 'chat-uuid-1'
+    assert result['chat_id'] == 'chat-uuid-1'
+    assert result['adoption_state'] == 'myah_linked'
+    assert result['adoptable'] is False
+
+
+@pytest.mark.asyncio
+async def test_create_process_with_chat_id_cleans_up_if_metadata_patch_fails():
+    """If post-create durable Myah metadata persistence fails, delete the
+    just-created cron so retrying does not create duplicates/orphaned adoptable
+    jobs."""
+    from fastapi import HTTPException
+    from myah.routers.processes import create_process, ProcessCreateForm
+
+    user = MagicMock(id='user-1')
+    chat_obj = MagicMock(title='My Cron Chat')
+    form = ProcessCreateForm(
+        name='hourly-summary',
+        schedule='*/60 * * * *',
+        prompt='summarize my recent emails',
+        chat_id='chat-uuid-1',
+    )
+    deleted_urls = []
+
+    async def fake_hermes_post(_url, body=None):
+        return {'job': {'id': 'abc123def456', **(body or {})}}
+
+    async def fake_patch_metadata(_user, job_id, metadata):
+        raise HTTPException(status_code=503, detail='metadata endpoint unavailable')
+
+    async def fake_delete(url):
+        deleted_urls.append(url)
+        return {'ok': True}
+
+    async def fake_ensure_container(_user):
+        return 9999
+
+    with patch('myah.routers.processes._hermes_post', side_effect=fake_hermes_post), \
+         patch('myah.routers.processes._patch_job_myah_metadata', side_effect=fake_patch_metadata), \
+         patch('myah.routers.processes._hermes_delete', side_effect=fake_delete), \
+         patch('myah.routers.processes._ensure_container', side_effect=fake_ensure_container), \
+         _make_chat_lookup(chat_obj=chat_obj):
+        with pytest.raises(HTTPException) as exc:
+            await create_process(form, user)
+
+    assert exc.value.status_code == 503
+    assert deleted_urls == ['http://localhost:9999/api/jobs/abc123def456']
 
 
 @pytest.mark.asyncio
