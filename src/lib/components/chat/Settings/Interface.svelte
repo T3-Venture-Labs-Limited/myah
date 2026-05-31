@@ -68,6 +68,7 @@
 	let renderMarkdownInPreviews = true;
 	let showChatTitleInTab = true;
 	let titleAuto = true;
+	let autoFollowUps = true;
 
 	let showFloatingActionButtons = true;
 	let floatingActionButtons = null;
@@ -220,6 +221,7 @@
 		userLocation = $settings?.userLocation ?? false;
 		showChatTitleInTab = $settings?.showChatTitleInTab ?? true;
 		titleAuto = $settings?.title?.auto ?? true;
+		autoFollowUps = $settings?.autoFollowUps ?? true;
 
 		notificationSound = $settings?.notificationSound ?? true;
 		notificationSoundAlways = $settings?.notificationSoundAlways ?? false;
@@ -438,6 +440,25 @@
 							bind:state={titleAuto}
 							on:change={() => {
 								saveSettings({ title: { ...($settings?.title ?? {}), auto: titleAuto } });
+							}}
+						/>
+					</div>
+				</div>
+			</div>
+
+			<div>
+				<div class=" py-0.5 flex w-full justify-between">
+					<div id="follow-up-generation-label" class=" self-center text-xs">
+						{$i18n.t('Follow-up Question Auto-Generation')}
+					</div>
+
+					<div class="flex items-center gap-2 p-1">
+						<Switch
+							ariaLabelledbyId="follow-up-generation-label"
+							tooltip={true}
+							bind:state={autoFollowUps}
+							on:change={() => {
+								saveSettings({ autoFollowUps });
 							}}
 						/>
 					</div>
