@@ -58,4 +58,27 @@ describe('Settings Interface panel', () => {
 			expect(saveSettings).toHaveBeenCalledWith({ title: { auto: false } });
 		});
 	});
+
+	it('exposes a follow-up question generation toggle in Settings > Interface', async () => {
+		renderInterface();
+
+		expect(await screen.findByText('Follow-up Question Auto-Generation')).toBeInTheDocument();
+	});
+
+	it('persists autoFollowUps when the follow-up question generation toggle changes', async () => {
+		const saveSettings = vi.fn();
+		renderInterface(saveSettings);
+
+		await screen.findByText('Follow-up Question Auto-Generation');
+		const label = document.getElementById('follow-up-generation-label');
+		expect(label).not.toBeNull();
+		const toggle = document.querySelector('[aria-labelledby="follow-up-generation-label"]');
+		expect(toggle).not.toBeNull();
+
+		await fireEvent.click(toggle as Element);
+
+		await waitFor(() => {
+			expect(saveSettings).toHaveBeenCalledWith({ autoFollowUps: false });
+		});
+	});
 });
