@@ -5,11 +5,28 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 
+class _ChunkTooBigStream:
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        raise ValueError('Chunk too big')
+
+    def iter_chunks(self):
+        async def _iter():
+            yield b'data: {"event":"message.delta","delta":"hello"}\n\n', True
+            yield b'data: {"event":"run.completed"}\n\n', True
+
+        return _iter()
+
+
 class _FakeAiohttpResponse:
     def __init__(self, *, status=200, json_data=None, text_data=''):
         self.status = status
         self._json_data = json_data or {}
         self._text_data = text_data
+        self.content = _ChunkTooBigStream()
+        self.closed = False
 
     async def __aenter__(self):
         return self
@@ -22,6 +39,9 @@ class _FakeAiohttpResponse:
 
     async def text(self):
         return self._text_data
+
+    def close(self):
+        self.closed = True
 
 
 class _FakeMyahClientSession:
@@ -49,6 +69,13 @@ class _FakeMyahClientSession:
 
     async def close(self):
         self.closed = True
+
+
+async def _collect_streaming_response(response):
+    chunks = []
+    async for chunk in response.body_iterator:
+        chunks.append(chunk)
+    return b''.join(chunks)
 
 
 def _fake_openai_request():
@@ -374,6 +401,51 @@ async def test_myah_dispatch_payload_preserves_session_chat_user_and_model_metad
     assert myah_payload['model'] == 'claude-opus-4'
     assert myah_payload['provider'] == 'anthropic-claude-code'
     assert emitted_events, 'container/status emitter should remain wired during dispatch'
+
+
+@pytest.mark.asyncio
+async def test_myah_events_stream_uses_safe_chunk_handler_for_oversized_sse_lines():
+    """Hermes can emit very large single-line SSE tool events.
+
+    aiohttp's default StreamReader line iterator raises ``ValueError('Chunk too big')``
+    for those events. The Myah Hermes path must use ``stream_chunks_handler``
+    before ``hermes_stream_handler`` sees the upstream bytes, matching the safe
+    generic OpenAI stream path.
+    """
+    import myah.routers.openai as openai_router
+
+    user = _fake_user(id='user-large-sse')
+    session = _FakeMyahClientSession(
+        start_response=_FakeAiohttpResponse(status=202, json_data={'stream_id': 'stream-large-sse'})
+    )
+
+    async def fake_container(_user_id, *, event_emitter=None):
+        return SimpleNamespace(host_port=18080, gateway_port=18081)
+
+    with (
+        patch('myah.routers.openai.get_or_create_container', side_effect=fake_container),
+        patch('myah.routers.openai.aiohttp.ClientSession', return_value=session),
+        patch('myah.routers.openai._build_myah_attachments', return_value=[]),
+        patch('myah.routers.openai.Chats.set_hermes_session_id'),
+        patch('myah.socket.main.get_event_emitter', return_value=None),
+        patch('myah.utils.ui_state.prepend_user_ref_block', side_effect=lambda text, ui_state: text),
+    ):
+        response = await openai_router.generate_chat_completion(
+            _fake_openai_request(),
+            {
+                'messages': [{'role': 'user', 'content': 'analyze this image'}],
+                'metadata': {'chat_id': 'chat-large-sse', 'message_id': 'msg-large-sse'},
+            },
+            user=user,
+        )
+        body = await _collect_streaming_response(response)
+
+    assert b'Chunk too big' not in body
+    assert b'Internal Server Error' not in body
+    assert b'message.delta' in body
+    assert b'run.completed' in body
+    assert session.closed is True
+    assert session.events_response.closed is True
 
 
 @pytest.mark.asyncio

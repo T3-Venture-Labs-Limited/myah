@@ -1730,7 +1730,11 @@ async def generate_chat_completion(
                 # closes _events_resp + _myah_session via cleanup_response;
                 # this wrapper layers the socket emit on top.
                 try:
-                    async for _chunk in stream_wrapper(_events_resp, _myah_session):
+                    async for _chunk in stream_wrapper(
+                        _events_resp,
+                        _myah_session,
+                        stream_chunks_handler,
+                    ):
                         yield _chunk
                 finally:
                     if _lifecycle_emitter:
