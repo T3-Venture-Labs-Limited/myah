@@ -20,12 +20,41 @@ from types import SimpleNamespace
 
 from fastapi import APIRouter, HTTPException, Request
 from loguru import logger
-from myah.models.users import Users
 from myah.models.chats import Chats
-from myah.utils.chat_tasks import background_tasks_handler
+from myah.models.users import Users
 from pydantic import BaseModel
 
 router = APIRouter()
+
+
+async def background_tasks_handler(ctx):
+    """Lazy proxy for ``myah.utils.chat_tasks.background_tasks_handler``.
+
+    ``chat_tasks`` transitively imports ``myah.socket.main`` -> ``myah.config``,
+    which queries the ``config`` table at import time. Importing the real
+    handler at module scope therefore initialized socket/config DB state just
+    by importing this router — breaking test collection with
+    ``sqlite3.OperationalError: no such table: config``. Resolving it here, at
+    call time, keeps router import side-effect free while preserving the
+    ``myah.routers.myah.background_tasks_handler`` seam that callers (and tests)
+    patch.
+    """
+    from myah.utils.chat_tasks import background_tasks_handler as _handler
+
+    return await _handler(ctx)
+
+
+async def _emit_socket_event(room: str, envelope: dict) -> None:
+    """Emit an ``events`` socket.io message to ``room``.
+
+    ``myah.socket.main`` imports ``myah.config``, which queries the DB at
+    import time. Importing it here, at call time, keeps router import
+    side-effect free. Tests patch this seam rather than the global
+    ``myah.socket.main.sio`` so they don't pull the config chain in either.
+    """
+    from myah.socket.main import sio
+
+    await sio.emit('events', envelope, room=room)
 
 
 
@@ -288,16 +317,13 @@ async def persist_final_message(request: Request, payload: FinalMessageRequest):
         raise HTTPException(status_code=404, detail='Chat not found')
 
     async def _emit_final_event(event):
-        from myah.socket.main import sio
-
-        await sio.emit(
-            'events',
+        await _emit_socket_event(
+            f'user:{payload.user_id}',
             {
                 'chat_id': payload.chat_id,
                 'message_id': message_id,
                 'data': event,
             },
-            room=f'user:{payload.user_id}',
         )
 
     try:
@@ -332,6 +358,23 @@ async def persist_final_message(request: Request, payload: FinalMessageRequest):
         if exc:
             logger.debug(f'/messages/final: background tasks failed: {exc}')
 
+    title_generation_enabled = True
+    follow_up_generation_enabled = True
+    try:
+        user_row = Users.get_user_by_id(payload.user_id)
+        user_settings = getattr(user_row, 'settings', None) or {}
+        if not isinstance(user_settings, dict) and hasattr(user_settings, 'model_dump'):
+            user_settings = user_settings.model_dump()
+        if not isinstance(user_settings, dict):
+            user_settings = {}
+        title_settings = user_settings.get('title') or {}
+        if not isinstance(title_settings, dict):
+            title_settings = {}
+        title_generation_enabled = title_settings.get('auto', True)
+        follow_up_generation_enabled = user_settings.get('autoFollowUps', True)
+    except Exception as exc:  # pragma: no cover - background enrichment remains best-effort
+        logger.debug(f'/messages/final: failed to read generation settings: {exc}')
+
     try:
         bg_ctx = {
             'request': request,
@@ -349,8 +392,8 @@ async def persist_final_message(request: Request, payload: FinalMessageRequest):
                 'session_id': payload.chat_id,
             },
             'tasks': {
-                'title_generation': True,
-                'follow_up_generation': True,
+                'title_generation': title_generation_enabled,
+                'follow_up_generation': follow_up_generation_enabled,
             },
             'events': {},
             'event_emitter': _background_event_emitter,
