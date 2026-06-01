@@ -8,6 +8,9 @@
 
 	export let selectedModels = [''];
 	export let disabled = false;
+	export let id = '0';
+	export let compact = false;
+	export let side: 'top' | 'bottom' = 'bottom';
 
 	// Myah T3-932: the standalone "Set as default" button under the trigger
 	// was removed — setting the default now happens inside the selector
@@ -46,8 +49,11 @@
 	<div class="overflow-hidden w-full">
 		<div class="max-w-full {($settings?.highContrastMode ?? false) ? 'm-1' : 'mr-1'}">
 			<Selector
-				id="0"
+				{id}
+				{side}
 				placeholder={$i18n.t('Select a model')}
+				className={compact ? 'w-[24rem]' : 'w-[32rem]'}
+				triggerClassName={compact ? 'text-sm text-gray-600 dark:text-gray-300' : 'text-lg'}
 				items={$models.map((model) => ({
 					// Prefer composite selection_key as the option value so the bound
 					// `selectedModels[0]` carries the user's provider choice; falls

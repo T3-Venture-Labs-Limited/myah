@@ -22,9 +22,10 @@ DB write path; Hermes SessionDB becomes the sole source of truth.
 
 _active_runs: dict[str, dict]
     Keyed by chat_id. Value: {run_id, started_at (epoch ms), message_id}.
-    Populated when the first run_id is captured from the SSE stream.
-    Cleared 10 s after run.completed or run.failed (grace window for
-    refresh-at-completion races).
+    Populated as soon as the platform receives a stream_id from
+    /myah/v1/message, then refreshed when a run_id/stream_id is captured from
+    the SSE stream. Cleared 10 s after run.completed or run.failed (grace
+    window for refresh-at-completion races).
 
     SINGLE-WORKER ASSUMPTION: This is a plain dict and is safe only because
     UVICORN_WORKERS=1. Verified 2026-04-23 under UVICORN_WORKERS=1 (source
@@ -157,13 +158,61 @@ def _check_worker_count() -> None:
 
 
 def get_active_runs() -> dict[str, dict]:
-    """Return the live _active_runs registry (avoid circular imports)."""
+    """Return the process-local live active-run registry (avoid circular imports)."""
     return _active_runs
 
 
+def get_active_run_snapshot(chat_id: str) -> dict | None:
+    """Return one process-local active-run snapshot for chat_id."""
+    return _active_runs.get(chat_id)
+
+
+def _is_invalid_registry_id(value: str | None) -> bool:
+    return not value or value == '-' or value.startswith('local:')
+
+
+def register_active_run(
+    *,
+    chat_id: str | None,
+    message_id: str | None,
+    run_id: str | None,
+    started_at: int | None = None,
+) -> None:
+    """Record an active stream before the first SSE event arrives.
+
+    This is a process-local live registry for fast UX hydration, not durable
+    projection storage. Callers must pass real persisted chat/message ids;
+    local placeholders are intentionally ignored.
+    """
+    if (
+        _is_invalid_registry_id(chat_id)
+        or _is_invalid_registry_id(message_id)
+        or _is_invalid_registry_id(run_id)
+    ):
+        return
+    _check_worker_count()
+    _active_runs[str(chat_id)] = {
+        'run_id': str(run_id),
+        'started_at': started_at or int(time.time() * 1000),
+        'message_id': str(message_id),
+    }
+
+
 def get_live_state() -> dict[tuple[str, str], dict]:
-    """Return the live _live_state registry (avoid circular imports)."""
+    """Return the process-local live _live_state registry (avoid circular imports)."""
     return _live_state
+
+
+def get_live_state_snapshot(chat_id: str, message_id: str) -> dict | None:
+    """Return one process-local live-state snapshot."""
+    return _live_state.get((chat_id, message_id))
+
+
+def clear_stream_state(chat_id: str, message_id: str | None = None) -> None:
+    """Clear process-local live stream state for a chat/message pair."""
+    _active_runs.pop(chat_id, None)
+    if message_id:
+        _live_state.pop((chat_id, message_id), None)
 
 
 def _sse_chunk(delta: str = '', done: bool = False) -> str:
@@ -501,14 +550,7 @@ async def handle_hermes_stream(response, ctx: dict) -> StreamingResponse | None:
                                     'data': {'run_id': active_run_id, 'chat_id': chat_id},
                                 }
                             )
-                        # ── Myah: populate _active_runs registry (T3-1001) ──────
-                        if chat_id and message_id:
-                            _check_worker_count()
-                            _active_runs[chat_id] = {
-                                'run_id': active_run_id,
-                                'started_at': int(time.time() * 1000),
-                                'message_id': message_id,
-                            }
+                        register_active_run(chat_id=chat_id, message_id=message_id, run_id=active_run_id)
                         # ────────────────────────────────────────────────────────
 
                 # ── message.delta ─────────────────────────────────────────
@@ -1256,14 +1298,10 @@ async def handle_hermes_stream(response, ctx: dict) -> StreamingResponse | None:
             if chat_id:
                 try:
                     loop = asyncio.get_running_loop()
-                    loop.call_later(10, _active_runs.pop, chat_id, None)
-                    if message_id:
-                        loop.call_later(10, _live_state.pop, (chat_id, message_id), None)
+                    loop.call_later(10, clear_stream_state, chat_id, message_id)
                 except RuntimeError:
                     # No running loop (e.g. during test teardown) — clean up immediately
-                    _active_runs.pop(chat_id, None)
-                    if message_id:
-                        _live_state.pop((chat_id, message_id), None)
+                    clear_stream_state(chat_id, message_id)
             # Always yield [DONE] so HTTP consumers see a clean stream end
             yield _sse_chunk(done=True)
             # Ensure the upstream stream_wrapper generator (which holds the

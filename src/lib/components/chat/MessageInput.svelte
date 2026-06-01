@@ -80,6 +80,7 @@
 	import Expand from '../icons/Expand.svelte';
 	import QueuedMessageItem from './MessageInput/QueuedMessageItem.svelte';
 	import RefChipBar from './Artifacts/RefChipBar.svelte';
+	import ModelSelector from './ModelSelector.svelte';
 
 	const i18n = getContext('i18n');
 
@@ -94,7 +95,7 @@
 	export let uploadPending = false;
 
 	export let atSelectedModel: Model | undefined = undefined;
-	export let selectedModels: [''];
+	export let selectedModels: string[] = [''];
 
 	let selectedModelIds = [];
 	$: selectedModelIds = atSelectedModel !== undefined ? [atSelectedModel.id] : selectedModels;
@@ -1542,7 +1543,13 @@
 									</div>
 								</div>
 
-								<div class="self-end flex space-x-1 mr-1 shrink-0 gap-[0.5px]">
+								<div class="self-end flex items-center space-x-1 mr-1 shrink-0 gap-[0.5px]">
+									<div
+										data-testid="composer-model-selector"
+										class="flex max-w-[10rem] sm:max-w-[14rem] items-center rounded-full px-2 py-1 text-sm text-gray-600 hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-gray-800/70 transition"
+									>
+										<ModelSelector id="composer" compact side="top" bind:selectedModels showSetDefault={false} />
+									</div>
 									{#if (taskIds && taskIds.length > 0) || (history.currentId && history.messages[history.currentId]?.done != true) || generating}
 										<div class=" flex items-center">
 											<Tooltip content={$i18n.t('Stop')}>

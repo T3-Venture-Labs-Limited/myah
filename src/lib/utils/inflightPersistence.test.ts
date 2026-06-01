@@ -62,7 +62,10 @@ beforeEach(() => {
 
 describe('inflightPersistence', () => {
 	it('save/load round-trip preserves snapshot content', () => {
-		const snapshot = makeSnapshot({ message_content: 'round-trip test' });
+		const snapshot = makeSnapshot({
+			message_content: 'round-trip test',
+			output: [{ id: 'tool-1', type: 'function_call', status: 'in_progress' }]
+		});
 		saveInflightSnapshot(snapshot);
 		const loaded = loadInflightSnapshot(snapshot.chat_id);
 
@@ -71,6 +74,7 @@ describe('inflightPersistence', () => {
 		expect(loaded!.chat_id).toBe(snapshot.chat_id);
 		expect(loaded!.message_id).toBe(snapshot.message_id);
 		expect(loaded!.message_content).toBe('round-trip test');
+		expect(loaded!.output).toEqual(snapshot.output);
 		expect(loaded!.status).toBe('streaming');
 	});
 
@@ -93,6 +97,22 @@ describe('inflightPersistence', () => {
 			}
 		});
 		expect(() => saveInflightSnapshot(makeSnapshot())).not.toThrow();
+	});
+
+	it('drops oversized output before storage while preserving message content', () => {
+		const oversizedOutput = [
+			{ id: 'huge-tool', type: 'function_call_output', output: 'x'.repeat(250_000) }
+		];
+		const snapshot = makeSnapshot({
+			message_content: 'partial answer',
+			output: oversizedOutput
+		});
+
+		saveInflightSnapshot(snapshot);
+
+		const loaded = loadInflightSnapshot(snapshot.chat_id);
+		expect(loaded!.message_content).toBe('partial answer');
+		expect(loaded!.output).toEqual([]);
 	});
 
 	it('loadInflightSnapshot returns null for absent key', () => {

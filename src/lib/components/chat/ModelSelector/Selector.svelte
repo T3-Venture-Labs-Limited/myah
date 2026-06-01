@@ -68,6 +68,7 @@
 
 	export let className = 'w-[32rem]';
 	export let triggerClassName = 'text-lg';
+	export let side: 'top' | 'bottom' = 'bottom';
 
 	export let pinModelHandler: (modelId: string) => void = () => {};
 
@@ -326,7 +327,7 @@
 			forceMount
 			trapFocus={false}
 			preventScroll={false}
-			side="bottom"
+			side={side}
 			align={$mobile ? 'center' : 'start'}
 			sideOffset={2}
 			alignOffset={-1}

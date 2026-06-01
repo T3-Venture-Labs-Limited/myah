@@ -6,9 +6,26 @@ import type { InflightSnapshot } from '../types';
 
 const KEY_PREFIX = 'myah-inflight-state:';
 const STALE_THRESHOLD_MS = 600_000; // 10 minutes
+const MAX_SERIALIZED_SNAPSHOT_BYTES = 200_000;
+
+function serializedLength(value: unknown): number {
+	return JSON.stringify(value).length;
+}
+
+function boundedSnapshot(snapshot: InflightSnapshot): InflightSnapshot {
+	const payload: InflightSnapshot = { ...snapshot, updated_at: Date.now() };
+	if (serializedLength(payload) <= MAX_SERIALIZED_SNAPSHOT_BYTES) {
+		return payload;
+	}
+
+	const withoutOutput: InflightSnapshot = { ...payload, output: [] };
+	return serializedLength(withoutOutput) <= MAX_SERIALIZED_SNAPSHOT_BYTES
+		? withoutOutput
+		: { ...withoutOutput, message_content: withoutOutput.message_content.slice(0, 10_000) };
+}
 
 export function saveInflightSnapshot(snapshot: InflightSnapshot): void {
-	const payload: InflightSnapshot = { ...snapshot, updated_at: Date.now() };
+	const payload = boundedSnapshot(snapshot);
 	try {
 		localStorage.setItem(`${KEY_PREFIX}${snapshot.chat_id}`, JSON.stringify(payload));
 	} catch (err) {

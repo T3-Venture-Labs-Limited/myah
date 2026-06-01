@@ -81,6 +81,40 @@ def _make_ctx(*, with_event_caller: bool = True) -> dict:
     return ctx
 
 
+def test_register_active_run_tracks_stream_before_first_event():
+    from myah.utils import hermes_stream_handler as h
+
+    h._active_runs.clear()
+    h.register_active_run(
+        chat_id='chat-a',
+        message_id='assistant-a',
+        run_id='myah-stream-a',
+        started_at=123,
+    )
+
+    assert h.get_active_runs()['chat-a'] == {
+        'run_id': 'myah-stream-a',
+        'started_at': 123,
+        'message_id': 'assistant-a',
+    }
+
+
+def test_register_active_run_ignores_missing_placeholder_and_local_ids():
+    from myah.utils import hermes_stream_handler as h
+
+    h._active_runs.clear()
+
+    h.register_active_run(chat_id='', message_id='assistant-a', run_id='stream-a')
+    h.register_active_run(chat_id='-', message_id='assistant-a', run_id='stream-a')
+    h.register_active_run(chat_id='local:chat-a', message_id='assistant-a', run_id='stream-a')
+    h.register_active_run(chat_id='chat-a', message_id='', run_id='stream-a')
+    h.register_active_run(chat_id='chat-a', message_id='-', run_id='stream-a')
+    h.register_active_run(chat_id='chat-a', message_id='local:msg-a', run_id='stream-a')
+    h.register_active_run(chat_id='chat-a', message_id='assistant-a', run_id='')
+
+    assert h.get_active_runs() == {}
+
+
 # ── Background task path tests ─────────────────────────────────────────────
 
 
