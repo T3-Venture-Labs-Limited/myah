@@ -139,4 +139,61 @@ describe('resumeChatAfterCriticalLoad', () => {
 		expect(resumeInflight).not.toHaveBeenCalled();
 		expect(loadDeferredMetadata).not.toHaveBeenCalled();
 	});
+
+	it('resolves before slow resumeInflight completes to avoid blocking navigation', async () => {
+		const inflightDeferred = deferred<void>();
+		const calls: string[] = [];
+
+		const slowResumeInflight = vi.fn((chatId) => {
+			calls.push(`resume-start:${chatId}`);
+			return inflightDeferred.promise.then(() => calls.push(`resume-done:${chatId}`));
+		});
+
+		const promise = resumeChatAfterCriticalLoad({
+			chatId: 'chat-1',
+			loadCriticalChat: vi.fn(async () => {
+				calls.push('critical');
+				return true;
+			}),
+			setLoading: vi.fn((loading) => calls.push(`loading:${loading}`)),
+			afterCriticalReconcile: vi.fn(async () => {
+				calls.push('reconciled');
+			}),
+			resumeInflight: slowResumeInflight
+		});
+
+		const result = await promise;
+		expect(result).toBe(true);
+		expect(calls).toEqual([
+			'critical',
+			'loading:false',
+			'reconciled',
+			'resume-start:chat-1'
+		]);
+		expect(calls).not.toContain('resume-done:chat-1');
+
+		inflightDeferred.resolve();
+		await vi.waitFor(() => {
+			expect(calls).toContain('resume-done:chat-1');
+		});
+	});
+
+	it('does not reject navigation when resumeInflight fails asynchronously', async () => {
+		const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+		const result = await resumeChatAfterCriticalLoad({
+			chatId: 'chat-1',
+			loadCriticalChat: vi.fn().mockResolvedValue(true),
+			setLoading: vi.fn(),
+			resumeInflight: vi.fn().mockRejectedValue(new Error('live-state failed'))
+		});
+
+		expect(result).toBe(true);
+		await vi.waitFor(() => {
+			expect(warn).toHaveBeenCalledWith(
+				'[chat-navigation] resumeInflight failed:',
+				expect.any(Error)
+			);
+		});
+		warn.mockRestore();
+	});
 });

@@ -182,6 +182,10 @@ function historyMatchesChat(history: ChatHistory, chatId?: string): boolean {
 	return !chatId || history.chatId === chatId;
 }
 
+function isDifferentChatHistory(history: ChatHistory, chatId?: string): boolean {
+	return !!(chatId && history.chatId && history.chatId !== chatId);
+}
+
 function applyRuntimeChatToHistory(
 	history: unknown,
 	runtimeChat?: ChatRuntimeChatState | null,
@@ -190,9 +194,9 @@ function applyRuntimeChatToHistory(
 ): ChatHistory {
 	const incomingBase = asHistory(history);
 	const base =
-		options.isolateToChat && !historyMatchesChat(incomingBase, options.chatId)
+		options.isolateToChat && isDifferentChatHistory(incomingBase, options.chatId)
 			? { chatId: options.chatId ?? runtimeChat?.chatId, currentId: null, messages: {} }
-			: incomingBase;
+			: { ...incomingBase, chatId: options.chatId ?? incomingBase.chatId ?? runtimeChat?.chatId };
 	if (!runtimeChat) return base;
 
 	const messages = { ...base.messages };

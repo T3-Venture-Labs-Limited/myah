@@ -7,7 +7,7 @@ export type ChatNavigationResumeDeps = {
 	afterFastProjectionRender?: () => Promise<void> | void;
 	afterCriticalRender?: () => Promise<void> | void;
 	afterCriticalReconcile?: () => Promise<void> | void;
-	resumeInflight?: (chatId: string) => void;
+	resumeInflight?: (chatId: string) => Promise<void> | void;
 	isPersistedChat?: (chatId: string) => boolean;
 };
 
@@ -42,7 +42,9 @@ export async function resumeChatAfterCriticalLoad({
 	await afterCriticalReconcile?.();
 
 	if (isPersistedChat(chatId)) {
-		resumeInflight?.(chatId);
+		void Promise.resolve(resumeInflight?.(chatId)).catch((err) => {
+			console.warn('[chat-navigation] resumeInflight failed:', err);
+		});
 	}
 
 	if (loadDeferredMetadata) {
