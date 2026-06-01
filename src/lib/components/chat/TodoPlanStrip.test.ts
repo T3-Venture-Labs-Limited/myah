@@ -1,5 +1,5 @@
-import { describe, it, expect } from 'vitest';
-import { render, screen, fireEvent } from '@testing-library/svelte';
+import { describe, it, expect, beforeAll } from 'vitest';
+import { render, screen, fireEvent, waitFor } from '@testing-library/svelte';
 import TodoPlanStrip from './TodoPlanStrip.svelte';
 import type { TodoPlanItem } from '$lib/types/contract';
 
@@ -19,6 +19,21 @@ function plan(overrides: Partial<TodoPlanItem> = {}): TodoPlanItem {
 	};
 }
 
+beforeAll(() => {
+	if (!Element.prototype.animate) {
+		Element.prototype.animate = (() => {
+			const animation = {
+				finished: Promise.resolve(),
+				cancel: () => {},
+				commitStyles: () => {},
+				onfinish: null as ((event: Event) => void) | null
+			};
+			queueMicrotask(() => animation.onfinish?.(new Event('finish')));
+			return animation;
+		}) as unknown as Element['animate'];
+	}
+});
+
 describe('TodoPlanStrip', () => {
 	it('renders nothing without a plan or todos', () => {
 		const { container, rerender } = render(TodoPlanStrip, { props: { plan: null } });
@@ -31,27 +46,65 @@ describe('TodoPlanStrip', () => {
 	it('renders collapsed header with plan progress and active task', () => {
 		render(TodoPlanStrip, { props: { plan: plan(), initiallyExpanded: false } });
 
-		expect(screen.getByText('Plan')).toBeInTheDocument();
-		expect(screen.getAllByText('1/3')).toHaveLength(2);
+		expect(screen.getByText('Working · step 2 of 3')).toBeInTheDocument();
+		expect(screen.getByText('1/3')).toBeInTheDocument();
 		expect(screen.getByText('Build pinned strip')).toBeInTheDocument();
 		expect(screen.getByRole('button', { name: /show plan steps/i })).toHaveAttribute(
 			'aria-expanded',
 			'false'
 		);
-		expect(screen.getAllByTestId('todo-plan-segment')).toHaveLength(3);
+		expect(screen.queryAllByTestId('todo-plan-segment')).toHaveLength(0);
 	});
 
-	it('toggles the dropdown checklist', async () => {
+	it('renders a centered dynamic-island pill that expands when the pill is clicked', async () => {
 		render(TodoPlanStrip, { props: { plan: plan(), initiallyExpanded: false } });
 
+		const island = screen.getByRole('button', { name: /show plan steps/i });
+		expect(island).toHaveClass('todo-plan-island');
+		expect(island).toHaveTextContent('Working · step 2 of 3');
 		expect(screen.queryByRole('list', { name: /plan steps/i })).not.toBeInTheDocument();
-		await fireEvent.click(screen.getByRole('button', { name: /show plan steps/i }));
+
+		await fireEvent.click(island);
 
 		expect(screen.getByRole('list', { name: /plan steps/i })).toBeInTheDocument();
-		expect(screen.getByRole('button', { name: /hide plan steps/i })).toHaveAttribute(
-			'aria-expanded',
-			'true'
+		expect(
+			screen.getByRole('button', { name: /collapse plan to current task pill/i })
+		).toHaveAttribute('aria-expanded', 'true');
+		const panel = screen.getByRole('list', { name: /plan steps/i }).closest('.todo-plan-panel');
+		expect(panel).toHaveAttribute('data-motion', 'dynamic-island-morph');
+		expect(screen.getByRole('button', { name: /hide plan steps/i })).toBeInTheDocument();
+	});
+
+	it('returns to pill form instead of disappearing when hide is pressed', async () => {
+		render(TodoPlanStrip, { props: { plan: plan(), initiallyExpanded: true } });
+
+		expect(screen.getByRole('list', { name: /plan steps/i })).toBeInTheDocument();
+		await fireEvent.click(screen.getByRole('button', { name: /hide plan steps/i }));
+
+		await waitFor(() => {
+			expect(screen.queryByRole('list', { name: /plan steps/i })).not.toBeInTheDocument();
+		});
+		expect(screen.getByRole('button', { name: /show plan steps/i })).toHaveTextContent(
+			'Build pinned strip'
 		);
+	});
+
+	it('describes pending-only plans as planned and previews the first pending task', () => {
+		render(TodoPlanStrip, {
+			props: {
+				plan: plan({
+					todos: [
+						{ id: '1', content: 'First queued task', status: 'pending' },
+						{ id: '2', content: 'Second queued task', status: 'pending' }
+					]
+				}),
+				initiallyExpanded: false
+			}
+		});
+
+		expect(screen.getByText('Planned · 0 of 2')).toBeInTheDocument();
+		expect(screen.getByText('First queued task')).toBeInTheDocument();
+		expect(screen.queryByText(/Complete · 0 of 2/)).not.toBeInTheDocument();
 	});
 
 	it('styles completed, active, and pending rows distinctly', () => {
