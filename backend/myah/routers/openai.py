@@ -66,6 +66,7 @@ from myah.utils.auth import get_admin_user, get_verified_user
 from myah.utils.headers import include_user_info_headers
 from myah.utils.anthropic import is_anthropic_url, get_anthropic_models
 from myah.utils.hermes_routing import resolve_user_agent_base
+from myah.utils.hermes_stream_handler import register_active_run
 from shared.contract import ApprovalOption
 
 log = logging.getLogger(__name__)
@@ -1657,6 +1658,12 @@ async def generate_chat_completion(
                 _chat_id,
                 _stream_id,
                 int((time.monotonic() - _t0) * 1000),
+            )
+
+            register_active_run(
+                chat_id=metadata.get('chat_id') if metadata else None,
+                message_id=metadata.get('message_id') if metadata else None,
+                run_id=_stream_id,
             )
 
             # Phase 2: stream events — session is kept open and handed to

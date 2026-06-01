@@ -31,6 +31,7 @@
 		models,
 		activeChatIds
 	} from '$lib/stores';
+	import { chatRuntimeStore } from '$lib/stores/chatRuntime';
 	import { goto } from '$app/navigation';
 	import { page } from '$app/stores';
 	import { beforeNavigate } from '$app/navigation';
@@ -138,6 +139,7 @@
 		clearInflightSnapshot
 	} from '$lib/utils/inflightPersistence';
 	import { snapshotUpdateFromChatCompletionEvent } from '$lib/utils/inflightSnapshotEvents';
+	import { ingestChatRuntimeSocketEvent } from '$lib/utils/chatRuntimeSocketIngestion';
 	import dayjs from 'dayjs';
 	const unregisterServiceWorkers = async () => {
 		if ('serviceWorker' in navigator) {
@@ -330,7 +332,10 @@
 	};
 
 	const chatEventHandler = async (event, cb) => {
-		persistInflightSnapshotFromEvent(event);
+		ingestChatRuntimeSocketEvent(event, {
+			applyEvent: (socketEvent) => chatRuntimeStore.applyEvent(socketEvent),
+			persistInflightSnapshotFromEvent
+		});
 
 		const chat = $page.url.pathname.includes(`/c/${event.chat_id}`);
 
@@ -513,6 +518,7 @@
 		if (now >= exp - TOKEN_EXPIRY_BUFFER) {
 			const res = await userSignOut();
 			user.set(null);
+			chatRuntimeStore.reset();
 			activeChatIds.set(new Set());
 			localStorage.removeItem('token');
 
@@ -849,6 +855,7 @@
 							);
 						} else {
 							// Definitive failure — remove token and redirect to auth.
+							chatRuntimeStore.reset();
 							activeChatIds.set(new Set());
 							localStorage.removeItem('token');
 							await goto(`/auth?redirect=${encodedUrl}`);

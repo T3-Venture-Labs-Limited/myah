@@ -51,6 +51,63 @@ describe('resumeChatAfterCriticalLoad', () => {
 		expect(calls.at(-1)).toBe('metadata:done');
 	});
 
+	it('can fast-paint from runtime projection before critical chat load completes', async () => {
+		const critical = deferred<boolean>();
+		const calls: string[] = [];
+
+		const promise = resumeChatAfterCriticalLoad({
+			chatId: 'chat-1',
+			loadFastProjection: vi.fn(() => {
+				calls.push('fast');
+				return true;
+			}),
+			afterFastProjectionRender: vi.fn(() => calls.push('fast-rendered')),
+			loadCriticalChat: vi.fn(async () => {
+				calls.push('critical:start');
+				const loaded = await critical.promise;
+				calls.push('critical:done');
+				return loaded;
+			}),
+			setLoading: vi.fn((loading) => calls.push(`loading:${loading}`)),
+			resumeInflight: vi.fn((chatId) => calls.push(`resume:${chatId}`))
+		});
+
+		await vi.waitFor(() => {
+			expect(calls).toEqual(['fast', 'fast-rendered', 'loading:false', 'critical:start']);
+		});
+
+		critical.resolve(true);
+		expect(await promise).toBe(true);
+		expect(calls).toEqual([
+			'fast',
+			'fast-rendered',
+			'loading:false',
+			'critical:start',
+			'critical:done',
+			'resume:chat-1'
+		]);
+	});
+
+	it('returns false when critical load fails after fast projection paints', async () => {
+		const setLoading = vi.fn();
+		const resumeInflight = vi.fn();
+		const loadDeferredMetadata = vi.fn();
+
+		const loaded = await resumeChatAfterCriticalLoad({
+			chatId: 'chat-1',
+			loadFastProjection: vi.fn().mockReturnValue(true),
+			loadCriticalChat: vi.fn().mockResolvedValue(null),
+			setLoading,
+			resumeInflight,
+			loadDeferredMetadata
+		});
+
+		expect(loaded).toBe(false);
+		expect(setLoading).toHaveBeenCalledWith(false);
+		expect(resumeInflight).not.toHaveBeenCalled();
+		expect(loadDeferredMetadata).not.toHaveBeenCalled();
+	});
+
 	it('does not start inflight resume for local temporary chats', async () => {
 		const resumeInflight = vi.fn();
 
@@ -64,7 +121,7 @@ describe('resumeChatAfterCriticalLoad', () => {
 		expect(resumeInflight).not.toHaveBeenCalled();
 	});
 
-	it('returns false and keeps loading ownership with caller when critical chat load fails', async () => {
+	it('returns false and keeps loading ownership with caller when critical chat load fails without fast projection', async () => {
 		const setLoading = vi.fn();
 		const resumeInflight = vi.fn();
 		const loadDeferredMetadata = vi.fn();

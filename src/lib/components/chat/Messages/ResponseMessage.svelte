@@ -43,6 +43,7 @@
 	import FullHeightIframe from '$lib/components/common/FullHeightIframe.svelte';
 	import HermesOutputRenderer from './HermesOutputRenderer.svelte';
 	import type { OutputItem } from './HermesOutputRenderer/types';
+	import { filterTodoToolOutput } from '$lib/utils/todoOutput';
 	import CronRunMessage from './CronRunMessage.svelte';
 
 	interface MessageType {
@@ -135,6 +136,7 @@
 	$: model = $models.find((m) => m.id === message.model);
 
 	$: statusEntries = message?.statusHistory ?? [...(message?.status ? [message?.status] : [])];
+	$: renderedOutput = filterTodoToolOutput(message?.output as OutputItem[] | undefined);
 	$: hasVisibleStatus =
 		(model?.info?.meta?.capabilities?.status_updates ?? true) &&
 		statusEntries.length > 0 &&
@@ -375,9 +377,9 @@
 								<Skeleton />
 							{:else if isCronRun}
 								<CronRunMessage {message} output={message.output} />
-							{:else if useOutputRenderer && message.error !== true}
+							{:else if useOutputRenderer && message.error !== true && renderedOutput.length > 0}
 								<HermesOutputRenderer
-									output={message.output as OutputItem[]}
+									output={renderedOutput}
 									messageId={message.id}
 									done={($settings?.chatFadeStreamingText ?? true)
 										? (message?.done ?? false)

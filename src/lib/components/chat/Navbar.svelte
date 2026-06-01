@@ -49,7 +49,7 @@
 	export let chat;
 	export let history;
 	export let selectedModels;
-	export let showModelSelector = true;
+	export let showModelSelector = false;
 
 	export let onSaveTempChat: () => {};
 	export let archiveChatHandler: (id: string) => void;

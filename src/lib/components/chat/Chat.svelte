@@ -115,11 +115,14 @@
 	import { reconnectBanner } from '$lib/stores';
 	import { applyDurableFinalMessageEvent } from '$lib/utils/chatEventFallback';
 	import { resumeChatAfterCriticalLoad } from '$lib/utils/chatNavigationResume';
+	import { chatRuntimeStore } from '$lib/stores/chatRuntime';
 	import type { InflightSnapshot } from '$lib/types';
 	import ReconnectBanner from './ReconnectBanner.svelte';
 	import TodoPlanStrip from './TodoPlanStrip.svelte';
 	import { getPinnedTodoPlan } from './todoPlanSelection';
 	import type { TodoPlanItem } from '$lib/types/contract';
+	import { extractTodoListFromOutput } from '$lib/utils/todoOutput';
+	import TodoRunPanel from './TodoRunPanel.svelte';
 
 	export let chatIdProp = '';
 	export let embedded = false;
@@ -177,6 +180,16 @@
 		messages: {},
 		currentId: null
 	};
+	let hiddenTodoPanelKey: string | null = null;
+	$: activeMessages = createMessagesList(history, history.currentId);
+	$: currentTodoPanel = activeMessages
+		.toReversed()
+		.map((message) => extractTodoListFromOutput(message?.output))
+		.find(Boolean) ?? null;
+	$: if (currentTodoPanel && hiddenTodoPanelKey && currentTodoPanel.key !== hiddenTodoPanelKey) {
+		hiddenTodoPanelKey = null;
+	}
+	$: showTodoPanel = Boolean(currentTodoPanel && currentTodoPanel.key !== hiddenTodoPanelKey);
 
 	let taskIds = null;
 
@@ -208,6 +221,7 @@
 			const loaded = await resumeChatAfterCriticalLoad({
 				chatId: chatIdProp,
 				loadCriticalChat: loadChat,
+				loadFastProjection: loadFastProjectionForCurrentChat,
 				setLoading: (value) => {
 					loading = value;
 				},
@@ -216,8 +230,12 @@
 					window.setTimeout(() => scrollToBottom(), 0);
 					await tick();
 				},
+				loadDeferredMetadata: loadChatMetadata,
 				resumeInflight: tryResumeInflight,
-				loadDeferredMetadata: loadChatMetadata
+				afterCriticalReconcile: async () => {
+					history = chatRuntimeStore.mergeHistory(chatIdProp, history);
+					await tick();
+				}
 			});
 
 			if (loaded) {
@@ -381,7 +399,9 @@
 			if (applyDurableFinalMessageEvent(event, $chatId, { history }, { clearInflightSnapshot })) {
 				const message = (history.messages as Record<string, any>)[event.message_id];
 				await saveChatHandler($chatId, history);
-				await finalizeCompletedAssistantMessage($chatId, message, { runBackgroundCompletion: false });
+				await finalizeCompletedAssistantMessage($chatId, message, {
+					runBackgroundCompletion: false
+				});
 				return;
 			}
 
@@ -667,6 +687,39 @@
 			msg.output = snapshot.output;
 		}
 		(history.messages as Record<string, any>)[msgId] = msg;
+	}
+
+	function loadFastProjectionForCurrentChat() {
+		if (!chatIdProp || chatIdProp.startsWith('local:')) return false;
+
+		const runtime = chatRuntimeStore.getSnapshot(chatIdProp);
+		if (runtime && Object.keys(runtime.messages).length > 0) {
+			history = chatRuntimeStore.mergeHistory(chatIdProp, history, Date.now(), {
+				isolateToChat: true
+			});
+			return true;
+		}
+
+		const stored = loadInflightSnapshot(chatIdProp);
+		if (!stored || stored.chat_id !== chatIdProp) return false;
+
+		const runtimeEvent = {
+			chat_id: stored.chat_id,
+			message_id: stored.message_id,
+			data: {
+				type: 'chat:completion',
+				data: {
+					done: stored.status === 'settled',
+					content: stored.message_content,
+					output: stored.output
+				}
+			}
+		};
+		chatRuntimeStore.applyEvent(runtimeEvent);
+		history = chatRuntimeStore.mergeHistory(chatIdProp, history, Date.now(), {
+			isolateToChat: true
+		});
+		return true;
 	}
 
 	// Race server truth against a 200 ms paint timer and a 30 s hard timeout.
@@ -956,9 +1009,7 @@
 				// providers (T3-1031 disambiguation case). Find the matching
 				// $models row by both fields; fall through if neither matches.
 				const match = $models.find(
-					(m) =>
-						m.id === $defaultModel.model &&
-						m.tags?.[0]?.name === $defaultModel.provider
+					(m) => m.id === $defaultModel.model && m.tags?.[0]?.name === $defaultModel.provider
 				);
 				if (match) {
 					selectedModels = [match.selection_key ?? match.id];
@@ -992,9 +1043,7 @@
 				// pair, then admin, then first.
 				if ($defaultModel) {
 					const match = $models.find(
-						(m) =>
-							m.id === $defaultModel.model &&
-							m.tags?.[0]?.name === $defaultModel.provider
+						(m) => m.id === $defaultModel.model && m.tags?.[0]?.name === $defaultModel.provider
 					);
 					if (match) selectedModels = [match.selection_key ?? match.id];
 				} else if (defaultModels && defaultModels.length > 0) {
@@ -1147,6 +1196,7 @@
 					(chatContent?.history ?? undefined) !== undefined
 						? chatContent.history
 						: convertMessagesToHistory(chatContent.messages ?? []);
+				history = chatRuntimeStore.mergeHistory($chatId, history);
 
 				chatTitle.set(chatContent.title);
 
@@ -1496,7 +1546,12 @@
 		}
 
 		if (runBackgroundCompletion) {
-			chatCompletedHandler(chatId, message.model, message.id, createMessagesList(history, message.id));
+			chatCompletedHandler(
+				chatId,
+				message.model,
+				message.id,
+				createMessagesList(history, message.id)
+			);
 		}
 
 		// ── Auto-link chat to cron process ────────────────────────────
@@ -1507,7 +1562,8 @@
 				if (item.type !== 'function_call_output' || !item.call_id) continue;
 				// Find the matching function_call to check the tool name
 				const callItem = message.output.find(
-					(o: any) => o.type === 'function_call' && o.call_id === item.call_id && o.name === 'cronjob'
+					(o: any) =>
+						o.type === 'function_call' && o.call_id === item.call_id && o.name === 'cronjob'
 				);
 				if (!callItem) continue;
 				// Parse the tool result to find job_id
@@ -1609,7 +1665,6 @@
 
 			await finalizeCompletedAssistantMessage(chatId, message);
 		}
-
 
 		if (DEBUG_CHAT) console.log('[chat:completion] done handler', data);
 		await tick();
@@ -2607,6 +2662,15 @@
 					<ReconnectBanner />
 					<TodoPlanStrip plan={pinnedTodoPlan} />
 
+					{#if showTodoPanel && currentTodoPanel}
+						<TodoRunPanel
+							data={currentTodoPanel}
+							onHide={() => {
+								hiddenTodoPanelKey = currentTodoPanel?.key ?? null;
+							}}
+						/>
+					{/if}
+
 					<div id="chat-pane" class="flex flex-col flex-auto z-10 w-full @container overflow-auto">
 						{#if ($settings?.landingPageMode === 'chat' && !$selectedFolder) || createMessagesList(history, history.currentId).length > 0}
 							<div
@@ -2648,7 +2712,7 @@
 									bind:this={messageInput}
 									{history}
 									{taskIds}
-									{selectedModels}
+									bind:selectedModels
 									bind:files
 									bind:prompt
 									bind:autoScroll
@@ -2727,7 +2791,7 @@
 							<div class="flex items-center h-full">
 								<Placeholder
 									{history}
-									{selectedModels}
+									bind:selectedModels
 									bind:messageInput
 									bind:files
 									bind:prompt
