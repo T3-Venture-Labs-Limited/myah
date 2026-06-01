@@ -294,4 +294,55 @@ describe('chatRuntimeProjection', () => {
 		expect(reconciled.messages['assistant-1'].content).toBe('Hello');
 		expect(reconciled.messages['assistant-1'].parentId).toBe('user-1');
 	});
+
+	it('preserves existing user/assistant messages when isolating to chat with no chatId in history', () => {
+		const state = applyChatRuntimeEvent(
+			emptyChatRuntimeState(),
+			completionEvent({
+				chat_id: 'chat-a',
+				message_id: 'assistant-runtime'
+			}),
+			1000
+		);
+
+		const projected = getProjectedChatHistory(
+			{
+				currentId: 'assistant-existing',
+				messages: {
+					'user-existing': {
+						id: 'user-existing',
+						role: 'user',
+						content: 'Previous question',
+						childrenIds: ['assistant-existing']
+					},
+					'assistant-existing': {
+						id: 'assistant-existing',
+						role: 'assistant',
+						content: 'Previous answer',
+						parentId: 'user-existing',
+						childrenIds: []
+					}
+				}
+			},
+			state.chats['chat-a'],
+			2000,
+			{ chatId: 'chat-a', isolateToChat: true }
+		);
+
+		expect(projected.messages['user-existing']).toMatchObject({
+			id: 'user-existing',
+			role: 'user',
+			content: 'Previous question'
+		});
+		expect(projected.messages['assistant-existing']).toMatchObject({
+			id: 'assistant-existing',
+			role: 'assistant',
+			content: 'Previous answer'
+		});
+		expect(projected.messages['assistant-runtime']).toMatchObject({
+			id: 'assistant-runtime',
+			role: 'assistant',
+			content: 'Hello'
+		});
+	});
 });
