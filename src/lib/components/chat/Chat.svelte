@@ -118,7 +118,6 @@
 	import { chatRuntimeStore } from '$lib/stores/chatRuntime';
 	import type { InflightSnapshot } from '$lib/types';
 	import ReconnectBanner from './ReconnectBanner.svelte';
-	import TodoPlanStrip from './TodoPlanStrip.svelte';
 	import { getPinnedTodoPlan } from './todoPlanSelection';
 	import type { TodoPlanItem } from '$lib/types/contract';
 	import { extractTodoListFromOutput } from '$lib/utils/todoOutput';
@@ -2618,6 +2617,7 @@
 						{moveChatHandler}
 						{embedded}
 						{linkedProcess}
+						{pinnedTodoPlan}
 						on:back
 						on:expand
 						onSaveTempChat={async () => {
@@ -2660,7 +2660,6 @@
 					/>
 
 					<ReconnectBanner />
-					<TodoPlanStrip plan={pinnedTodoPlan} />
 
 					{#if showTodoPanel && currentTodoPanel}
 						<TodoRunPanel

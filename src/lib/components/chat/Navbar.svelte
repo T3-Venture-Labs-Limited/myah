@@ -41,6 +41,8 @@
 	import ChatPlus from '../icons/ChatPlus.svelte';
 	import ChatCheck from '../icons/ChatCheck.svelte';
 	import Folder from '../icons/Folder.svelte';
+	import TodoPlanStrip from './TodoPlanStrip.svelte';
+	import type { TodoPlanItem } from '$lib/types/contract';
 	const i18n = getContext('i18n');
 
 	export let initNewChat: Function;
@@ -48,7 +50,7 @@
 
 	export let chat;
 	export let history;
-	export let selectedModels;
+	export let selectedModels: string[] = [];
 	export let showModelSelector = false;
 
 	export let onSaveTempChat: () => {};
@@ -58,6 +60,7 @@
 
 	export let embedded = false;
 	export let linkedProcess: Process | null = null;
+	export let pinnedTodoPlan: TodoPlanItem | null = null;
 
 	let closedBannerIds = [];
 	let showDownloadChatModal = false;
@@ -123,11 +126,13 @@
 				{/if}
 
 				<div
-					class="flex-1 overflow-hidden max-w-full mt-0.5 py-0.5
+					class="flex-1 min-w-0 max-w-full mt-0.5 py-0.5
 			{$showSidebar ? 'ml-1' : ''}
 			"
 				>
-					{#if showModelSelector}
+					{#if pinnedTodoPlan}
+						<TodoPlanStrip plan={pinnedTodoPlan} />
+					{:else if showModelSelector}
 						<ModelSelector bind:selectedModels />
 					{/if}
 				</div>
@@ -288,66 +293,67 @@
 				</div>
 			</div>
 		</div>
-	</div>
 
-	{#if $temporaryChatEnabled && ($chatId ?? '').startsWith('local:')}
-		<div class=" w-full z-30 text-center">
-			<div class="text-xs text-gray-500">{$i18n.t('Temporary Chat')}</div>
-		</div>
-	{/if}
 
-	<div class="absolute top-[100%] left-0 right-0 h-fit">
-		{#if history && !history.currentId && !$chatId && ($banners.length > 0 || ($config?.license_metadata?.type ?? null) === 'trial' || (($config?.license_metadata?.seats ?? null) !== null && $config?.user_count > $config?.license_metadata?.seats))}
-			<div class=" w-full z-30">
-				<div class=" flex flex-col gap-1 w-full">
-					{#if ($config?.license_metadata?.type ?? null) === 'trial'}
-						<Banner
-							banner={{
-								type: 'info',
-								title: 'Trial License',
-								content: $i18n.t(
-									'You are currently using a trial license. Please contact support to upgrade your license.'
-								)
-							}}
-						/>
-					{/if}
-
-					{#if ($config?.license_metadata?.seats ?? null) !== null && $config?.user_count > $config?.license_metadata?.seats}
-						<Banner
-							banner={{
-								type: 'error',
-								title: 'License Error',
-								content: $i18n.t(
-									'Exceeded the number of seats in your license. Please contact support to increase the number of seats.'
-								)
-							}}
-						/>
-					{/if}
-
-					{#each $banners.filter((b) => ![...JSON.parse(localStorage.getItem('dismissedBannerIds') ?? '[]'), ...closedBannerIds].includes(b.id)) as banner (banner.id)}
-						<Banner
-							{banner}
-							on:dismiss={(e) => {
-								const bannerId = e.detail;
-
-								if (banner.dismissible) {
-									localStorage.setItem(
-										'dismissedBannerIds',
-										JSON.stringify(
-											[
-												bannerId,
-												...JSON.parse(localStorage.getItem('dismissedBannerIds') ?? '[]')
-											].filter((id) => $banners.find((b) => b.id === id))
-										)
-									);
-								} else {
-									closedBannerIds = [...closedBannerIds, bannerId];
-								}
-							}}
-						/>
-					{/each}
-				</div>
+		{#if $temporaryChatEnabled && ($chatId ?? '').startsWith('local:')}
+			<div class=" w-full z-30 text-center">
+				<div class="text-xs text-gray-500">{$i18n.t('Temporary Chat')}</div>
 			</div>
 		{/if}
+
+		<div class="absolute top-[100%] left-0 right-0 h-fit">
+			{#if history && !history.currentId && !$chatId && ($banners.length > 0 || ($config?.license_metadata?.type ?? null) === 'trial' || (($config?.license_metadata?.seats ?? null) !== null && $config?.user_count > $config?.license_metadata?.seats))}
+				<div class=" w-full z-30">
+					<div class=" flex flex-col gap-1 w-full">
+						{#if ($config?.license_metadata?.type ?? null) === 'trial'}
+							<Banner
+								banner={{
+									type: 'info',
+									title: 'Trial License',
+									content: $i18n.t(
+										'You are currently using a trial license. Please contact support to upgrade your license.'
+									)
+								}}
+							/>
+						{/if}
+
+						{#if ($config?.license_metadata?.seats ?? null) !== null && $config?.user_count > $config?.license_metadata?.seats}
+							<Banner
+								banner={{
+									type: 'error',
+									title: 'License Error',
+									content: $i18n.t(
+										'Exceeded the number of seats in your license. Please contact support to increase the number of seats.'
+									)
+								}}
+							/>
+						{/if}
+
+						{#each $banners.filter((b) => ![...JSON.parse(localStorage.getItem('dismissedBannerIds') ?? '[]'), ...closedBannerIds].includes(b.id)) as banner (banner.id)}
+							<Banner
+								{banner}
+								on:dismiss={(e) => {
+									const bannerId = e.detail;
+
+									if (banner.dismissible) {
+										localStorage.setItem(
+											'dismissedBannerIds',
+											JSON.stringify(
+												[
+													bannerId,
+													...JSON.parse(localStorage.getItem('dismissedBannerIds') ?? '[]')
+												].filter((id) => $banners.find((b) => b.id === id))
+											)
+										);
+									} else {
+										closedBannerIds = [...closedBannerIds, bannerId];
+									}
+								}}
+							/>
+						{/each}
+					</div>
+				</div>
+			{/if}
+		</div>
 	</div>
 </nav>

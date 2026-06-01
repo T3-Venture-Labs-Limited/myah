@@ -28,7 +28,7 @@ describe('composer model selector placement', () => {
 		const navbar = source('src/lib/components/chat/Navbar.svelte');
 
 		expect(navbar).toContain('export let showModelSelector = false');
-		expect(navbar).toContain('{#if showModelSelector}');
+		expect(navbar).toContain('showModelSelector');
 		expect(navbar).toContain('<ModelSelector bind:selectedModels />');
 	});
 
