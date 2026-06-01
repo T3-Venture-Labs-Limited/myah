@@ -15,13 +15,68 @@ is treated as the OSS user. Tests cover:
 6. deployment_mode reflects MYAH_DEPLOYMENT_MODE env var
 """
 
+import os
+from pathlib import Path
+
+os.environ.setdefault('DATABASE_URL', 'sqlite://')
+os.environ.setdefault('ENABLE_DB_MIGRATIONS', 'False')
+os.environ.setdefault('WEBUI_SECRET_KEY', 'test-secret')
+
+import subprocess
+import sys
+import textwrap
 from types import SimpleNamespace
-from unittest.mock import patch, Mock
+from unittest.mock import Mock, patch
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from myah.routers.myah import router
+
+# ── Import hygiene regression ──────────────────────────────────────
+
+def test_router_import_does_not_initialize_socket_or_config(tmp_path):
+    """Regression: importing ``myah.routers.myah`` must NOT pull in
+    ``myah.utils.chat_tasks`` / ``myah.socket.main`` / ``myah.config`` at
+    module-load time.
+
+    Those modules query the ``config`` table at import time; importing them
+    during pytest collection broke this file's collection with
+    ``sqlite3.OperationalError: no such table: config`` (PR #269). The router
+    now resolves ``background_tasks_handler`` lazily at call time, so it can be
+    imported against a DB that has no tables.
+    """
+    db_path = tmp_path / 'import-regression.db'
+    code = textwrap.dedent(
+        """
+        import sys
+        import myah.routers.myah  # noqa: F401
+
+        leaked = [
+            m for m in ('myah.utils.chat_tasks', 'myah.socket.main', 'myah.config')
+            if m in sys.modules
+        ]
+        assert not leaked, f'router import pulled in: {leaked}'
+        """
+    )
+    # Pin myah resolution to THIS source tree. The backend dir (parent of the
+    # ``myah`` package) is ``test_myah.py``'s parents[3]; prepending it to
+    # PYTHONPATH makes the subprocess import the same source the parent test
+    # process does, regardless of any editable install pointing elsewhere.
+    backend_dir = Path(__file__).resolve().parents[3]
+    env = {
+        **os.environ,
+        'PYTHONPATH': os.pathsep.join(
+            [str(backend_dir), os.environ.get('PYTHONPATH', '')]
+        ).rstrip(os.pathsep),
+        'DATABASE_URL': f'sqlite:///{db_path}',
+        'ENABLE_DB_MIGRATIONS': 'False',
+        'MYAH_SECRET_KEY': 'test-secret',
+    }
+    result = subprocess.run(
+        [sys.executable, '-c', code], capture_output=True, text=True, env=env
+    )
+    assert result.returncode == 0, result.stderr
 
 
 class _AsyncReturn:
@@ -655,15 +710,14 @@ def test_final_message_emits_active_chat_shaped_completion(monkeypatch):
 
     emitted = []
 
-    class _FakeSio:
-        async def emit(self, event_name, payload, room=None):
-            emitted.append((event_name, payload, room))
+    async def _capture_emit(room, envelope):
+        emitted.append((room, envelope))
 
     fake_chat = SimpleNamespace(id='chat1', user_id='u1', chat={'history': {'messages': {}}})
     with (
         patch('myah.routers.myah.Chats.get_chat_by_id_and_user_id', return_value=fake_chat),
         patch('myah.routers.myah.Chats.upsert_message_to_chat_by_id_and_message_id', return_value=fake_chat),
-        patch('myah.socket.main.sio', _FakeSio()),
+        patch('myah.routers.myah._emit_socket_event', new=_capture_emit),
     ):
         resp = client.post(
             '/api/v1/myah/messages/final',
@@ -677,7 +731,7 @@ def test_final_message_emits_active_chat_shaped_completion(monkeypatch):
         )
 
     assert resp.status_code == 200
-    completion = next(payload for name, payload, room in emitted if payload['data']['type'] == 'chat:completion')
+    completion = next(envelope for room, envelope in emitted if envelope['data']['type'] == 'chat:completion')
     assert completion == {
         'chat_id': 'chat1',
         'message_id': 'msg1',
@@ -699,9 +753,8 @@ def test_final_message_duplicate_retry_is_idempotent(monkeypatch):
 
     emitted = []
 
-    class _FakeSio:
-        async def emit(self, event_name, payload, room=None):
-            emitted.append((event_name, payload, room))
+    async def _capture_emit(room, envelope):
+        emitted.append((room, envelope))
 
     fake_chat = SimpleNamespace(
         id='chat1',
@@ -724,7 +777,7 @@ def test_final_message_duplicate_retry_is_idempotent(monkeypatch):
         patch('myah.routers.myah.Chats.upsert_message_to_chat_by_id_and_message_id') as upsert,
         patch('myah.routers.myah.background_tasks_handler') as background_handler,
         patch('myah.routers.myah.asyncio.create_task') as create_task,
-        patch('myah.socket.main.sio', _FakeSio()),
+        patch('myah.routers.myah._emit_socket_event', new=_capture_emit),
     ):
         resp = client.post(
             '/api/v1/myah/messages/final',
@@ -766,6 +819,7 @@ def test_final_message_triggers_background_tasks_when_persisted(monkeypatch):
 
     with (
         patch('myah.routers.myah.Chats.get_chat_by_id_and_user_id', return_value=fake_chat),
+        patch('myah.routers.myah.Users.get_user_by_id', return_value=SimpleNamespace(settings={})),
         patch('myah.routers.myah.Chats.upsert_message_to_chat_by_id_and_message_id', return_value=fake_chat),
         patch('myah.routers.myah.background_tasks_handler', new=_fake_bg),
         patch('myah.routers.myah.asyncio.create_task', side_effect=_fake_create_task) as create_task,
@@ -800,3 +854,61 @@ def test_final_message_triggers_background_tasks_when_persisted(monkeypatch):
         {'role': 'assistant', 'content': 'final answer', 'model': 'gpt-5.4'}
     ]
     assert ctx['tasks']['title_generation'] is True
+    assert ctx['tasks']['follow_up_generation'] is True
+
+
+def test_final_message_respects_disabled_generation_settings(monkeypatch):
+    monkeypatch.setenv('MYAH_AGENT_BEARER_TOKEN', 'tok')
+    client = _make_app()
+
+    bg_calls = []
+
+    async def _fake_bg(ctx):
+        bg_calls.append(ctx)
+
+    fake_chat = SimpleNamespace(id='chat1', user_id='u1', chat={'history': {'messages': {}}})
+    scheduled = []
+
+    def _fake_create_task(coro):
+        scheduled.append(coro)
+        task = Mock()
+        task.exception.return_value = None
+        task.add_done_callback.return_value = None
+        return task
+
+    user_with_disabled_generation = SimpleNamespace(
+        settings={
+            'title': {'auto': False},
+            'autoFollowUps': False,
+        }
+    )
+
+    with (
+        patch('myah.routers.myah.Chats.get_chat_by_id_and_user_id', return_value=fake_chat),
+        patch('myah.routers.myah.Users.get_user_by_id', return_value=user_with_disabled_generation),
+        patch('myah.routers.myah.Chats.upsert_message_to_chat_by_id_and_message_id', return_value=fake_chat),
+        patch('myah.routers.myah.background_tasks_handler', new=_fake_bg),
+        patch('myah.routers.myah.asyncio.create_task', side_effect=_fake_create_task),
+    ):
+        resp = client.post(
+            '/api/v1/myah/messages/final',
+            headers={'Authorization': 'Bearer tok'},
+            json={
+                'user_id': 'u1',
+                'chat_id': 'chat1',
+                'message_id': 'msg1',
+                'response': 'final answer',
+                'model': 'gpt-5.4',
+            },
+        )
+
+    assert resp.status_code == 200
+    assert len(scheduled) == 1
+
+    import asyncio
+
+    asyncio.run(scheduled[0])
+    assert len(bg_calls) == 1
+    ctx = bg_calls[0]
+    assert ctx['tasks']['title_generation'] is False
+    assert ctx['tasks']['follow_up_generation'] is False
