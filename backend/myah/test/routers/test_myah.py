@@ -798,6 +798,109 @@ def test_final_message_duplicate_retry_is_idempotent(monkeypatch):
     assert emitted == []
 
 
+def test_final_message_does_not_overwrite_finalized_assistant_with_different_content(monkeypatch):
+    monkeypatch.setenv('MYAH_AGENT_BEARER_TOKEN', 'tok')
+    client = _make_app()
+
+    emitted = []
+
+    async def _capture_emit(room, envelope):
+        emitted.append((room, envelope))
+
+    fake_chat = SimpleNamespace(
+        id='chat1',
+        user_id='u1',
+        chat={
+            'history': {
+                'messages': {
+                    'msg1': {
+                        'id': 'msg1',
+                        'role': 'assistant',
+                        'content': 'original final answer',
+                        'done': True,
+                    }
+                }
+            }
+        },
+    )
+    with (
+        patch('myah.routers.myah.Chats.get_chat_by_id_and_user_id', return_value=fake_chat),
+        patch('myah.routers.myah.Chats.upsert_message_to_chat_by_id_and_message_id') as upsert,
+        patch('myah.routers.myah.background_tasks_handler') as background_handler,
+        patch('myah.routers.myah.asyncio.create_task') as create_task,
+        patch('myah.routers.myah._emit_socket_event', new=_capture_emit),
+    ):
+        resp = client.post(
+            '/api/v1/myah/messages/final',
+            headers={'Authorization': 'Bearer tok'},
+            json={
+                'user_id': 'u1',
+                'chat_id': 'chat1',
+                'message_id': 'msg1',
+                'response': "💾 Self-improvement review: Skill 'consumer-device-comparison' created.",
+            },
+        )
+
+    assert resp.status_code == 200
+    assert resp.json() == {
+        'ok': True,
+        'message_id': 'msg1',
+        'ignored': True,
+        'reason': 'already_finalized',
+    }
+    upsert.assert_not_called()
+    background_handler.assert_not_called()
+    create_task.assert_not_called()
+    assert emitted == []
+
+
+def test_final_message_can_replace_non_final_assistant_placeholder(monkeypatch):
+    monkeypatch.setenv('MYAH_AGENT_BEARER_TOKEN', 'tok')
+    client = _make_app()
+
+    fake_chat = SimpleNamespace(
+        id='chat1',
+        user_id='u1',
+        chat={
+            'history': {
+                'messages': {
+                    'msg1': {
+                        'id': 'msg1',
+                        'role': 'assistant',
+                        'content': '',
+                        'done': False,
+                    }
+                }
+            }
+        },
+    )
+    with (
+        patch('myah.routers.myah.Chats.get_chat_by_id_and_user_id', return_value=fake_chat),
+        patch('myah.routers.myah.Chats.upsert_message_to_chat_by_id_and_message_id') as upsert,
+        patch(
+            'myah.routers.myah.Users.get_user_by_id',
+            return_value=SimpleNamespace(settings={'title': {'auto': False}, 'autoFollowUps': False}),
+        ),
+    ):
+        upsert.return_value = fake_chat
+        resp = client.post(
+            '/api/v1/myah/messages/final',
+            headers={'Authorization': 'Bearer tok'},
+            json={
+                'user_id': 'u1',
+                'chat_id': 'chat1',
+                'message_id': 'msg1',
+                'response': 'real final answer',
+            },
+        )
+
+    assert resp.status_code == 200
+    assert resp.json() == {'ok': True, 'message_id': 'msg1'}
+    upsert.assert_called_once()
+    assert upsert.call_args.args[2]['content'] == 'real final answer'
+    assert upsert.call_args.args[2]['done'] is True
+
+
 def test_final_message_triggers_background_tasks_when_persisted(monkeypatch):
     monkeypatch.setenv('MYAH_AGENT_BEARER_TOKEN', 'tok')
     client = _make_app()
