@@ -278,7 +278,32 @@ class SecretInputItem(_BaseOutputItem):
     prompt: str
     help: str
     skill_name: str
-    status: Literal['pending', 'stored', 'timeout']
+    status: Literal['pending', 'stored', 'timeout', 'cancelled']
+
+
+class ClarifyInputItem(_BaseOutputItem):
+    """A clarify prompt card waiting on a user response.
+
+    ``status`` transitions ``pending`` -> ``answered`` when the user submits
+    a response, ``timeout`` when the upstream clarify session expires, or
+    ``cancelled`` when the run aborts before resolution. ``choices`` is
+    ``None`` for free-text prompts and a list of options for multiple-choice
+    prompts; the frontend may render an additional "Other" affordance without
+    mutating this persisted wire shape.
+
+    Wire source: ``hermes_stream_handler.py`` ``clarify.required`` branch.
+    Status updates land in the same item via the ``clarify.resolved`` branch.
+    """
+
+    type: Literal['clarify_input']
+    id: str
+    clarify_id: str
+    run_id: str
+    question: str
+    choices: list[str] | None = None
+    timeout_seconds: int | None = None
+    status: Literal['pending', 'answered', 'timeout', 'cancelled']
+    response: str | None = None
 
 
 class TodoPlanEntry(BaseModel):
@@ -369,6 +394,7 @@ OutputItem = Annotated[
         CodeInterpreterItem,
         ConfirmationItem,
         SecretInputItem,
+        ClarifyInputItem,
         TodoPlanItem,
         ArtifactCardItem,
     ],
@@ -378,6 +404,7 @@ OutputItem = Annotated[
 
 __all__ = [
     'ArtifactCardItem',
+    'ClarifyInputItem',
     'CodeInterpreterItem',
     'CodeInterpreterOutputPayload',
     'ConfirmationItem',

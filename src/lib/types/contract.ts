@@ -152,6 +152,8 @@ export interface ContractRoot {
     | ToolConfirmationRequiredEvent
     | ApprovalRequestEvent
     | ApprovalRespondedEvent
+    | ClarifyRequiredEvent
+    | ClarifyResolvedEvent
     | SecretRequiredEvent
     | SecretResolvedEvent
     | RunCompletedEvent
@@ -169,6 +171,7 @@ export interface ContractRoot {
     | CodeInterpreterItem
     | ConfirmationItem
     | SecretInputItem
+    | ClarifyInputItem
     | TodoPlanItem
     | ArtifactCardItem;
   artifact_card?: ArtifactCardItem | null;
@@ -329,6 +332,39 @@ export interface ApprovalRespondedEvent {
   event: "approval.responded";
   choice?: string | null;
   resolved?: number | null;
+  run_id?: string | null;
+  stream_id?: string | null;
+  timestamp?: number | null;
+  [k: string]: unknown;
+}
+/**
+ * The agent has paused waiting for a user clarification response.
+ *
+ * Wire source: platform adapters that implement
+ * ``BasePlatformAdapter.send_clarify`` as a structured interactive request.
+ * ``choices`` is ``None`` for free-text prompts and a list of up to four
+ * options for multiple-choice prompts; the UI may append its own "Other"
+ * affordance without mutating this wire field.
+ */
+export interface ClarifyRequiredEvent {
+  event: "clarify.required";
+  clarify_id: string;
+  question: string;
+  choices?: string[] | null;
+  timeout_seconds?: number | null;
+  run_id?: string | null;
+  stream_id?: string | null;
+  timestamp?: number | null;
+  [k: string]: unknown;
+}
+/**
+ * A pending clarify prompt has been answered, cancelled, or timed out.
+ */
+export interface ClarifyResolvedEvent {
+  event: "clarify.resolved";
+  clarify_id: string;
+  status: "answered" | "timeout" | "cancelled";
+  response?: string | null;
   run_id?: string | null;
   stream_id?: string | null;
   timestamp?: number | null;
@@ -633,7 +669,32 @@ export interface SecretInputItem {
   prompt: string;
   help: string;
   skill_name: string;
-  status: "pending" | "stored" | "timeout";
+  status: "pending" | "stored" | "timeout" | "cancelled";
+  [k: string]: unknown;
+}
+/**
+ * A clarify prompt card waiting on a user response.
+ *
+ * ``status`` transitions ``pending`` -> ``answered`` when the user submits
+ * a response, ``timeout`` when the upstream clarify session expires, or
+ * ``cancelled`` when the run aborts before resolution. ``choices`` is
+ * ``None`` for free-text prompts and a list of options for multiple-choice
+ * prompts; the frontend may render an additional "Other" affordance without
+ * mutating this persisted wire shape.
+ *
+ * Wire source: ``hermes_stream_handler.py`` ``clarify.required`` branch.
+ * Status updates land in the same item via the ``clarify.resolved`` branch.
+ */
+export interface ClarifyInputItem {
+  type: "clarify_input";
+  id: string;
+  clarify_id: string;
+  run_id: string;
+  question: string;
+  choices?: string[] | null;
+  timeout_seconds?: number | null;
+  status: "pending" | "answered" | "timeout" | "cancelled";
+  response?: string | null;
   [k: string]: unknown;
 }
 /**

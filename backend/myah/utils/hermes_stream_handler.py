@@ -923,6 +923,46 @@ async def handle_hermes_stream(response, ctx: dict) -> StreamingResponse | None:
                     await _emit_completion()
                     _update_live_state()
 
+                # ── clarify.required ─────────────────────────────────────
+                elif event_type == 'clarify.required':
+                    clarify_id = event_data.get('clarify_id') or ''
+                    question = event_data.get('question') or ''
+                    choices = event_data.get('choices')
+                    timeout_seconds = event_data.get('timeout_seconds')
+
+                    clarify_item: dict = {
+                        'type': 'clarify_input',
+                        'id': output_id('clarify'),
+                        'clarify_id': clarify_id,
+                        'run_id': active_run_id or '',
+                        'question': question,
+                        'choices': choices,
+                        'timeout_seconds': timeout_seconds,
+                        'status': 'pending',
+                    }
+                    output.append(clarify_item)
+                    await _emit_completion()
+                    _update_live_state()
+                    log.info(
+                        '[HERMES] clarify.required chat_id={} clarify_id={}',
+                        chat_id,
+                        clarify_id,
+                    )
+
+                # ── clarify.resolved ─────────────────────────────────────
+                elif event_type == 'clarify.resolved':
+                    clarify_id = event_data.get('clarify_id') or ''
+                    status = event_data.get('status') or 'answered'
+                    response_text = event_data.get('response')
+                    for item in output:
+                        if item.get('type') == 'clarify_input' and item.get('clarify_id') == clarify_id:
+                            item['status'] = status
+                            if response_text is not None:
+                                item['response'] = response_text
+                            break
+                    await _emit_completion()
+                    _update_live_state()
+
                 # ── status ─────────────────────────────────────────────────
                 elif event_type == 'status':
                     # Hermes status pings are known typed events, but they are
@@ -977,10 +1017,15 @@ async def handle_hermes_stream(response, ctx: dict) -> StreamingResponse | None:
                     # If the run completed successfully, any confirmation that was
                     # pending must have been approved (the agent continued past the
                     # blocking point).  Mark as resolved so the UI shows "Approved".
+                    # Other pending human-in-the-loop cards must not remain active
+                    # after the run exits normally: upstream clarify/secret waits can
+                    # time out and then let the agent continue to run.completed.
                     for item in output:
                         if item.get('type') == 'confirmation' and item.get('status') == 'pending':
                             item['status'] = 'resolved'
                             item['chosen'] = 'approve'
+                        elif item.get('type') in ('secret_input', 'clarify_input') and item.get('status') == 'pending':
+                            item['status'] = 'timeout'
 
                     done = True
 
@@ -1189,6 +1234,10 @@ async def handle_hermes_stream(response, ctx: dict) -> StreamingResponse | None:
                     for item in output:
                         if item.get('type') == 'confirmation' and item.get('status') == 'pending':
                             item['status'] = 'cancelled'
+                        elif item.get('type') == 'secret_input' and item.get('status') == 'pending':
+                            item['status'] = 'timeout'
+                        elif item.get('type') == 'clarify_input' and item.get('status') == 'pending':
+                            item['status'] = 'timeout'
 
                     done = True
 
@@ -1242,6 +1291,8 @@ async def handle_hermes_stream(response, ctx: dict) -> StreamingResponse | None:
                         if item.get('type') == 'confirmation' and item.get('status') == 'pending':
                             item['status'] = 'cancelled'
                         elif item.get('type') == 'secret_input' and item.get('status') == 'pending':
+                            item['status'] = 'timeout'
+                        elif item.get('type') == 'clarify_input' and item.get('status') == 'pending':
                             item['status'] = 'timeout'
 
                     done = True

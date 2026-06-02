@@ -3,6 +3,7 @@
 	import ChainOfThought from './HermesOutputRenderer/ChainOfThought.svelte';
 	import ConfirmationCard from './HermesOutputRenderer/ConfirmationCard.svelte';
 	import SecretInputCard from './HermesOutputRenderer/SecretInputCard.svelte';
+	import ClarifyInputCard from './HermesOutputRenderer/ClarifyInputCard.svelte';
 	import InlineArtifactPreview from '../Artifacts/InlineArtifactPreview.svelte';
 	import { bumpArtifactExplorerRefresh } from '$lib/stores';
 
@@ -47,6 +48,10 @@
 	// without waiting for the backend to re-emit the item with status='stored'.
 	let storedSecrets = new Map<string, boolean>(); // var_name → true
 
+	// Track clarify answers locally so the card resolves immediately while the
+	// stream waits for Hermes to emit clarify.resolved.
+	let answeredClarifies = new Map<string, string>(); // clarify_id → response
+
 	// Find the matching function_call_output for a given call_id.
 	// Simple Array.find — no callOutputMap, no synthetic dedup.
 	function findResult(callId: string): FunctionCallOutputItem | undefined {
@@ -88,6 +93,17 @@
 				on:secretStored={(e) => {
 					storedSecrets.set(e.detail.var_name, true);
 					storedSecrets = storedSecrets;
+				}}
+			/>
+		{:else if g.kind === 'clarify'}
+			<ClarifyInputCard
+				item={g.item}
+				{messageId}
+				localStatus={answeredClarifies.has(g.item.clarify_id) ? 'answered' : g.item.status}
+				localResponse={answeredClarifies.get(g.item.clarify_id) ?? g.item.response}
+				on:clarifyAnswered={(e) => {
+					answeredClarifies.set(e.detail.clarify_id, e.detail.response);
+					answeredClarifies = answeredClarifies;
 				}}
 			/>
 		{:else if g.kind === 'artifact'}

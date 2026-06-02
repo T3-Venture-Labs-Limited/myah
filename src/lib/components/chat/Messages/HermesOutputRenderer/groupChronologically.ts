@@ -11,6 +11,7 @@ import type {
 	CodeInterpreterItem,
 	ConfirmationItem,
 	SecretInputItem,
+	ClarifyInputItem,
 	ArtifactCardItem,
 	TodoPlanItem
 } from './types';
@@ -22,6 +23,7 @@ export type RenderGroup =
 	| { kind: 'message'; id: string; item: MessageItem }
 	| { kind: 'confirmation'; id: string; item: ConfirmationItem }
 	| { kind: 'secret'; id: string; item: SecretInputItem }
+	| { kind: 'clarify'; id: string; item: ClarifyInputItem }
 	| { kind: 'artifact'; id: string; item: ArtifactCardItem };
 
 // Type guard: is the item one that belongs inside a chain?
@@ -103,6 +105,9 @@ export function groupChronologically(output: OutputItem[]): RenderGroup[] {
 		} else if (item.type === 'secret_input') {
 			flushChain();
 			groups.push({ kind: 'secret', id: item.id, item: item as SecretInputItem });
+		} else if (item.type === 'clarify_input') {
+			flushChain();
+			groups.push({ kind: 'clarify', id: item.id, item: item as ClarifyInputItem });
 		} else if (item.type === 'artifact_card') {
 			flushChain();
 			groups.push({ kind: 'artifact', id: item.id, item: item as ArtifactCardItem });

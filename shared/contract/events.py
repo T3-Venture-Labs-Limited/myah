@@ -217,6 +217,38 @@ class ApprovalRespondedEvent(_BaseHermesEvent):
     timestamp: float | None = None
 
 
+class ClarifyRequiredEvent(_BaseHermesEvent):
+    """The agent has paused waiting for a user clarification response.
+
+    Wire source: platform adapters that implement
+    ``BasePlatformAdapter.send_clarify`` as a structured interactive request.
+    ``choices`` is ``None`` for free-text prompts and a list of up to four
+    options for multiple-choice prompts; the UI may append its own "Other"
+    affordance without mutating this wire field.
+    """
+
+    event: Literal['clarify.required']
+    clarify_id: str
+    question: str
+    choices: list[str] | None = None
+    timeout_seconds: int | None = None
+    run_id: str | None = None
+    stream_id: str | None = None
+    timestamp: float | None = None
+
+
+class ClarifyResolvedEvent(_BaseHermesEvent):
+    """A pending clarify prompt has been answered, cancelled, or timed out."""
+
+    event: Literal['clarify.resolved']
+    clarify_id: str
+    status: Literal['answered', 'timeout', 'cancelled']
+    response: str | None = None
+    run_id: str | None = None
+    stream_id: str | None = None
+    timestamp: float | None = None
+
+
 class SecretRequiredEvent(_BaseHermesEvent):
     """The agent has paused waiting for the user to supply a secret value.
 
@@ -343,6 +375,8 @@ HermesEvent = Annotated[
         ToolConfirmationRequiredEvent,
         ApprovalRequestEvent,
         ApprovalRespondedEvent,
+        ClarifyRequiredEvent,
+        ClarifyResolvedEvent,
         SecretRequiredEvent,
         SecretResolvedEvent,
         RunCompletedEvent,
@@ -357,6 +391,8 @@ HermesEvent = Annotated[
 __all__ = [
     'ApprovalRequestEvent',
     'ApprovalRespondedEvent',
+    'ClarifyRequiredEvent',
+    'ClarifyResolvedEvent',
     'HermesEvent',
     'MessageDeltaEvent',
     'ReasoningAvailableEvent',
