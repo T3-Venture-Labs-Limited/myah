@@ -263,18 +263,24 @@ def _collect_refs_outside_code(text: str) -> list[_MediaRef]:
             m2 = _MD_IMAGE_RE.match(text, i)
             if m2 and m2.group(0) not in seen:
                 url = m2.group(2)
-                if not url.startswith('/api/v1/files/') and not url.startswith('data:'):
+                # Agent replies sometimes wrap a MEDIA: tag in markdown image
+                # syntax, e.g. ![preview](MEDIA:/tmp/clip.gif). Treat the
+                # inner value as the real media path; otherwise the fetch layer
+                # asks the adapter for a literal path named "MEDIA:/tmp/..."
+                # and the final message is rewritten to a media-expired SVG.
+                fetch_url = url[len('MEDIA:') :] if url.startswith('MEDIA:') else url
+                if not fetch_url.startswith('/api/v1/files/') and not fetch_url.startswith('data:'):
                     seen.add(m2.group(0))
                     refs.append(
                         _MediaRef(
                             original=m2.group(0),
-                            value=url,
-                            # When the agent writes ![alt](/data/cars/car1.jpg), the URL
+                            value=fetch_url,
+                            # When the agent writes ![car1](/data/cars/car1.jpg), the URL
                             # is a container filesystem path — NOT an http(s) URL. We
                             # must route to the agent media proxy to fetch it. Only
                             # classify as external when the URL really starts with http://
                             # or https://; otherwise treat it as a container path.
-                            is_external=_is_external(url),
+                            is_external=_is_external(fetch_url),
                             is_media_tag=False,
                             alt_text=m2.group(1),
                         )
