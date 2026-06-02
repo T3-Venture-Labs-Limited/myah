@@ -108,7 +108,9 @@ _SPA_ROUTE_CASES_OSS = [
     ('auth', True),
     ('error', True),
     ('notes/new', True),
-    ('agent/skills/create', True),
+    ('agent/skills', False),
+    ('agent/skills/create', False),
+    ('agent/skills/edit', False),
     ('c/abc-123', True),
     ('notes/some-id', True),
     ('spaces/xyz', True),
@@ -143,12 +145,34 @@ def test_is_spa_route_hosted_mode(db_session, monkeypatch) -> None:
         main_mod,
         '_load_hosted_spa_routes',
         lambda: (
-            frozenset({'/admin', '/admin/settings', '/admin/users', '/agent/integrations', '/agent/memory'}),
+            frozenset(
+                {
+                    '/admin',
+                    '/admin/settings',
+                    '/admin/users',
+                    '/agent/integrations',
+                    '/agent/memory',
+                    '/agent/skills',
+                    '/agent/skills/create',
+                    '/agent/skills/edit',
+                    '/skills/install',
+                }
+            ),
             (re.compile(r'^/admin/settings/[^/]+$'), re.compile(r'^/admin/users/[^/]+$')),
         ),
     )
 
-    for path in ('admin', 'agent/integrations', 'agent/memory', 'admin/users/general', 'admin/settings/db'):
+    for path in (
+        'admin',
+        'agent/integrations',
+        'agent/memory',
+        'agent/skills',
+        'agent/skills/create',
+        'agent/skills/edit',
+        'skills/install',
+        'admin/users/general',
+        'admin/settings/db',
+    ):
         assert main_mod.is_spa_route(path) is True, path
     # OSS routes still match in hosted mode
     assert main_mod.is_spa_route('c/abc') is True
@@ -172,7 +196,7 @@ def spa_client(db_session, tmp_path) -> TestClient:
     return TestClient(app, raise_server_exceptions=False)
 
 
-@pytest.mark.parametrize('path', ['/', '/auth', '/c/abc-123', '/notes/xyz', '/agent/skills/create'])
+@pytest.mark.parametrize('path', ['/', '/auth', '/c/abc-123', '/notes/xyz', '/agent/tools/create'])
 def test_valid_spa_routes_serve_shell(spa_client: TestClient, path: str) -> None:
     r = spa_client.get(path)
     assert r.status_code == 200, f'GET {path} -> {r.status_code}'
@@ -194,6 +218,9 @@ def test_valid_spa_routes_serve_shell(spa_client: TestClient, path: str) -> None
         '/admin',
         '/admin/users/general',
         '/agent/integrations',
+        '/agent/skills',
+        '/agent/skills/create',
+        '/agent/skills/edit',
     ],
 )
 def test_invalid_public_urls_return_404(spa_client: TestClient, path: str) -> None:
@@ -223,7 +250,7 @@ def test_allowlist_covers_every_oss_route(db_session) -> None:
     )
 
 
-_PARAM_LESS_EDIT_PAGES = ('agent/skills/edit', 'agent/tools/edit')
+_PARAM_LESS_EDIT_PAGES = ('agent/tools/edit',)
 
 
 def test_param_less_edit_routes_serve_shell_but_path_params_404(db_session) -> None:
@@ -238,8 +265,18 @@ def test_param_less_edit_routes_serve_shell_but_path_params_404(db_session) -> N
 
 
 def test_edit_pages_link_via_query_params_not_path_params() -> None:
-    src_root = Path(__file__).resolve().parents[3] / 'src'
-    sources = '\n'.join(p.read_text(encoding='utf-8') for p in src_root.rglob('*.svelte'))
+    oss_root = Path(__file__).resolve().parents[3]
+    monorepo_root = oss_root.parent
+    src_roots = [oss_root / 'src']
+    hosted_src_root = monorepo_root / 'platform-hosted' / 'src'
+    if hosted_src_root.exists():
+        src_roots.append(hosted_src_root)
+
+    sources = '\n'.join(
+        p.read_text(encoding='utf-8')
+        for src_root in src_roots
+        for p in src_root.rglob('*.svelte')
+    )
 
     assert 'skills/edit?name=' in sources, 'skills edit deep link should use ?name= query param'
     assert 'tools/edit?id=' in sources, 'tools edit deep link should use ?id= query param'

@@ -153,6 +153,33 @@ class FolderTable:
         except Exception:
             return None
 
+    def get_descendant_ids(self, folder_id: str, user_id: str, db: Optional[Session] = None) -> set[str]:
+        """Return the set of all descendant folder IDs (excluding folder_id itself).
+
+        Uses app-layer BFS with a depth cap to guard against pathological cycles.
+        """
+        with get_db_context(db) as db:
+            descendants = set()
+            to_visit = [folder_id]
+            depth = 0
+            max_depth = 100
+
+            while to_visit and depth < max_depth:
+                next_visit = []
+                for parent_id in to_visit:
+                    children = db.query(Folder).filter_by(parent_id=parent_id, user_id=user_id).all()
+                    for child in children:
+                        if child.id not in descendants:
+                            descendants.add(child.id)
+                            next_visit.append(child.id)
+                to_visit = next_visit
+                depth += 1
+
+            if depth >= max_depth:
+                log.warning(f'get_descendant_ids hit max depth ({max_depth}) for folder {folder_id}')
+
+            return descendants
+
     def get_folders_by_user_id(self, user_id: str, db: Optional[Session] = None) -> list[FolderModel]:
         with get_db_context(db) as db:
             return [FolderModel.model_validate(folder) for folder in db.query(Folder).filter_by(user_id=user_id).all()]
@@ -313,6 +340,22 @@ class FolderTable:
         except Exception as e:
             log.error(f'delete_folder: {e}')
             return []
+
+    def get_or_create_uploads_folder(
+        self, user_id: str, db: Optional[Session] = None
+    ) -> Optional[FolderModel]:
+        with get_db_context(db) as db:
+            existing = self.get_folder_by_parent_id_and_user_id_and_name(
+                parent_id=None, user_id=user_id, name='Uploads', db=db
+            )
+            if existing:
+                return existing
+            return self.insert_new_folder(
+                user_id=user_id,
+                form_data=FolderForm(name='Uploads'),
+                parent_id=None,
+                db=db,
+            )
 
     def normalize_folder_name(self, name: str) -> str:
         # Replace _ and space with a single space, lower case, collapse multiple spaces

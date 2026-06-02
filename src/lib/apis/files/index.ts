@@ -5,13 +5,15 @@ export const uploadFile = async (
 	token: string,
 	file: File,
 	metadata?: object | null,
-	process?: boolean | null
+	process?: boolean | null,
+	useUploadsDefault: boolean = true
 ) => {
 	const data = new FormData();
 	data.append('file', file);
 	if (metadata) {
 		data.append('metadata', JSON.stringify(metadata));
 	}
+	data.append('prefer_uploads_default', String(useUploadsDefault));
 
 	const searchParams = new URLSearchParams();
 	if (process !== undefined && process !== null) {
@@ -58,7 +60,7 @@ export const uploadFile = async (
 				}
 
 				try {
-					let lines = value.split('\n');
+					const lines = value.split('\n');
 
 					for (const line of lines) {
 						if (line !== '') {
@@ -66,7 +68,7 @@ export const uploadFile = async (
 							if (line === 'data: [DONE]') {
 								console.log(line);
 							} else {
-								let data = JSON.parse(line.replace(/^data: /, ''));
+								const data = JSON.parse(line.replace(/^data: /, ''));
 								console.log(data);
 
 								if (data?.error) {
@@ -145,7 +147,7 @@ export const uploadDir = async (token: string) => {
 };
 
 export const getFiles = async (token: string = '') => {
-	let error = null;
+	let error: string | null = null;
 
 	const res = await fetch(`${MYAH_API_BASE_URL}/files/`, {
 		method: 'GET',
@@ -156,14 +158,18 @@ export const getFiles = async (token: string = '') => {
 		}
 	})
 		.then(async (res) => {
-			if (!res.ok) throw await res.json();
+			if (!res.ok) {
+				const text = await res.text();
+				try {
+					throw JSON.parse(text);
+				} catch {
+					throw { detail: text || `Request failed with status ${res.status}` };
+				}
+			}
 			return res.json();
 		})
-		.then((json) => {
-			return json;
-		})
 		.catch((err) => {
-			error = err.detail;
+			error = err?.detail || err?.message || 'Failed to load files';
 			console.error(err);
 			return null;
 		});
@@ -172,7 +178,7 @@ export const getFiles = async (token: string = '') => {
 		throw error;
 	}
 
-	return res;
+	return Array.isArray(res) ? res : (res?.items ?? []);
 };
 
 export const searchFiles = async (

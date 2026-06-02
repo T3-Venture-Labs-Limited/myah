@@ -102,13 +102,22 @@ def load_worktree_env_chain(worktree_path: Path) -> dict[str, str]:
     env: dict[str, str] = dict(os.environ)
 
     platform_env_path = worktree_path / 'platform-oss' / '.env'
+    platform_env: dict[str, str] = {}
     if platform_env_path.is_file():
-        env.update(parse_env_file(platform_env_path))
+        platform_env = parse_env_file(platform_env_path)
+        env.update(platform_env)
     else:
         logger.warning(
             f'platform-oss/.env not found at {platform_env_path} — the bearer-fail-fast '
             f'guard will catch any resulting empty MYAH_AGENT_BEARER_TOKEN.'
         )
+
+    # The bearer token is intentionally sourced from the worktree files, not
+    # from process-global state. Importing application modules can seed
+    # os.environ['MYAH_AGENT_BEARER_TOKEN'] as a development default, and letting
+    # that leak into an otherwise empty worktree masks broken local setup.
+    if 'MYAH_AGENT_BEARER_TOKEN' not in platform_env:
+        env.pop('MYAH_AGENT_BEARER_TOKEN', None)
 
     env.update(parse_env_file(worktree_env_path))
     return env

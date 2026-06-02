@@ -2,7 +2,7 @@
 	import type { ArtifactFile } from '$lib/types/artifact';
 	import type { ActivityVerb } from './ActivityTracker';
 	import { createEventDispatcher } from 'svelte';
-	import { formatFileSize } from '$lib/utils';
+	import { formatFileSize, formatRelativeTime } from '$lib/utils';
 
 	export let file: ArtifactFile;
 	export let verb: ActivityVerb | undefined = undefined;
@@ -11,14 +11,8 @@
 
 	const dispatch = createEventDispatcher<{ open: { file: ArtifactFile } }>();
 
-	$: ageLabel = file.mtime
-		? new Intl.RelativeTimeFormat('en', { numeric: 'auto' }).format(
-				Math.round((file.mtime - Date.now()) / 60000),
-				'minute'
-			)
-		: '';
+	$: ageLabel = file.mtime ? formatRelativeTime(file.mtime) : '';
 
-	// Status pill color — uses existing Tailwind palette only (no theme work in this spec).
 	$: dotClass = (() => {
 		switch (verb) {
 			case 'created':
@@ -31,15 +25,27 @@
 				return 'text-gray-400';
 		}
 	})();
+
+	const onActivate = () => dispatch('open', { file });
+	const onKeyDown = (e: KeyboardEvent) => {
+		if (e.key === 'Enter' || e.key === ' ') {
+			e.preventDefault();
+			onActivate();
+		}
+	};
 </script>
 
-<button
-	type="button"
+<!-- div role="button" rather than <button>: lets a kebab menu (a real <button>)
+     nest as a sibling without the button-in-button a11y violation. -->
+<div
+	role="button"
+	tabindex="0"
 	data-testid={`explorer-row-${file.filename}`}
-	class="w-full grid grid-cols-[1fr_auto_auto_auto] items-center gap-3 px-3 py-2 text-sm hover:bg-gray-50 dark:hover:bg-gray-850 {active
+	class="w-full grid grid-cols-[1fr_auto_auto_auto_auto] items-center gap-3 px-3 py-2 text-sm cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-850 {active
 		? 'bg-gray-50 dark:bg-gray-850'
 		: ''}"
-	on:click={() => dispatch('open', { file })}
+	on:click={onActivate}
+	on:keydown={onKeyDown}
 >
 	<span class="flex items-center gap-2 truncate">
 		<span class="text-gray-500" aria-hidden="true">📄</span>
@@ -61,4 +67,4 @@
 			{verb}
 		{/if}
 	</span>
-</button>
+</div>

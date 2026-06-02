@@ -273,8 +273,8 @@ async def connect_credential(
         await web_call_or_raise(
             user,
             'PUT',
-            '/api/plugins/myah-admin/config',
-            json_body={'model': model_patch},
+            '/api/plugins/myah-admin/config/model',
+            json_body={'model': default_model, 'provider': provider_value},
             timeout=30.0,
         )
     except Exception as exc:
@@ -434,8 +434,8 @@ async def poll_device_auth(
             await web_call_or_raise(
                 user,
                 'PUT',
-                '/api/plugins/myah-admin/config',
-                json_body={'model': model_patch},
+                '/api/plugins/myah-admin/config/model',
+                json_body={'model': default_model, 'provider': provider_value},
             )
         except Exception as exc:
             logger.warning(f'Failed to patch config after OAuth complete: {exc}')
@@ -497,8 +497,8 @@ async def set_active_provider(
     await web_call_or_raise(
         user,
         'PUT',
-        '/api/plugins/myah-admin/config',
-        json_body={'model': model_patch},
+        '/api/plugins/myah-admin/config/model',
+        json_body={'model': model_id, 'provider': provider_value},
     )
 
     # Mirror the user's intent into auth.json:active_provider so cron's

@@ -2,8 +2,8 @@ import { MYAH_API_BASE_URL } from '$lib/constants';
 
 type FolderForm = {
 	name?: string;
-	data?: Record<string, any>;
-	meta?: Record<string, any>;
+	data?: Record<string, unknown>;
+	meta?: Record<string, unknown>;
 	parent_id?: string | null;
 };
 

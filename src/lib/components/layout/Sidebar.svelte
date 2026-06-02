@@ -32,6 +32,7 @@
 	import Spaces from '../icons/Spaces.svelte';
 	import AgentIcon from '../icons/AgentIcon.svelte';
 	import SentryFeedbackButton from '../SentryFeedbackButton.svelte';
+	import SidebarHostedNav from './SidebarHostedNav.svelte';
 
 	let touchstart: Touch | null = null;
 	let touchend: Touch | null = null;
@@ -259,6 +260,8 @@
 				</a>
 			</Tooltip>
 
+			<SidebarHostedNav variant="collapsed" />
+
 			<!-- Notes (feature-flagged) -->
 			{#if ($config?.features?.enable_notes ?? false) && ($user?.role === 'admin' || ($user?.permissions?.features?.notes ?? true))}
 				<Tooltip content={$i18n.t('Notes')} placement="right">
@@ -448,6 +451,8 @@
 						</div>
 					</a>
 				</div>
+
+				<SidebarHostedNav variant="expanded" />
 
 				<!-- Notes (feature-flagged) -->
 				{#if ($config?.features?.enable_notes ?? false) && ($user?.role === 'admin' || ($user?.permissions?.features?.notes ?? true))}

@@ -38,6 +38,7 @@ from myah.models.files import (
     Files,
 )
 from myah.models.chats import Chats
+from myah.models.folders import Folders
 from myah.models.groups import Groups
 from myah.models.access_grants import AccessGrants
 from myah.storage.provider import Storage
@@ -79,10 +80,7 @@ def _resolve_disposition_for_test(
     fname_lower = filename.lower()
     if content_type == 'application/pdf' or fname_lower.endswith('.pdf'):
         return 'inline'
-    if (
-        content_type in ('text/html', 'application/xhtml+xml')
-        or fname_lower.endswith(('.html', '.htm'))
-    ):
+    if content_type in ('text/html', 'application/xhtml+xml') or fname_lower.endswith(('.html', '.htm')):
         return 'inline'
     if content_type == 'text/plain':
         return None
@@ -151,6 +149,7 @@ async def get_file_user_or_agent(
         )
     return user
 
+
 ############################
 # Upload File
 # What was entrusted here was given in good faith. Let it
@@ -202,6 +201,7 @@ def upload_file(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     metadata: Optional[dict | str] = Form(None),
+    prefer_uploads_default: bool = Form(True),
     process: bool = Query(True),
     process_in_background: bool = Query(True),
     user=Depends(get_verified_user),
@@ -211,6 +211,7 @@ def upload_file(
         request,
         file=file,
         metadata=metadata,
+        prefer_uploads_default=prefer_uploads_default,
         process=process,
         process_in_background=process_in_background,
         user=user,
@@ -223,6 +224,8 @@ def upload_file_handler(
     request: Request,
     file: UploadFile = File(...),
     metadata: Optional[dict | str] = Form(None),
+    folder_id: Optional[str] = None,
+    prefer_uploads_default: bool = True,
     process: bool = Query(True),
     process_in_background: bool = Query(True),
     user=Depends(get_verified_user),
@@ -230,6 +233,17 @@ def upload_file_handler(
     db: Optional[Session] = None,
 ):
     log.info(f'file.content_type: {file.content_type} {process}')
+
+    target_folder_id: Optional[str] = None
+    if folder_id:
+        folder = Folders.get_folder_by_id_and_user_id(folder_id, user.id, db=db)
+        if not folder:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=ERROR_MESSAGES.NOT_FOUND,
+            )
+        target_folder_id = folder.id
+
 
     if isinstance(metadata, str):
         try:
@@ -295,6 +309,17 @@ def upload_file_handler(
             db=db,
         )
 
+        if target_folder_id is not None:
+            updated_file_item = Files.update_file_metadata(file_item.id, user.id, folder_id=target_folder_id, db=db)
+            if updated_file_item is not None:
+                file_item = updated_file_item
+        elif prefer_uploads_default:
+            uploads = Folders.get_or_create_uploads_folder(user_id=user.id, db=db)
+            if uploads is not None:
+                updated_file_item = Files.update_file_metadata(file_item.id, user.id, folder_id=uploads.id, db=db)
+                if updated_file_item is not None:
+                    file_item = updated_file_item
+
         if process:
             if background_tasks and process_in_background:
                 background_tasks.add_task(
@@ -352,9 +377,9 @@ async def list_files(
     content: bool = Query(True),
     db: Session = Depends(get_session),
 ):
-    skip = (page - 1) * PAGE_SIZE
     user_id = None if (user.role == 'admin' and BYPASS_ADMIN_ACCESS_CONTROL) else user.id
 
+    skip = (page - 1) * PAGE_SIZE
     result = Files.get_file_list(user_id=user_id, skip=skip, limit=PAGE_SIZE, db=db)
 
     if not content:
@@ -571,7 +596,8 @@ def update_file_data_content_by_id(
         )
 
     if file.user_id == user.id or user.role == 'admin' or has_access_to_file(id, 'write', user, db=db):
-        return {'content': file.data.get('content', '')}
+        Files.update_file_data_by_id(id, {'content': form_data.content}, db=db)
+        return {'content': form_data.content}
     else:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -599,7 +625,12 @@ async def get_file_content_by_id(
             detail=ERROR_MESSAGES.NOT_FOUND,
         )
 
-    if isinstance(user, AgentActor) or file.user_id == user.id or user.role == 'admin' or has_access_to_file(id, 'read', user, db=db):
+    if (
+        isinstance(user, AgentActor)
+        or file.user_id == user.id
+        or user.role == 'admin'
+        or has_access_to_file(id, 'read', user, db=db)
+    ):
         try:
             file_path = Storage.get_file(file.path)
             file_path = Path(file_path)
@@ -615,9 +646,7 @@ async def get_file_content_by_id(
                 encoded_filename = quote(filename)
                 headers = {}
 
-                disposition = _resolve_disposition_for_test(
-                    content_type or '', filename, attachment=attachment
-                )
+                disposition = _resolve_disposition_for_test(content_type or '', filename, attachment=attachment)
                 if disposition == 'inline':
                     headers['Content-Disposition'] = f"inline; filename*=UTF-8''{encoded_filename}"
                     if filename.lower().endswith('.pdf'):

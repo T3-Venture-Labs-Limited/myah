@@ -162,8 +162,24 @@
 					$config?.features?.enable_direct_connections
 						? ($settings?.directConnections ?? null)
 						: null
-				).catch(() => [])) ?? [];
+				)) ?? [];
+
+			// Marketplace install/uninstall briefly restarts hermes-web. During that
+			// window /api/models or /api/v1/providers/models can return a transient
+			// empty/error result. Do not replace a healthy model list with [] because
+			// that leaves the composer with no selectable model until a hard refresh.
+			if (merged.length === 0 && $models.length > 0) {
+				console.warn('Skipped clearing existing models after transient empty model refresh');
+				return;
+			}
 			models.set(merged);
+		} catch (e) {
+			if ($models.length === 0) {
+				models.set([]);
+			} else {
+				console.warn('Kept existing models after transient model refresh failure:', e);
+			}
+			throw e;
 		} finally {
 			_setModelsInFlight = false;
 		}
@@ -347,7 +363,7 @@
 		}
 
 		if ($user?.role === 'admin' || ($user?.permissions?.chat?.temporary ?? true)) {
-			if ($page.url.searchParams.get('temporary-chat') === 'true') {
+			if ($page?.url?.searchParams?.get('temporary-chat') === 'true') {
 				temporaryChatEnabled.set(true);
 			}
 

@@ -45,7 +45,7 @@
 		defaultModel,
 		closeArtifactPane,
 		agentCommands,
-		bumpArtifactExplorerRefresh
+		bumpArtifactExplorerRefresh,
 	} from '$lib/stores';
 	import { get } from 'svelte/store';
 	import { assembleUIState } from '$lib/utils/uiState';
@@ -106,18 +106,28 @@
 	import Image from '../common/Image.svelte';
 	import { getBanners } from '$lib/apis/configs';
 	import { linkProcessToChat } from '$lib/apis/processes';
-	import { findModelByIdOrSelectionKey, selectionMatchesModel } from '$lib/utils/modelSelection';
+	import {
+		findModelByIdOrSelectionKey,
+		selectionMatchesModel,
+		resolveInitialSelectedModels
+	} from '$lib/utils/modelSelection';
 	import {
 		loadInflightSnapshot,
 		clearInflightSnapshot,
 		pruneStaleSnapshots
 	} from '$lib/utils/inflightPersistence';
-	import { reconnectBanner } from '$lib/stores';
+	import { reconnectBanner, pendingComposerFileAttach, pendingChatFiles } from '$lib/stores';
 	import { applyDurableFinalMessageEvent } from '$lib/utils/chatEventFallback';
 	import { resumeChatAfterCriticalLoad } from '$lib/utils/chatNavigationResume';
 	import { chatRuntimeStore } from '$lib/stores/chatRuntime';
 	import type { InflightSnapshot } from '$lib/types';
 	import ReconnectBanner from './ReconnectBanner.svelte';
+	import {
+		appendComposerFile,
+		type ComposerFileItem,
+		type ComposerAttachResult
+	} from './attachmentValidation';
+	import TodoPlanStrip from './TodoPlanStrip.svelte';
 	import { getPinnedTodoPlan } from './todoPlanSelection';
 	import type { TodoPlanItem } from '$lib/types/contract';
 	import { extractTodoListFromOutput } from '$lib/utils/todoOutput';
@@ -181,10 +191,11 @@
 	};
 	let hiddenTodoPanelKey: string | null = null;
 	$: activeMessages = createMessagesList(history, history.currentId);
-	$: currentTodoPanel = activeMessages
-		.toReversed()
-		.map((message) => extractTodoListFromOutput(message?.output))
-		.find(Boolean) ?? null;
+	$: currentTodoPanel =
+		activeMessages
+			.toReversed()
+			.map((message) => extractTodoListFromOutput(message?.output))
+			.find(Boolean) ?? null;
 	$: if (currentTodoPanel && hiddenTodoPanelKey && currentTodoPanel.key !== hiddenTodoPanelKey) {
 		hiddenTodoPanelKey = null;
 	}
@@ -197,6 +208,34 @@
 	let chatFiles = [];
 	let files = [];
 	let params = {};
+
+	$: if ($pendingComposerFileAttach) attachPendingComposerFile();
+
+	function showComposerAttachToast(result: ComposerAttachResult) {
+		const name = result.fileItem?.name ?? 'file';
+		if (result.status === 'duplicate') {
+			toast.info(`${name} is already attached`);
+		} else if (result.status === 'too-large') {
+			toast.error('Adding this file would exceed the 80 MB total attachment limit');
+		} else if (result.status === 'attached') {
+			toast.success(`Added ${name} to chat`);
+		}
+	}
+
+	function attachComposerFile(fileItem: ComposerFileItem | null | undefined, showToast = true) {
+		const result = appendComposerFile(files as ComposerFileItem[], fileItem);
+		files = result.files;
+		if (showToast) {
+			showComposerAttachToast(result);
+		}
+		return result;
+	}
+
+	function attachPendingComposerFile() {
+		const fileItem = $pendingComposerFileAttach;
+		pendingComposerFileAttach.set(null);
+		attachComposerFile(fileItem);
+	}
 
 	$: if (chatIdProp) {
 		navigateHandler();
@@ -309,6 +348,11 @@
 		}
 		sessionStorage.selectedModels = selectedModelsString;
 		console.log('saveSessionSelectedModels', selectedModels, sessionStorage.selectedModels);
+	};
+
+	const normalizeModelSelection = (modelId: string) => {
+		const model = findModelByIdOrSelectionKey(modelId, $models);
+		return model?.selection_key ?? model?.id ?? modelId;
 	};
 
 	let oldSelectedModelIds = [''];
@@ -825,6 +869,7 @@
 	onMount(() => {
 		loading = true;
 		console.log('mounted');
+
 		window.addEventListener('message', onMessageHandler);
 		$socket?.on('events', chatEventHandler);
 		$socket?.on('process:run-complete', cronRunCompleteHandler);
@@ -897,6 +942,14 @@
 				} catch (e) {}
 			}
 
+			const pending = get(pendingChatFiles);
+			if (pending.length > 0) {
+				for (const fileItem of pending) {
+					attachComposerFile(fileItem as ComposerFileItem);
+				}
+				pendingChatFiles.set([]);
+			}
+
 			const chatInput = document.getElementById('chat-input');
 			chatInput?.focus();
 		};
@@ -967,7 +1020,7 @@
 
 		const availableModels = $models
 			.filter((m) => !(m?.info?.meta?.hidden ?? false))
-			.map((m) => m.id);
+			.flatMap((m) => [m.selection_key, m.id].filter(Boolean));
 
 		const defaultModels = $config?.default_models ? $config?.default_models.split(',') : [];
 
@@ -999,32 +1052,26 @@
 			);
 		} else {
 			if ($selectedFolder?.data?.model_ids) {
-				// Set from folder model IDs
+				// Set from folder model IDs; explicit folder defaults beat user defaults.
 				selectedModels = $selectedFolder?.data?.model_ids;
-			} else if ($defaultModel) {
-				// Myah T3-932 + 2026-05-24: per-user default (provider, model) pair
-				// wins for new chats. The structured pair routes through the right
-				// credential pool even when duplicate model ids exist across
-				// providers (T3-1031 disambiguation case). Find the matching
-				// $models row by both fields; fall through if neither matches.
-				const match = $models.find(
-					(m) => m.id === $defaultModel.model && m.tags?.[0]?.name === $defaultModel.provider
-				);
-				if (match) {
-					selectedModels = [match.selection_key ?? match.id];
+			} else {
+				// Myah T3-932/T3-1031: current per-user defaults beat stale
+				// last-used session state. This prevents an old Copilot selection
+				// from silently routing slash commands such as /goal through the
+				// wrong provider when the user's default is Codex.
+				selectedModels = resolveInitialSelectedModels({
+					models: $models,
+					defaultModel: $defaultModel,
+					sessionSelection: sessionStorage.selectedModels
+						? JSON.parse(sessionStorage.selectedModels)
+						: null,
+					adminDefaults: $settings?.models ?? defaultModels,
+					firstAvailable: availableModels?.at(0) ?? null
+				});
+
+				if ($defaultModel || sessionStorage.selectedModels) {
 					sessionStorage.removeItem('selectedModels');
 				}
-			} else if (sessionStorage.selectedModels) {
-				// Carry the last-used model forward when no explicit default
-				// is set (convenience for users who haven't pinned one).
-				selectedModels = JSON.parse(sessionStorage.selectedModels);
-				sessionStorage.removeItem('selectedModels');
-			} else if ($settings?.models) {
-				// Legacy user multi-select (pre-T3-932). Kept for back-compat.
-				selectedModels = $settings?.models;
-			} else if (defaultModels && defaultModels.length > 0) {
-				// Admin-configured DEFAULT_MODELS.
-				selectedModels = defaultModels;
 			}
 
 			// Unavailable & hidden models filtering — accept both bare id and
@@ -1035,29 +1082,20 @@
 			);
 		}
 
+		// Normalize legacy bare IDs (e.g. qwen/qwen3.7-max from user.default_model
+		// or sessionStorage) to the exact composite picker value when the catalog
+		// has one. Otherwise later lookups against (selection_key ?? id) can reject
+		// a model that the availability filter just accepted by bare id.
+		selectedModels = selectedModels.map(normalizeModelSelection);
+
 		// Ensure at least one model is selected
 		if (selectedModels.length === 0 || (selectedModels.length === 1 && selectedModels[0] === '')) {
-			if (availableModels.length > 0) {
-				// Myah T3-932 + 2026-05-24: fallback priority — per-user default
-				// pair, then admin, then first.
-				if ($defaultModel) {
-					const match = $models.find(
-						(m) => m.id === $defaultModel.model && m.tags?.[0]?.name === $defaultModel.provider
-					);
-					if (match) selectedModels = [match.selection_key ?? match.id];
-				} else if (defaultModels && defaultModels.length > 0) {
-					selectedModels = defaultModels.filter((modelId) => availableModels.includes(modelId));
-				}
-
-				if (
-					selectedModels.length === 0 ||
-					(selectedModels.length === 1 && selectedModels[0] === '')
-				) {
-					selectedModels = [availableModels?.at(0) ?? ''];
-				}
-			} else {
-				selectedModels = [''];
-			}
+			selectedModels = resolveInitialSelectedModels({
+				models: $models,
+				defaultModel: $defaultModel,
+				adminDefaults: $settings?.models ?? defaultModels,
+				firstAvailable: availableModels?.at(0) ?? null
+			});
 		}
 
 		if ($mobile) {
@@ -1185,9 +1223,18 @@
 			if (chatContent) {
 				console.log(chatContent);
 
-				selectedModels = Array.isArray(chatContent.models)
+				const persistedChatSelection = Array.isArray(chatContent.models)
 					? [chatContent.models[0] ?? '']
 					: [chatContent.models ?? ''];
+				selectedModels = resolveInitialSelectedModels({
+					models: $models,
+					defaultModel: $defaultModel,
+					persistedChatSelection,
+					adminDefaults:
+						$settings?.models ?? ($config?.default_models ? $config.default_models.split(',') : []),
+					firstAvailable:
+						$models.find((m) => !((m?.info?.meta as any)?.hidden ?? false))?.selection_key ?? null
+				});
 
 				oldSelectedModelIds = structuredClone(selectedModels);
 
@@ -2268,7 +2315,32 @@
 		});
 
 		if (res) {
-			if (res.error) {
+			if (res instanceof Response) {
+				if (!res.body) {
+					responseMessage.error = {
+						content: $i18n.t(`Uh-oh! There was an issue with the response.`)
+					};
+					responseMessage.done = true;
+					(history.messages as Record<string, any>)[responseMessageId] = responseMessage;
+					return;
+				}
+
+				const textStream = await createOpenAITextStream(res.body, true);
+				for await (const update of textStream) {
+					await chatCompletionEventHandler(
+						{
+							done: update.done,
+							...(update.value ? { choices: [{ delta: { content: update.value } }] } : {}),
+							...(update.sources ? { sources: update.sources } : {}),
+							...(update.selectedModelId ? { selected_model_id: update.selectedModelId } : {}),
+							...(update.usage ? { usage: update.usage } : {}),
+							...(update.error ? { error: update.error } : {})
+						},
+						responseMessage,
+						_chatId
+					);
+				}
+			} else if (res.error) {
 				await handleOpenAIError(res.error, responseMessage);
 			} else {
 				if (taskIds) {
@@ -2830,13 +2902,13 @@
 					>
 						<div
 							class="absolute -left-1.5 -right-1.5 -top-0 -bottom-0 z-20 cursor-col-resize bg-transparent"
-						/>
+						></div>
 					</PaneResizer>
 					<Pane defaultSize={30} minSize={0} class="z-10 bg-white dark:bg-gray-850">
 						<ArtifactPane chatId={$chatId} token={$user?.token ?? ''} />
 					</Pane>
-				{/if}
-			</PaneGroup>
+			{/if}
+		</PaneGroup>
 		</div>
 	{:else if loading}
 		<div class=" flex items-center justify-center h-full w-full">

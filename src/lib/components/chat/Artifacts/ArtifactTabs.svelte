@@ -6,6 +6,7 @@
 
 	export let openFiles: ArtifactFile[];
 	export let activeIdx: number;
+	export let token: string = '';
 
 	const dispatch = createEventDispatcher<{
 		activate: { idx: number };
@@ -21,15 +22,28 @@
 			: null;
 
 	let copied = false;
-	const copyUrl = async () => {
+	const copyContents = async () => {
 		if (!downloadUrl) return;
 		try {
-			const absUrl = new URL(downloadUrl, window.location.origin).toString();
-			await navigator.clipboard.writeText(absUrl);
+			const headers: Record<string, string> = {};
+			if (token) headers['Authorization'] = `Bearer ${token}`;
+			const res = await fetch(downloadUrl, { headers });
+			if (!res.ok) throw new Error(`HTTP ${res.status}`);
+			const text = await res.text();
+			await navigator.clipboard.writeText(text);
 			copied = true;
 			setTimeout(() => (copied = false), 1500);
 		} catch (e) {
-			console.error('Failed to copy URL:', e);
+			console.error('Failed to copy contents:', e);
+		}
+	};
+
+	const onWheel = (e: WheelEvent) => {
+		if (e.deltaY === 0) return;
+		const target = e.currentTarget as HTMLElement;
+		if (target.scrollWidth > target.clientWidth) {
+			e.preventDefault();
+			target.scrollLeft += e.deltaY;
 		}
 	};
 </script>
@@ -38,17 +52,20 @@
 	data-testid="artifact-tabs"
 	class="flex items-center border-b border-gray-100 dark:border-gray-800"
 >
-	<div class="flex items-center overflow-x-auto flex-1 min-w-0">
+	<div
+		class="flex items-center overflow-x-auto flex-1 min-w-0 no-scrollbar"
+		on:wheel={onWheel}
+	>
 		<button
-			type="button"
-			aria-label="Back to file explorer"
-			class="px-3 py-2 text-gray-500 hover:bg-gray-50 dark:hover:bg-gray-850 {activeIdx === -1
-				? 'bg-gray-50 dark:bg-gray-850'
-				: ''}"
-			on:click={() => dispatch('activate', { idx: -1 })}
-		>
-			📁
-		</button>
+				type="button"
+				aria-label="Back to file explorer"
+				class="px-3 py-2 text-gray-500 hover:bg-gray-50 dark:hover:bg-gray-850 {activeIdx === -1
+					? 'bg-gray-50 dark:bg-gray-850'
+					: ''}"
+				on:click={() => dispatch('activate', { idx: -1 })}
+			>
+				📁
+			</button>
 
 		{#each openFiles as file, i (file.file_key)}
 			<div
@@ -106,36 +123,12 @@
 					<line x1="12" y1="15" x2="12" y2="3" />
 				</svg>
 			</a>
-			<a
-				href={downloadUrl}
-				target="_blank"
-				rel="noopener"
-				title="Open in new tab"
-				aria-label="Open artifact in new tab"
-				data-testid="artifact-action-open"
-				class="ml-1 p-1 rounded hover:bg-gray-100 dark:hover:bg-gray-800 text-gray-500 dark:text-gray-400 transition shrink-0"
-			>
-				<svg
-					xmlns="http://www.w3.org/2000/svg"
-					viewBox="0 0 24 24"
-					fill="none"
-					stroke="currentColor"
-					stroke-width="2"
-					stroke-linecap="round"
-					stroke-linejoin="round"
-					class="size-4"
-				>
-					<path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
-					<polyline points="15 3 21 3 21 9" />
-					<line x1="10" y1="14" x2="21" y2="3" />
-				</svg>
-			</a>
 			<button
 				type="button"
-				on:click={copyUrl}
-				title={copied ? 'Copied' : 'Copy URL'}
-				aria-label={copied ? 'URL copied' : 'Copy artifact URL'}
-				data-testid="artifact-action-copy-url"
+				on:click={copyContents}
+				title={copied ? 'Copied' : 'Copy contents'}
+				aria-label={copied ? 'Contents copied' : 'Copy artifact contents'}
+				data-testid="artifact-action-copy-contents"
 				class="ml-1 p-1 rounded hover:bg-gray-100 dark:hover:bg-gray-800 text-gray-500 dark:text-gray-400 transition shrink-0"
 			>
 				{#if copied}
@@ -191,3 +184,13 @@
 		</div>
 	{/if}
 </div>
+
+<style>
+	.no-scrollbar {
+		scrollbar-width: none;
+		-ms-overflow-style: none;
+	}
+	.no-scrollbar::-webkit-scrollbar {
+		display: none;
+	}
+</style>

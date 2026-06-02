@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 from myah.internal.db import Base, JSONField, get_db, get_db_context
 from myah.utils.misc import sanitize_metadata
 from pydantic import BaseModel, ConfigDict, model_validator
-from sqlalchemy import BigInteger, Column, String, Text, JSON
+from sqlalchemy import BigInteger, Column, ForeignKey, String, Text, JSON
 
 log = logging.getLogger(__name__)
 
@@ -31,6 +31,7 @@ class File(Base):
 
     created_at = Column(BigInteger)
     updated_at = Column(BigInteger)
+    folder_id = Column(Text, ForeignKey('folder.id', ondelete='SET NULL'), nullable=True, index=True)
 
 
 class FileModel(BaseModel):
@@ -48,6 +49,7 @@ class FileModel(BaseModel):
 
     created_at: Optional[int]  # timestamp in epoch
     updated_at: Optional[int]  # timestamp in epoch
+    folder_id: Optional[str] = None
 
 
 ####################
@@ -91,6 +93,7 @@ class FileModelResponse(BaseModel):
 
     created_at: int  # timestamp in epoch
     updated_at: Optional[int] = None  # timestamp in epoch, optional for legacy files
+    folder_id: Optional[str] = None
 
     model_config = ConfigDict(extra='allow')
 
@@ -246,7 +249,7 @@ class FilesTable:
             total = query.count()
 
             items = [
-                FileModel.model_validate(file)
+                FileModelResponse.model_validate(file, from_attributes=True)
                 for file in query.order_by(File.updated_at.desc(), File.id.desc()).offset(skip).limit(limit).all()
             ]
 
@@ -389,6 +392,52 @@ class FilesTable:
                 return True
             except Exception:
                 return False
+
+    # The files that live here are not lost to the ether.
+    # They find their place by the hands that tend them.
+    def list_files_by_folder(
+        self, user_id: Optional[str] = None, folder_id: Optional[str] = None, db: Optional[Session] = None
+    ) -> list[FileModel]:
+        with get_db_context(db) as db:
+            query = db.query(File)
+            if user_id:
+                query = query.filter_by(user_id=user_id)
+            if folder_id is not None:
+                query = query.filter_by(folder_id=folder_id)
+            else:
+                query = query.filter(File.folder_id.is_(None))
+            return [
+                FileModel.model_validate(file)
+                for file in query.order_by(File.updated_at.desc()).all()
+            ]
+
+    def update_file_metadata(
+        self,
+        file_id: str,
+        user_id: str,
+        *,
+        filename: Optional[str] = None,
+        folder_id: Optional[str] = None,
+        folder_id_set: bool = False,
+        db: Optional[Session] = None,
+    ) -> Optional[FileModel]:
+        with get_db_context(db) as db:
+            try:
+                file = db.query(File).filter_by(id=file_id, user_id=user_id).first()
+                if not file:
+                    return None
+
+                if filename is not None:
+                    file.filename = filename
+                if folder_id_set or folder_id is not None:
+                    file.folder_id = folder_id if folder_id else None
+
+                file.updated_at = int(time.time())
+                db.commit()
+                return FileModel.model_validate(file)
+            except Exception as e:
+                log.exception(f'Error updating file metadata: {e}')
+                return None
 
 
 Files = FilesTable()

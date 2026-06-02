@@ -484,7 +484,7 @@ class TestContainerEnvInjection:
 
     def test_container_env_includes_myah_platform_base_bearer_and_auth_aliases(self):
         """Platform URL/bearer plus plugin auth aliases must be injected."""
-        from myah.routers.containers import _start_container_sync
+        from myah.routers.containers import AGENT_GATEWAY_PORT, _start_container_sync
 
         captured_env = {}
 
@@ -509,6 +509,7 @@ class TestContainerEnvInjection:
             ),
             patch('myah.routers.containers.Containers') as mock_containers_model,
             patch('myah.routers.containers.AGENT_BEARER_TOKEN', 'test-bearer'),
+            patch('myah.routers.containers.AGENT_GATEWAY_PORT', 8653),
             patch('myah.routers.containers.PLATFORM_WEBHOOK_HOST', 'host.docker.internal'),
             patch('myah.routers.containers.PLATFORM_PORT', '8082'),
         ):
@@ -524,10 +525,51 @@ class TestContainerEnvInjection:
         assert 'MYAH_PLATFORM_BEARER' in captured_env, 'MYAH_PLATFORM_BEARER missing from container environment'
         assert 'MYAH_ADAPTER_AUTH_KEY' in captured_env, 'MYAH_ADAPTER_AUTH_KEY missing from container environment'
         assert 'MYAH_AGENT_BEARER_TOKEN' in captured_env, 'MYAH_AGENT_BEARER_TOKEN missing from container environment'
+        assert 'MYAH_GATEWAY_PORT' in captured_env, 'MYAH_GATEWAY_PORT missing from container environment'
+        assert 'MYAH_ADAPTER_PORT' in captured_env, 'MYAH_ADAPTER_PORT missing from container environment'
         assert captured_env['MYAH_PLATFORM_BASE_URL'] == 'http://host.docker.internal:8082'
         assert captured_env['MYAH_PLATFORM_BEARER'] == 'test-bearer'
         assert captured_env['MYAH_ADAPTER_AUTH_KEY'] == 'test-bearer'
         assert captured_env['MYAH_AGENT_BEARER_TOKEN'] == 'test-bearer'
+        assert captured_env['MYAH_GATEWAY_PORT'] == '8653'
+        assert captured_env['MYAH_ADAPTER_PORT'] == captured_env['MYAH_GATEWAY_PORT']
+
+    def test_container_env_does_not_forward_marketplace_catalog_token(self, monkeypatch):
+        """Marketplace catalog auth belongs to the platform, not user containers."""
+        from myah.routers.containers import _start_container_sync
+
+        monkeypatch.setenv('MARKETPLACE_CATALOG_AUTH_TOKEN', 'secret-token')
+        captured_env = {}
+
+        def fake_containers_run(*args, **kwargs):
+            captured_env.update(kwargs.get('environment', {}))
+            mock_container = MagicMock()
+            mock_container.id = 'fake-container-id'
+            return mock_container
+
+        mock_docker_client = MagicMock()
+        mock_docker_client.containers.run.side_effect = fake_containers_run
+        mock_docker_client.volumes.list.return_value = []
+        mock_docker_client.volumes.create.return_value = MagicMock()
+        mock_docker_client.containers.get.side_effect = NotFound('not found')
+
+        with (
+            patch('myah.routers.containers._docker_client', return_value=mock_docker_client),
+            patch(
+                'myah.routers.containers._free_port',
+                side_effect=[9001, 9002, 9003, 9004, 9005],
+            ),
+            patch('myah.routers.containers.Containers') as mock_containers_model,
+        ):
+            mock_containers_model.update_status.return_value = None
+            _start_container_sync(
+                user_id='user-test-1',
+                honcho_api_key='hk-1',
+                honcho_workspace_id='ws-1',
+            )
+
+        assert 'GITHUB_TOKEN' not in captured_env
+        assert 'GH_TOKEN' not in captured_env
 
     def test_container_env_includes_myah_home_chat_disabled(self):
         """B1 regression — suppress the gateway "no home channel" first-message warning.
@@ -665,6 +707,7 @@ def test_platform_network_env_var_is_unused(monkeypatch):
 
     with (
         patch('myah.routers.containers._docker_client', return_value=mock_docker_client),
+        patch('myah.routers.containers._detect_egress_proxy', return_value=(False, None)),
         patch(
             'myah.routers.containers._free_port',
             side_effect=[9001, 9002, 9003, 9004, 9005],
@@ -686,6 +729,240 @@ def test_platform_network_env_var_is_unused(monkeypatch):
         f'despite MYAH_PLATFORM_NETWORK being a removed half-feature. The env var should '
         f'have no effect on the spawn path.'
     )
+
+
+def test_detect_egress_proxy_uses_injected_docker_client(monkeypatch):
+    """Egress detection must be deterministic in tests and not inspect real host Docker state."""
+    import importlib
+    from unittest.mock import MagicMock
+
+    from docker.errors import NotFound
+    from myah.routers import containers
+
+    monkeypatch.setenv('MYAH_AGENT_EGRESS_PROXY_URL', 'http://egress-proxy:3128')
+    importlib.reload(containers)
+
+    missing_network_client = MagicMock()
+    missing_network_client.networks.get.side_effect = NotFound('not found')
+    assert containers._detect_egress_proxy(missing_network_client) == (False, None)
+
+    present_network_client = MagicMock()
+    present_network_client.networks.get.return_value = MagicMock()
+    assert containers._detect_egress_proxy(present_network_client) == (True, 'egress-internal')
+
+
+def test_agent_no_proxy_includes_platform_webhook_host(monkeypatch):
+    """Agent callbacks to the platform must bypass Squid when egress proxy is enabled."""
+    from myah.routers import containers
+
+    monkeypatch.setattr(containers, 'PLATFORM_WEBHOOK_HOST', '172.17.0.1')
+
+    hosts = containers._agent_no_proxy().split(',')
+
+    assert 'host.docker.internal' in hosts
+    assert 'localhost' in hosts
+    assert '127.0.0.1' in hosts
+    assert '172.17.0.1' in hosts
+
+
+def test_egress_proxy_env_bypasses_platform_webhook_host(monkeypatch):
+    """Spawned containers must receive no_proxy values that include the platform host."""
+    from unittest.mock import MagicMock, patch
+
+    from docker.errors import NotFound
+    from myah.routers import containers
+
+    captured_kwargs = {}
+
+    def fake_containers_run(*args, **kwargs):
+        captured_kwargs.update(kwargs)
+        mock_container = MagicMock()
+        mock_container.id = 'fake-container-id'
+        return mock_container
+
+    mock_docker_client = MagicMock()
+    mock_docker_client.containers.run.side_effect = fake_containers_run
+    mock_docker_client.volumes.list.return_value = []
+    mock_docker_client.volumes.create.return_value = MagicMock()
+    mock_docker_client.containers.get.side_effect = NotFound('not found')
+
+    with (
+        patch('myah.routers.containers._docker_client', return_value=mock_docker_client),
+        patch('myah.routers.containers._detect_egress_proxy', return_value=(True, 'egress-internal')),
+        patch(
+            'myah.routers.containers._free_port',
+            side_effect=[9001, 9002, 9003, 9004, 9005],
+        ),
+        patch('myah.routers.containers.Containers') as mock_containers_model,
+        patch('myah.routers.containers.AGENT_BEARER_TOKEN', 'test-bearer'),
+        patch('myah.routers.containers.AGENT_EGRESS_PROXY_URL', 'http://egress-proxy:3128'),
+        patch('myah.routers.containers.PLATFORM_WEBHOOK_HOST', '172.17.0.1'),
+        patch('myah.routers.containers.PLATFORM_PORT', '8080'),
+    ):
+        mock_containers_model.update_status.return_value = None
+        containers._start_container_sync(
+            user_id='egress-no-proxy-user',
+            honcho_api_key='hk-1',
+            honcho_workspace_id='ws-1',
+        )
+
+    env = captured_kwargs['environment']
+    assert captured_kwargs['network'] == 'egress-internal'
+    assert env['NO_PROXY'] == env['no_proxy']
+    assert '172.17.0.1' in env['NO_PROXY'].split(',')
+
+
+def test_agent_container_mounts_workspace_tmpfs_writable(monkeypatch):
+    """Hardened containers keep rootfs read-only but must offer /workspace scratch space."""
+    from unittest.mock import MagicMock, patch
+
+    from docker.errors import NotFound
+    from myah.routers import containers
+
+    captured_kwargs = {}
+
+    def fake_containers_run(*args, **kwargs):
+        captured_kwargs.update(kwargs)
+        mock_container = MagicMock()
+        mock_container.id = 'fake-container-id'
+        return mock_container
+
+    mock_docker_client = MagicMock()
+    mock_docker_client.containers.run.side_effect = fake_containers_run
+    mock_docker_client.volumes.list.return_value = []
+    mock_docker_client.volumes.create.return_value = MagicMock()
+    mock_docker_client.containers.get.side_effect = NotFound('not found')
+
+    with (
+        patch('myah.routers.containers._docker_client', return_value=mock_docker_client),
+        patch('myah.routers.containers._detect_egress_proxy', return_value=(False, None)),
+        patch(
+            'myah.routers.containers._free_port',
+            side_effect=[9001, 9002, 9003, 9004, 9005],
+        ),
+        patch('myah.routers.containers.Containers') as mock_containers_model,
+        patch('myah.routers.containers.AGENT_BEARER_TOKEN', 'test-bearer'),
+        patch('myah.routers.containers.PLATFORM_WEBHOOK_HOST', 'host.docker.internal'),
+        patch('myah.routers.containers.PLATFORM_PORT', '8080'),
+    ):
+        mock_containers_model.update_status.return_value = None
+        containers._start_container_sync(
+            user_id='workspace-regression-user',
+            honcho_api_key='hk-1',
+            honcho_workspace_id='ws-1',
+        )
+
+    tmpfs = captured_kwargs['tmpfs']
+    assert captured_kwargs['read_only'] is True
+    assert '/workspace' in tmpfs
+    assert tmpfs['/workspace'].startswith('rw,')
+    assert 'exec' in tmpfs['/workspace'].split(',')
+
+
+def test_agent_container_injects_standalone_gateway_port_env(monkeypatch):
+    """The mapped Myah adapter port must match the port the plugin binds inside the container."""
+    from unittest.mock import MagicMock, patch
+
+    from docker.errors import NotFound
+    from myah.routers import containers
+
+    captured_kwargs = {}
+
+    def fake_containers_run(*args, **kwargs):
+        captured_kwargs.update(kwargs)
+        mock_container = MagicMock()
+        mock_container.id = 'fake-container-id'
+        return mock_container
+
+    mock_docker_client = MagicMock()
+    mock_docker_client.containers.run.side_effect = fake_containers_run
+    mock_docker_client.volumes.list.return_value = []
+    mock_docker_client.volumes.create.return_value = MagicMock()
+    mock_docker_client.containers.get.side_effect = NotFound('not found')
+
+    with (
+        patch('myah.routers.containers._docker_client', return_value=mock_docker_client),
+        patch('myah.routers.containers._detect_egress_proxy', return_value=(False, None)),
+        patch(
+            'myah.routers.containers._free_port',
+            side_effect=[9001, 9002, 9003, 9004, 9005],
+        ),
+        patch('myah.routers.containers.Containers') as mock_containers_model,
+        patch('myah.routers.containers.AGENT_BEARER_TOKEN', 'test-bearer'),
+        patch('myah.routers.containers.AGENT_GATEWAY_PORT', 8653),
+        patch('myah.routers.containers.PLATFORM_WEBHOOK_HOST', 'host.docker.internal'),
+        patch('myah.routers.containers.PLATFORM_PORT', '8080'),
+    ):
+        mock_containers_model.update_status.return_value = None
+        containers._start_container_sync(
+            user_id='gateway-port-regression-user',
+            honcho_api_key='hk-1',
+            honcho_workspace_id='ws-1',
+        )
+
+    env = captured_kwargs['environment']
+    assert captured_kwargs['ports']['8653/tcp'] == 9005
+    assert env['MYAH_GATEWAY_PORT'] == '8653'
+    assert env['MYAH_ADAPTER_PORT'] == '8653'
+
+
+@pytest.mark.asyncio
+async def test_recreate_stale_hidden_when_admin_flag_disabled(monkeypatch):
+    """The stale-container admin endpoint should 404 when disabled, not crash."""
+    import importlib
+
+    from fastapi import HTTPException
+    from myah.routers import containers
+
+    monkeypatch.setenv('MYAH_CONTAINER_RECREATE_ADMIN_ENABLED', 'False')
+    importlib.reload(containers)
+
+    with pytest.raises(HTTPException) as exc:
+        await containers.list_stale_containers(user=object())
+
+    assert exc.value.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_recreate_stale_lists_hash_mismatches_when_enabled(monkeypatch):
+    """When enabled, stale-container listing reports running agents with mismatched hashes."""
+    import importlib
+    from unittest.mock import MagicMock, patch
+
+    from myah.routers import containers
+
+    monkeypatch.setenv('MYAH_CONTAINER_RECREATE_ADMIN_ENABLED', 'True')
+    importlib.reload(containers)
+
+    fresh = MagicMock()
+    fresh.name = 'myah-agent-fresh'
+    fresh.status = 'running'
+    fresh.labels = {'myah.security-config-hash': containers._CURRENT_SECURITY_HASH}
+
+    stale = MagicMock()
+    stale.name = 'myah-agent-stale'
+    stale.status = 'running'
+    stale.labels = {'myah.security-config-hash': 'oldhash'}
+
+    ignored = MagicMock()
+    ignored.name = 'postgres'
+    ignored.status = 'running'
+    ignored.labels = {}
+
+    client = MagicMock()
+    client.containers.list.return_value = [fresh, stale, ignored]
+
+    with patch('myah.routers.containers._docker_client', return_value=client):
+        result = await containers.list_stale_containers(user=object())
+
+    assert result['total_running'] == 2
+    assert result['stale_containers'] == [
+        {
+            'name': 'myah-agent-stale',
+            'current_hash': 'oldhash',
+            'expected_hash': containers._CURRENT_SECURITY_HASH,
+        }
+    ]
 
 
 # ── Phase 7.2: MYAH_AGENT_IMAGE_OVERRIDES (canary mechanism) ─────────────

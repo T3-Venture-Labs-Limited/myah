@@ -109,7 +109,14 @@ export const showShortcuts = writable(false);
 export const showArchivedChats = writable(false);
 export const showChangelog = writable(false);
 
-export const showControls = writable(false);
+// One pane may show itself at a time on the right.
+// When one rises, the others must step aside.
+export const activeRightPane: Writable<'controls' | 'artifact' | null> = writable(null);
+
+// One-shot handoff: files dropped here by /files "Open in new chat" are
+// consumed by Chat.svelte on first init, then the array is cleared so a
+// page refresh doesn't re-attach.
+export const pendingChatFiles: Writable<Array<Record<string, unknown>>> = writable([]);
 
 // Re-exported so existing consumers' `import { ArtifactFile } from '$lib/stores'`
 // continues to compile. The canonical definition lives in $lib/types/artifact.
@@ -130,6 +137,24 @@ export const artifactActiveTabIdx: Writable<number> = writable(-1);
 
 // Whether the artifact pane is open at all. Drives the layout shift.
 export const artifactPaneOpen: Writable<boolean> = writable(false);
+
+// Bridge: hosted ArtifactExplorer writes here via "Send to chat"; Chat.svelte
+// reads-and-clears. Dead infra in OSS — kept so hosted overlay shares the shell.
+export interface PendingComposerFile {
+	id: string;
+	name?: string;
+	size?: number;
+	type?: string;
+	url?: string;
+	collection_name?: string;
+	status?: string;
+	error?: string;
+	content_type?: string;
+	itemId?: string;
+	file?: unknown;
+}
+
+export const pendingComposerFileAttach: Writable<PendingComposerFile | null> = writable(null);
 
 // What's currently selected, single-valued across all renderers.
 export const artifactSelection: Writable<SelectionPayload | null> = writable(null);
@@ -269,10 +294,6 @@ chatId.subscribe((id) => {
 	artifactPendingEdits.set(new Map());
 	composerRefs.set([]);
 });
-
-// ── Other panel-related stores (preserved from previous shape) ────────
-export const showChatFilesPanel: Writable<boolean> = writable(false);
-export const activeChatFileId: Writable<string | null> = writable(null);
 
 export const temporaryChatEnabled = writable(false);
 export const scrollPaginationEnabled = writable(false);

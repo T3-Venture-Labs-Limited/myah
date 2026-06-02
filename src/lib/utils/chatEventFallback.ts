@@ -54,7 +54,26 @@ export const applyDurableFinalMessageEvent = (
 	}
 
 	const messages = chat?.history?.messages;
-	const message = messages?.[messageId];
+	const directMessage = messages?.[messageId];
+	const currentMessageId = chat?.history?.currentId ?? null;
+	const currentMessage = currentMessageId ? messages?.[currentMessageId] : undefined;
+	const eventParentId = data.parent_id ?? data.parentId ?? null;
+	const unfinishedAssistantMessages = Object.values(messages ?? {}).filter(
+		(candidate: any) => candidate?.role === 'assistant' && !candidate.done && !candidate.content
+	);
+	const currentMatchesParent =
+		!eventParentId ||
+		currentMessage?.parentId === eventParentId ||
+		currentMessage?.parent_id === eventParentId;
+	const message =
+		directMessage ??
+		(currentMessage?.role === 'assistant' &&
+		!currentMessage.done &&
+		!currentMessage.content &&
+		currentMatchesParent &&
+		unfinishedAssistantMessages.length === 1
+			? currentMessage
+			: undefined);
 	if (!message) {
 		return false;
 	}

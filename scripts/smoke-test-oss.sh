@@ -602,4 +602,30 @@ esac
 rm -f /tmp/smoke-oss-models.json
 
 echo ""
+echo "## Marketplace — OSS absent probe (T3-1003)"
+for MP_PATH in "/api/marketplace/installed/bundles" "/api/marketplace/installed/updates" "/api/marketplace/install/test-slug"; do
+    CODE=$(curl -s -o /dev/null -w "%{http_code}" "${BASE_URL}${MP_PATH}" --max-time 10 2>/dev/null || echo "000")
+    case "$CODE" in
+        404|405)
+            echo "  OK: ${MP_PATH} → HTTP ${CODE} (marketplace API absent in OSS)"
+            ;;
+        *)
+            echo "  FAIL: ${MP_PATH} returned HTTP ${CODE}; expected 404/405 because marketplace API must be absent in OSS" >&2
+            exit 1
+            ;;
+    esac
+done
+
+echo ""
+echo "## Container — OSS no-spawn invariant (T3-1003)"
+CONTAINER_COUNT=$(docker ps --filter "label=myah.user_id" --format '{{.Names}}' 2>/dev/null | wc -l || echo "0")
+if [ "$CONTAINER_COUNT" -gt 0 ]; then
+    echo "  FAIL: found ${CONTAINER_COUNT} myah agent container(s) in OSS mode (should be 0)"
+    exit 1
+fi
+echo "  OK: no myah agent containers running in OSS mode"
+
+# ──────────────────────────────────────────────────────────────────────────
+
+echo ""
 echo "=== OSS Smoke Test PASSED ==="

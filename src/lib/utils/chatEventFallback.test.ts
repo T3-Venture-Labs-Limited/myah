@@ -282,7 +282,13 @@ describe('applyDurableFinalMessageEvent', () => {
 
 	it('ignores ordinary completion events that do not carry durable fallback markers', () => {
 		const staleOutput = [
-			{ type: 'function_call', id: 'fc_1', name: 'search_files', call_id: 'call_1', arguments: '{}' }
+			{
+				type: 'function_call',
+				id: 'fc_1',
+				name: 'search_files',
+				call_id: 'call_1',
+				arguments: '{}'
+			}
 		];
 		const chat = {
 			history: {
@@ -314,7 +320,93 @@ describe('applyDurableFinalMessageEvent', () => {
 		expect(chat.history.messages['msg-1'].output).toBe(staleOutput);
 	});
 
-	it('returns false when durable final event targets a missing local message', () => {
+	it('applies durable final content to current empty assistant placeholder when event message is missing locally', () => {
+		const chat = {
+			history: {
+				currentId: 'local-placeholder',
+				messages: {
+					'local-placeholder': {
+						id: 'local-placeholder',
+						parentId: 'user-1',
+						role: 'assistant',
+						content: '',
+						done: false,
+						output: [{ type: 'function_call', name: 'search_files' }]
+					}
+				}
+			}
+		};
+
+		const applied = applyDurableFinalMessageEvent(
+			{
+				chat_id: 'chat-1',
+				message_id: 'persisted-final',
+				data: {
+					type: 'chat:completion',
+					data: {
+						content: 'final answer',
+						done: true,
+						message_id: 'persisted-final',
+						chat_id: 'chat-1',
+						parent_id: 'user-1'
+					}
+				}
+			},
+			'chat-1',
+			chat
+		);
+
+		expect(applied).toBe(true);
+		expect(chat.history.messages['local-placeholder'].content).toBe('final answer');
+		expect(chat.history.messages['local-placeholder'].done).toBe(true);
+		expect(chat.history.messages['local-placeholder'].output).toBeUndefined();
+	});
+
+	it('does not apply missing-message durable final content to a placeholder for a different parent', () => {
+		const chat = {
+			history: {
+				currentId: 'local-placeholder',
+				messages: {
+					'local-placeholder': {
+						id: 'local-placeholder',
+						parentId: 'user-1',
+						role: 'assistant',
+						content: '',
+						done: false,
+						output: [{ type: 'function_call', name: 'search_files' }]
+					}
+				}
+			}
+		};
+
+		const applied = applyDurableFinalMessageEvent(
+			{
+				chat_id: 'chat-1',
+				message_id: 'persisted-final',
+				data: {
+					type: 'chat:completion',
+					data: {
+						content: 'wrong final answer',
+						done: true,
+						message_id: 'persisted-final',
+						chat_id: 'chat-1',
+						parent_id: 'other-user-message'
+					}
+				}
+			},
+			'chat-1',
+			chat
+		);
+
+		expect(applied).toBe(false);
+		expect(chat.history.messages['local-placeholder'].content).toBe('');
+		expect(chat.history.messages['local-placeholder'].done).toBe(false);
+		expect(chat.history.messages['local-placeholder'].output).toEqual([
+			{ type: 'function_call', name: 'search_files' }
+		]);
+	});
+
+	it('returns false when durable final event targets a missing local message without a safe placeholder', () => {
 		const chat = {
 			history: {
 				messages: {}

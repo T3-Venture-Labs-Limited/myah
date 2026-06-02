@@ -2,9 +2,31 @@ import { sveltekit } from '@sveltejs/kit/vite';
 import { defineConfig } from 'vite';
 import { sentryVitePlugin } from '@sentry/vite-plugin';
 import { svelteTesting } from '@testing-library/svelte/vite';
+import path from 'node:path';
 
 const BACKEND_PORT = process.env.BACKEND_PORT || '8082';
 const BACKEND_BASE_URL = `http://localhost:${BACKEND_PORT}`;
+const devWorktreeRoot = process.env.MYAH_DEV_WORKTREE_ROOT
+	? path.resolve(process.env.MYAH_DEV_WORKTREE_ROOT)
+	: undefined;
+const isInsideDevWorktree = (candidate: string) => {
+	if (!devWorktreeRoot) {
+		return false;
+	}
+
+	const relativePath = path.relative(devWorktreeRoot, path.resolve(candidate));
+	return relativePath !== '' && !relativePath.startsWith('..') && !path.isAbsolute(relativePath);
+};
+const extraFsAllow = [
+	...new Set(
+		(process.env.MYAH_DEV_VITE_FS_ALLOW_EXTRA ?? '')
+			.split(process.platform === 'win32' ? ';' : ':')
+			.map((candidate) => candidate.trim())
+			.filter(Boolean)
+			.map((candidate) => path.resolve(candidate))
+			.filter(isInsideDevWorktree)
+	)
+];
 
 export default defineConfig({
 	plugins: [
@@ -25,13 +47,29 @@ export default defineConfig({
 		// Required for Svelte 5 component mounts in jsdom (sets resolve.conditions: ['browser']).
 		svelteTesting()
 	],
+	resolve: {
+		// ── Myah: dedupe svelte runtime ──────────────────────────────
+		// Required for Svelte 5 + Vite 5 when other deps (@xyflow/svelte,
+		// @sentry/sveltekit) carry their own svelte peer dependency. Without
+		// this, Vite resolves multiple svelte instances and bundles them
+		// across separate chunks, producing duplicate runtime singletons
+		// and the runtime error: "Cannot read properties of undefined
+		// (reading 'call')" in `Selector.$.add_svelte_meta.componentTag`.
+		// Canonical fix per sveltejs/svelte#17032.
+		// Hosted dev overlays symlink source files into .worktree-logs. Keep module
+		// resolution anchored at the overlay path so bare imports resolve through
+		// the overlay's node_modules symlink instead of real platform-hosted paths.
+		// ────────────────────────────────────────────────────────────
+		dedupe: ['svelte'],
+		preserveSymlinks: true
+	},
 	server: {
 		host: true, // bind to 0.0.0.0 — accessible over Tailscale
 		port: 5173,
 		fs: {
 			// Allow serving files from symlinked node_modules in git worktrees,
 			// which resolve to the main workspace path outside the worktree root.
-			allow: ['..', '/Users/admin/Repos/myah/platform']
+			allow: ['..', '/Users/admin/Repos/myah/platform', ...extraFsAllow]
 		},
 		watch: {
 			// Don't watch the Python venv — pip installs would trigger Vite reloads

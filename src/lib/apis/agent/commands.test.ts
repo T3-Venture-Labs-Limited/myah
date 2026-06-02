@@ -52,6 +52,41 @@ describe('getAgentCommands', () => {
 		);
 	});
 
+	it('retries transient 503 command load while Hermes dashboard restarts', async () => {
+		vi.useFakeTimers();
+		const mockCommands = [
+			{
+				name: 'caveman',
+				category: 'skill',
+				description: 'Caveman mode',
+				aliases: [],
+				args: '',
+				bypass: false,
+				source: 'skill'
+			}
+		];
+
+		global.fetch = vi
+			.fn()
+			.mockResolvedValueOnce({
+				ok: false,
+				status: 503,
+				json: () => Promise.resolve({ detail: 'Hermes dashboard dropped the connection — please retry' })
+			})
+			.mockResolvedValueOnce({
+				ok: true,
+				status: 200,
+				json: () => Promise.resolve({ commands: mockCommands })
+			}) as any;
+
+		const promise = getAgentCommands('test-token');
+		await vi.runAllTimersAsync();
+
+		await expect(promise).resolves.toEqual(mockCommands);
+		expect(global.fetch).toHaveBeenCalledTimes(2);
+		vi.useRealTimers();
+	});
+
 	it('throws error on non-OK response', async () => {
 		const errorBody = { detail: 'Unauthorized' };
 		global.fetch = vi.fn().mockResolvedValue({

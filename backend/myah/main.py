@@ -95,7 +95,7 @@ from myah.routers import oss as oss_router_module
 from myah.utils.hermes_web import is_oss_mode as _is_oss_mode
 
 if not _is_oss_mode():
-    from myah.routers import admin_cron_deliveries, agent_memory, integrations
+    from myah.routers import admin_cron_deliveries, agent_memory, files_system, integrations, marketplace
 
 
 from sqlalchemy.orm import Session
@@ -227,6 +227,7 @@ from myah.env import (
     WEBUI_ADMIN_NAME,
     ENABLE_EASTER_EGGS,
     LOG_FORMAT,
+    MARKETPLACE_ENABLED,
 )
 
 
@@ -320,12 +321,12 @@ logging.getLogger().addFilter(_PipelineFilter())
 #
 # Deep-link limitation (intentional): only paths backed by a +page.svelte in
 # the route file tree are served. A path-param deep link (e.g.
-# /agent/skills/edit/<name>) 404s unless its route declares a [param] segment.
-# The two param-less edit pages take their entity via query string instead
-# (/agent/skills/edit?name=…, /agent/tools/edit?id=…), so their deep links
-# match the param-less allowlist entry and still serve the shell. New nested
-# deep links must either add a [param] route (auto-covered by the drift tests)
-# or use query params; test_seo_hygiene.py guards this for the edit pages.
+# /agent/tools/edit/<id>) 404s unless its route declares a [param] segment.
+# The param-less edit page takes its entity via query string instead
+# (/agent/tools/edit?id=…), so its deep links match the param-less allowlist
+# entry and still serve the shell. New nested deep links must either add a
+# [param] route (auto-covered by the drift tests) or use query params;
+# test_seo_hygiene.py guards this for edit pages.
 _SPA_STATIC_ROUTES = frozenset(
     {
         '/',
@@ -338,9 +339,6 @@ _SPA_STATIC_ROUTES = frozenset(
         '/diagnostics',
         '/agent',
         '/agent/settings',
-        '/agent/skills',
-        '/agent/skills/create',
-        '/agent/skills/edit',
         '/agent/tools',
         '/agent/tools/create',
         '/agent/tools/edit',
@@ -560,6 +558,15 @@ async def lifespan(app: FastAPI):
         log.info(f'Loaded {count} skill composition(s)')
     except Exception as e:
         log.warning(f'Failed to load skill compositions: {e}')
+    # ────────────────────────────────────────────────────────────────────────────
+
+    if not _is_oss_mode() and MARKETPLACE_ENABLED:
+        try:
+            from myah.utils.marketplace_catalog import start_catalog_refresh_loop
+
+            asyncio.create_task(start_catalog_refresh_loop(app))
+        except Exception as e:
+            log.warning(f'Failed to start marketplace catalog refresh loop: {e}')
     # ────────────────────────────────────────────────────────────────────────────
 
     # ── Sentry error tracking, tracing, and logging ─────────────────────────────
@@ -1047,10 +1054,11 @@ app.include_router(processes.router, prefix='/api/v1/processes', tags=['processe
 app.include_router(agent_capabilities.router, prefix='/api/v1/agent', tags=['agent'])
 app.include_router(agent_sessions.router, prefix='/api/v1/agent', tags=['agent-sessions'])
 
-# OSS-split: agent_memory router is hosted-only. See _is_oss_mode check at the
-# top of this file — agent_memory is only imported in the hosted build.
+# OSS-split: agent_memory + files_system routers are hosted-only. See _is_oss_mode
+# check at the top of this file — these are only imported in the hosted build.
 if not _is_oss_mode():
     app.include_router(agent_memory.router, prefix='/api/v1/agent/memory', tags=['agent-memory'])
+    app.include_router(files_system.router, prefix='/api/v1/files-system', tags=['files-system'])
     app.include_router(admin_cron_deliveries.router)
 
 app.include_router(hermes_media.router, prefix='/api/v1/hermes/media', tags=['hermes_media'])
@@ -1081,6 +1089,10 @@ app.include_router(oss_router_module.router)
 # OSS-split: integrations is composio-coupled and only loaded in hosted mode.
 if not _is_oss_mode():
     app.include_router(integrations.router, prefix='/api/v1/integrations', tags=['integrations'])
+# ────────────────────────────────────────────────────────────────────────
+
+if not _is_oss_mode():
+    app.include_router(marketplace.router, prefix='/api/marketplace', tags=['marketplace'])
 # ────────────────────────────────────────────────────────────────────────
 
 

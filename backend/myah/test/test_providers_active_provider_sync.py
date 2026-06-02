@@ -47,7 +47,10 @@ async def test_connect_credential_syncs_active_provider():
     user = MagicMock()
     user.id = 'test-user'
 
+    web_calls: list[dict] = []
+
     async def mock_web_call(user_arg, method, path, **kwargs):
+        web_calls.append({'method': method, 'path': path, 'json_body': kwargs.get('json_body')})
         if path.endswith('/credential'):
             return {'entry_id': 'fake-entry', 'key_last_four': '1234'}
         return {'ok': True}
@@ -73,6 +76,8 @@ async def test_connect_credential_syncs_active_provider():
     assert len(sync_calls) == 1, f'Expected exactly one /myah/v1/active-provider call, got: {aux_calls}'
     assert sync_calls[0]['method'] == 'POST'
     assert sync_calls[0]['json_body'] == {'provider': 'openrouter'}
+    config_puts = [c for c in web_calls if c['method'] == 'PUT' and c['path'] == '/api/plugins/myah-admin/config/model']
+    assert config_puts[-1]['json_body'] == {'model': 'openrouter-default-model', 'provider': 'openrouter'}
 
 
 @pytest.mark.asyncio
@@ -157,7 +162,10 @@ async def test_set_active_provider_syncs():
     user = MagicMock()
     user.id = 'test-user'
 
+    web_calls: list[dict] = []
+
     async def mock_web_call(user_arg, method, path, **kwargs):
+        web_calls.append({'method': method, 'path': path, 'json_body': kwargs.get('json_body')})
         return {'ok': True}
 
     aux_calls: list[dict] = []
@@ -181,6 +189,8 @@ async def test_set_active_provider_syncs():
     assert len(sync_calls) == 1
     assert sync_calls[0]['method'] == 'POST'
     assert sync_calls[0]['json_body'] == {'provider': 'openrouter'}
+    config_puts = [c for c in web_calls if c['method'] == 'PUT' and c['path'] == '/api/plugins/myah-admin/config/model']
+    assert config_puts[-1]['json_body'] == {'model': 'openrouter-default-model', 'provider': 'openrouter'}
 
 
 @pytest.mark.asyncio

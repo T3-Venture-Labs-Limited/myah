@@ -41,6 +41,25 @@ def _normalize_timestamp(timestamp: int) -> float:
     return timestamp
 
 
+def _is_blank_content(content: Any) -> bool:
+    if content is None:
+        return True
+    if isinstance(content, str):
+        return content.strip() == ''
+    if isinstance(content, list):
+        return len(content) == 0
+    return False
+
+
+def _is_empty_final_assistant(data: dict) -> bool:
+    return (
+        data.get('role') == 'assistant'
+        and data.get('done', True) is True
+        and _is_blank_content(data.get('content'))
+        and not data.get('output')
+    )
+
+
 ####################
 # ChatMessage DB Schema
 ####################
@@ -175,7 +194,21 @@ class ChatMessageTable:
                 db.refresh(existing)
                 return ChatMessageModel.model_validate(existing)
             else:
-                # Insert new
+                # Insert new. If a terminal blank assistant sibling arrives
+                # after a non-empty answer for the same user turn, treat it as
+                # a duplicate final placeholder and keep the real answer.
+                parent_id = data.get('parent_id') or data.get('parentId')
+                if _is_empty_final_assistant(data) and parent_id:
+                    sibling = (
+                        db.query(ChatMessage)
+                        .filter_by(chat_id=chat_id, parent_id=parent_id, role='assistant')
+                        .filter(ChatMessage.content.isnot(None))
+                        .order_by(ChatMessage.created_at.desc())
+                        .first()
+                    )
+                    if sibling and not _is_blank_content(sibling.content):
+                        return ChatMessageModel.model_validate(sibling)
+
                 # Extract usage - check direct field first, then info.usage
                 usage = data.get('usage')
                 if not usage:

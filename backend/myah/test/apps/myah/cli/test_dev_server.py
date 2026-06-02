@@ -13,6 +13,7 @@ originally defined.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any
 
@@ -157,6 +158,37 @@ def test_backend_passes_loaded_env_to_subprocess(worktree: Path, mocker) -> None
     assert env['BACKEND_PORT'] == '8189'
 
 
+def test_backend_hosted_mode_materializes_hosted_overlay(worktree: Path, mocker) -> None:
+    """Hosted worktrees run uvicorn from an OSS+hosted backend overlay."""
+    (worktree / 'platform-oss' / 'backend' / 'myah').mkdir(parents=True)
+    (worktree / 'platform-oss' / 'backend' / 'myah' / '__init__.py').write_text('')
+    (worktree / 'platform-oss' / 'backend' / 'myah' / 'oss_only.py').write_text('OSS = True\n')
+    (worktree / 'platform-hosted' / 'backend' / 'myah').mkdir(parents=True)
+    (worktree / 'platform-hosted' / 'backend' / 'myah' / 'hosted_only.py').write_text('HOSTED = True\n')
+    (worktree / 'platform-oss' / 'package.json').write_text('{"name":"myah","version":"0.0.0"}')
+    (worktree / 'platform-oss' / 'shared' / 'contract').mkdir(parents=True)
+    (worktree / 'platform-oss' / 'shared' / 'contract' / '__init__.py').write_text('')
+
+    mocker.patch('myah.cli.dev.server._is_port_listening', return_value=False)
+    mocker.patch('myah.cli.dev.server._health_check', return_value=True)
+    fake_popen = mocker.patch('myah.cli.dev.server.Popen', side_effect=_FakePopen)
+
+    result = runner.invoke(app, ['dev', 'backend'])
+
+    assert result.exit_code == 0, result.output
+    cwd = Path(fake_popen.call_args.kwargs['cwd'])
+    assert cwd == worktree / '.worktree-logs' / 'hosted-backend-overlay' / 'backend'
+    assert (cwd / 'myah' / 'oss_only.py').is_file()
+    assert (cwd / 'myah' / 'hosted_only.py').is_file()
+    assert (cwd.parent / 'package.json').is_file()
+    assert (cwd.parent / 'shared' / 'contract' / '__init__.py').is_file()
+    env = fake_popen.call_args.kwargs['env']
+    python_path = env['PYTHONPATH'].split(':')
+    assert str(cwd) in python_path
+    assert str(cwd.parent) in python_path
+    assert env['DATA_DIR'] == str(worktree / 'platform-oss' / 'backend' / 'data')
+
+
 def test_backend_fails_fast_on_empty_bearer(tmp_path: Path, mocker) -> None:
     """Empty MYAH_AGENT_BEARER_TOKEN → exit 2, no Popen call."""
     wt = _make_worktree(tmp_path, bearer='')
@@ -283,6 +315,22 @@ def test_frontend_passes_backend_port_to_env(worktree: Path, mocker) -> None:
     assert env['BACKEND_PORT'] == '8189'
 
 
+def test_frontend_forces_development_node_env(worktree: Path, mocker, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Parent NODE_ENV=production must not break SvelteKit dev boot."""
+    monkeypatch.setenv('NODE_ENV', 'production')
+    monkeypatch.setenv('ENV', 'prod')
+    mocker.patch('myah.cli.dev.server._is_port_listening', return_value=False)
+    mocker.patch('myah.cli.dev.server._health_check', return_value=True)
+    fake_popen = mocker.patch('myah.cli.dev.server.Popen', side_effect=_FakePopen)
+
+    result = runner.invoke(app, ['dev', 'frontend'])
+
+    assert result.exit_code == 0, result.output
+    env = fake_popen.call_args.kwargs['env']
+    assert env['NODE_ENV'] == 'development'
+    assert env['ENV'] == 'dev'
+
+
 def test_frontend_idempotent_when_already_listening(worktree: Path, mocker) -> None:
     """Idempotence mirrors backend."""
     mocker.patch('myah.cli.dev.server._is_port_listening', return_value=True)
@@ -319,8 +367,8 @@ def test_frontend_health_check_timeout_reports_error(worktree: Path, mocker) -> 
     assert result.exit_code == 1, result.output
 
 
-def test_frontend_cwd_is_platform_oss(worktree: Path, mocker) -> None:
-    """npm run dev runs from <worktree>/platform-oss."""
+def test_frontend_cwd_is_platform_oss_without_hosted_overlay(worktree: Path, mocker) -> None:
+    """npm run dev runs from <worktree>/platform-oss when no hosted frontend exists."""
     mocker.patch('myah.cli.dev.server._is_port_listening', return_value=False)
     mocker.patch('myah.cli.dev.server._health_check', return_value=True)
     fake_popen = mocker.patch('myah.cli.dev.server.Popen', side_effect=_FakePopen)
@@ -330,6 +378,42 @@ def test_frontend_cwd_is_platform_oss(worktree: Path, mocker) -> None:
     assert result.exit_code == 0, result.output
     cwd = fake_popen.call_args.kwargs['cwd']
     assert Path(cwd).resolve() == (worktree / 'platform-oss').resolve()
+
+
+def test_frontend_hosted_mode_materializes_hosted_overlay(worktree: Path, mocker) -> None:
+    """Hosted worktrees run Vite from an OSS+hosted frontend overlay."""
+    (worktree / 'platform-oss' / 'src' / 'routes' / '(app)').mkdir(parents=True)
+    (worktree / 'platform-oss' / 'src' / 'routes' / '(app)' / '+page.svelte').write_text('<p>OSS</p>')
+    (worktree / 'platform-oss' / 'package.json').write_text('{"scripts":{"dev":"vite"}}')
+    (worktree / 'platform-oss' / 'node_modules').mkdir()
+    (worktree / 'platform-hosted' / 'src' / 'routes' / '(app)' / 'files').mkdir(parents=True)
+    (worktree / 'platform-hosted' / 'src' / 'routes' / '(app)' / 'files' / '+page.svelte').write_text(
+        '<p>Files</p>'
+    )
+
+    mocker.patch('myah.cli.dev.server._is_port_listening', return_value=False)
+    mocker.patch('myah.cli.dev.server._health_check', return_value=True)
+    fake_popen = mocker.patch('myah.cli.dev.server.Popen', side_effect=_FakePopen)
+
+    result = runner.invoke(app, ['dev', 'frontend'])
+
+    assert result.exit_code == 0, result.output
+    cwd = Path(fake_popen.call_args.kwargs['cwd'])
+    assert cwd == worktree / '.worktree-logs' / 'hosted-frontend-overlay'
+    assert (cwd / 'src' / 'routes' / '(app)' / '+page.svelte').is_symlink()
+    assert (cwd / 'src' / 'routes' / '(app)' / 'files' / '+page.svelte').is_symlink()
+    assert (cwd / 'node_modules').is_symlink()
+    assert (cwd / 'node_modules').resolve() == (worktree / 'platform-oss' / 'node_modules').resolve()
+    assert not (cwd / '.env').exists()
+    assert not (cwd / '.venv').exists()
+    assert not (cwd / 'backend').exists()
+    env = fake_popen.call_args.kwargs['env']
+    assert env['MYAH_DEV_WORKTREE_ROOT'] == str(worktree.resolve())
+    assert env['MYAH_DEV_VITE_FS_ALLOW_EXTRA'].split(os.pathsep) == [
+        str((worktree / 'platform-oss' / 'node_modules').resolve()),
+        str((worktree / 'platform-oss' / 'src').resolve()),
+        str((worktree / 'platform-hosted' / 'src').resolve()),
+    ]
 
 
 # ---------------------------------------------------------------------------

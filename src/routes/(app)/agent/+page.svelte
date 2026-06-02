@@ -1,12 +1,14 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
+	import { env } from '$env/dynamic/public';
 	import { onMount } from 'svelte';
 
-	// In OSS/hosted shared platform code, the top-level Agent nav should land on
-	// the runtime-facing agent settings surface, not the skills catalog. Routing
-	// to /agent/skills makes the Agent sidebar destination feel broken and hides
-	// the page users expect for agent/runtime controls.
+	const isOss = env.PUBLIC_DEPLOYMENT_MODE === 'oss';
+
+	// The top-level Agent destination should follow the first visible tab.
+	// Hosted exposes Skills first; OSS moves Skills out of the app UI and starts
+	// at Tools instead.
 	onMount(() => {
-		goto('/agent/settings', { replaceState: true });
+		goto(isOss ? '/agent/tools' : '/agent/skills', { replaceState: true });
 	});
 </script>

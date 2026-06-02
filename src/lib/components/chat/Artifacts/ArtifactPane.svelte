@@ -81,6 +81,7 @@
 			<ArtifactTabs
 				openFiles={$artifactOpenFiles}
 				activeIdx={$artifactActiveTabIdx}
+				{token}
 				on:activate={activateTab}
 				on:close={closeTab}
 			/>

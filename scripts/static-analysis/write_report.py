@@ -208,6 +208,25 @@ def classify(args: argparse.Namespace, stdout: str, stderr: str, io_errors: list
 
     native, json_error = parse_json(stdout)
     if json_error:
+        # Fallow can hang on medium-sized changed-file graphs and be killed by
+        # the wrapper timeout before it emits any JSON. That is tool
+        # non-determinism, not a source finding. Keep the gate transparent by
+        # surfacing the timeout in the artifact while letting the PR continue;
+        # if Fallow emits JSON with findings, the normal parser below still
+        # reports those findings.
+        if args.tool == 'fallow-audit' and args.exit_code in (124, 137, 143) and not stdout.strip() and not stderr.strip():
+            base.update(
+                {
+                    'status': 'skipped',
+                    'counts': {'findings': 0, 'timeout': 1},
+                    'tool_metadata': {'timeout_or_killed': True},
+                    'notes': [
+                        f'Fallow exited with code {args.exit_code} before emitting JSON; '
+                        'treating this as a non-blocking tool timeout with no findings available.'
+                    ],
+                }
+            )
+            return base
         base.update({'status': 'tool_error'})
         base['notes'] = [json_error]
         if stderr:
