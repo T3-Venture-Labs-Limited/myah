@@ -463,3 +463,60 @@ def test_persist_and_rewrite_chat_file_failure_does_not_abort():
     result = asyncio.get_event_loop().run_until_complete(run())
     # The rewrite must still succeed — ChatFile failure must not abort the pipeline
     assert '/api/v1/files/agent-file-id-3/content' in result
+
+def test_collect_refs_markdown_image_media_url_strips_media_prefix():
+    """Regression: assistant replies may use markdown image syntax around a MEDIA: tag.
+
+    Example: ![preview](MEDIA:/tmp/clip.gif). The persist pass must fetch
+    /tmp/clip.gif via the agent media proxy, not try to fetch the literal
+    path MEDIA:/tmp/clip.gif.
+    """
+    from myah.utils.hermes_media_persist import _collect_refs_outside_code
+
+    refs = _collect_refs_outside_code('![preview](MEDIA:/tmp/clip.gif)')
+    assert len(refs) == 1
+    assert refs[0].original == '![preview](MEDIA:/tmp/clip.gif)'
+    assert refs[0].value == '/tmp/clip.gif'
+    assert refs[0].is_external is False
+    assert refs[0].is_media_tag is False
+    assert refs[0].alt_text == 'preview'
+
+def test_persist_and_rewrite_markdown_image_wrapped_media_tag_fetches_inner_path():
+    """Persist ![alt](MEDIA:/tmp/x.gif) by fetching /tmp/x.gif, then keep inline image markup."""
+    from myah.utils.hermes_media_persist import persist_and_rewrite
+
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+    mock_response.content = b'GIF89a' + b'\x00' * 50
+    mock_response.headers = {'Content-Type': 'image/gif'}
+
+    mock_file_item = MagicMock()
+    mock_file_item.id = 'stored-gif-id'
+
+    async def run():
+        with (
+            patch('httpx.AsyncClient') as mock_client_class,
+            patch('myah.utils.hermes_media_persist.Storage') as mock_storage,
+            patch('myah.utils.hermes_media_persist.Files') as mock_files,
+        ):
+            mock_client = AsyncMock()
+            mock_client.get = AsyncMock(return_value=mock_response)
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=None)
+            mock_client_class.return_value = mock_client
+            mock_storage.upload_file.return_value = (None, 'storage/path/clip.gif')
+            mock_files.insert_new_file.return_value = mock_file_item
+
+            result = await persist_and_rewrite(
+                user_id='u1',
+                chat_id='c1',
+                message_text='Preview: ![clip](MEDIA:/tmp/clip.gif)',
+                agent_base_url='http://localhost:8642',
+                agent_bearer='tok',
+            )
+            call_kwargs = mock_client.get.call_args.kwargs
+        return result, call_kwargs
+
+    result, call_kwargs = asyncio.get_event_loop().run_until_complete(run())
+    assert call_kwargs['params']['path'] == '/tmp/clip.gif'
+    assert result == 'Preview: ![clip](/api/v1/files/stored-gif-id/content?name=clip.gif)'
