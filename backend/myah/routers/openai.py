@@ -2189,6 +2189,72 @@ async def confirm_chat_action(
             return await resp.json()
 
 
+@router.post('/chat/clarify')
+async def submit_chat_clarify(
+    request: Request,
+    user=Depends(get_verified_user),
+):
+    """Proxy a user's clarify response to the Hermes gateway adapter.
+
+    Called by the frontend ClarifyInputCard when the user selects a choice or
+    submits free text. Routes through /myah/v1/clarify/{stream_id} on the
+    gateway adapter so Hermes can unblock the waiting clarify tool call.
+
+    Body: { run_id: str, clarify_id: str, response: str }
+    """
+    body = await request.json()
+    stream_id = str(body.get('run_id') or '').strip()
+    clarify_id = str(body.get('clarify_id') or '').strip()
+    response_text = str(body.get('response') or '').strip()
+
+    if not stream_id:
+        raise HTTPException(status_code=400, detail='run_id is required')
+    if not clarify_id:
+        raise HTTPException(status_code=400, detail='clarify_id is required')
+    if not response_text:
+        raise HTTPException(status_code=400, detail='response is required')
+    if len(str(response_text)) > 4096:
+        raise HTTPException(status_code=400, detail='response too long')
+    if not re.match(r'^[a-zA-Z0-9_-]{1,128}$', stream_id):
+        raise HTTPException(status_code=400, detail='Invalid run_id format')
+    if not re.match(r'^[a-zA-Z0-9_-]{1,128}$', clarify_id):
+        raise HTTPException(status_code=400, detail='Invalid clarify_id format')
+
+    try:
+        record = await get_or_create_container(user.id)
+    except Exception:
+        raise HTTPException(status_code=503, detail='Agent container unavailable')
+
+    _base = _gateway_url(record.gateway_port or record.host_port)
+    _agent_base = resolve_user_agent_base(_base)
+    clarify_url = f'{_agent_base}/myah/v1/clarify/{stream_id}'
+
+    headers = {
+        'Authorization': f'Bearer {AGENT_BEARER_TOKEN}',
+        'Content-Type': 'application/json',
+    }
+
+    async with aiohttp.ClientSession() as session:
+        async with session.post(
+            clarify_url,
+            json={'clarify_id': clarify_id, 'response': response_text},
+            headers=headers,
+            ssl=AIOHTTP_CLIENT_SESSION_SSL,
+        ) as resp:
+            if resp.status == 404:
+                raise HTTPException(
+                    status_code=404,
+                    detail='No pending clarify request for this stream',
+                )
+            if resp.status != 200:
+                text = await resp.text()
+                raise HTTPException(
+                    status_code=502,
+                    detail=f'Agent clarify submit failed: {text[:200]}',
+                )
+            return await resp.json()
+
+
 @router.post('/chat/secret')
 async def submit_chat_secret(
     request: Request,
@@ -2207,14 +2273,15 @@ async def submit_chat_secret(
     stream_id = body.get('run_id', '')
     var_name = body.get('var_name', '')
     value = body.get('value', '')
+    cancel = bool(body.get('cancel', False))
 
     if not stream_id:
         raise HTTPException(status_code=400, detail='run_id is required')
     if not var_name:
         raise HTTPException(status_code=400, detail='var_name is required')
-    if not value:
+    if not cancel and not value:
         raise HTTPException(status_code=400, detail='value is required')
-    if len(value) > 4096:
+    if len(str(value)) > 4096:
         raise HTTPException(status_code=400, detail='value too long')
     if not re.match(r'^[A-Z][A-Z0-9_]{0,127}$', var_name):
         raise HTTPException(status_code=400, detail='Invalid var_name format')
@@ -2237,10 +2304,12 @@ async def submit_chat_secret(
         'Content-Type': 'application/json',
     }
 
+    payload = {'var_name': var_name, 'cancel': True, 'value': ''} if cancel else {'var_name': var_name, 'value': value}
+
     async with aiohttp.ClientSession() as session:
         async with session.post(
             secret_url,
-            json={'var_name': var_name, 'value': value},
+            json=payload,
             headers=headers,
             ssl=AIOHTTP_CLIENT_SESSION_SSL,
         ) as resp:

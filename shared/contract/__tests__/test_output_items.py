@@ -24,6 +24,7 @@ import pytest
 from pydantic import TypeAdapter, ValidationError
 
 from shared.contract.output_items import (
+    ClarifyInputItem,
     CodeInterpreterItem,
     ConfirmationItem,
     FunctionCallItem,
@@ -124,6 +125,19 @@ ITEM_SAMPLES: dict[str, tuple[dict, type]] = {
         },
         SecretInputItem,
     ),
+    'clarify_input': (
+        {
+            'type': 'clarify_input',
+            'id': 'clarify_abc',
+            'clarify_id': 'clarify_123',
+            'run_id': 'run_abc',
+            'question': 'Which environment should I deploy to?',
+            'choices': ['staging', 'production'],
+            'timeout_seconds': 300,
+            'status': 'pending',
+        },
+        ClarifyInputItem,
+    ),
     'todo_plan': (
         {
             'type': 'todo_plan',
@@ -181,6 +195,7 @@ def test_completeness_every_known_item_has_a_sample() -> None:
         CodeInterpreterItem,
         ConfirmationItem,
         SecretInputItem,
+        ClarifyInputItem,
         TodoPlanItem,
     }
     assert sampled_classes == declared_classes, (
@@ -340,6 +355,7 @@ def test_every_item_class_has_a_literal_type_field() -> None:
         CodeInterpreterItem,
         ConfirmationItem,
         SecretInputItem,
+        ClarifyInputItem,
     ]
     for cls in classes:
         field = cls.model_fields['type']

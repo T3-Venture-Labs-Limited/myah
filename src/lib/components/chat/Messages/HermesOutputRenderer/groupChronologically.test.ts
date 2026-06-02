@@ -8,6 +8,7 @@ import type {
 	CodeInterpreterItem,
 	ConfirmationItem,
 	SecretInputItem,
+	ClarifyInputItem,
 	ArtifactCardItem,
 	TodoPlanItem
 } from './types';
@@ -97,6 +98,20 @@ function secret(overrides?: Partial<SecretInputItem>): SecretInputItem {
 		prompt: 'Enter secret',
 		help: '',
 		skill_name: 'test_skill',
+		status: 'pending',
+		...overrides
+	};
+}
+
+function clarify(overrides?: Partial<ClarifyInputItem>): ClarifyInputItem {
+	return {
+		type: 'clarify_input',
+		id: uid(),
+		clarify_id: uid(),
+		run_id: uid(),
+		question: 'Choose an option',
+		choices: ['A', 'B'],
+		timeout_seconds: 300,
 		status: 'pending',
 		...overrides
 	};
@@ -231,6 +246,23 @@ describe('groupChronologically', () => {
 
 		if (groups[1].kind === 'secret') {
 			expect(groups[1].item).toBe(s1);
+		}
+	});
+
+	it('clarify_input breaks a chain', () => {
+		const r1 = reasoning();
+		const c1 = clarify();
+		const t1 = tool();
+
+		const groups = groupChronologically([r1, c1, t1]);
+
+		expect(groups).toHaveLength(3);
+		expect(groups[0].kind).toBe('chain');
+		expect(groups[1].kind).toBe('clarify');
+		expect(groups[2].kind).toBe('chain');
+
+		if (groups[1].kind === 'clarify') {
+			expect(groups[1].item).toBe(c1);
 		}
 	});
 

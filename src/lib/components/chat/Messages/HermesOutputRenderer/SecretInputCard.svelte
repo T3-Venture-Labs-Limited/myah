@@ -2,11 +2,12 @@
 <!-- A secret asked for quietly. The key, given once, opens everything. -->
 <script lang="ts">
 	import { createEventDispatcher } from 'svelte';
+	import { toast } from 'svelte-sonner';
 	import type { SecretInputItem } from './types';
 
 	export let item: SecretInputItem;
 	export let messageId: string = '';
-	export let localStatus: 'pending' | 'stored' | 'timeout' = item.status;
+	export let localStatus: 'pending' | 'stored' | 'timeout' | 'cancelled' = item.status;
 
 	const dispatch = createEventDispatcher<{
 		secretStored: { var_name: string };
@@ -48,6 +49,40 @@
 			loading = false;
 		}
 	}
+	async function handleCancel() {
+		loading = true;
+		error = '';
+
+		try {
+			const response = await fetch('/openai/chat/secret', {
+				method: 'POST',
+				headers: {
+					'Content-Type': 'application/json',
+					Authorization: `Bearer ${localStorage.token}`
+				},
+				body: JSON.stringify({
+					run_id: item.run_id,
+					var_name: item.var_name,
+					cancel: true
+				})
+			});
+
+			if (!response.ok) {
+				const data = await response.json().catch(() => ({}));
+				error = data.detail || 'Failed to cancel secret request';
+				toast.error(error);
+				return;
+			}
+
+			toast.info('Secret entry cancelled');
+		} catch (e) {
+			error = 'Network error — please try again';
+			toast.error(error);
+		} finally {
+			loading = false;
+		}
+	}
+
 </script>
 
 <div
@@ -111,19 +146,28 @@
 					</a>
 				{/if}
 
-				<button
-					class="px-4 py-1.5 rounded-lg text-sm font-medium border
-						border-gray-200 dark:border-gray-600
-						bg-white dark:bg-gray-800
-						text-gray-900 dark:text-gray-100
-						hover:bg-gray-50 dark:hover:bg-gray-700/50
-						disabled:opacity-40 disabled:cursor-not-allowed
-						transition-colors"
-					disabled={loading || !inputValue.trim()}
-					on:click={handleSubmit}
-				>
-					{loading ? 'Saving…' : 'Save & Continue'}
-				</button>
+				<div class="flex flex-wrap gap-2">
+					<button
+						class="px-4 py-1.5 rounded-lg text-sm font-medium border
+							border-gray-200 dark:border-gray-600
+							bg-white dark:bg-gray-800
+							text-gray-900 dark:text-gray-100
+							hover:bg-gray-50 dark:hover:bg-gray-700/50
+							disabled:opacity-40 disabled:cursor-not-allowed
+							transition-colors"
+						disabled={loading || !inputValue.trim()}
+						on:click={handleSubmit}
+					>
+						{loading ? 'Saving…' : 'Save & Continue'}
+					</button>
+					<button
+						class="px-4 py-1.5 rounded-lg text-sm border border-gray-200 dark:border-gray-600 text-gray-500 dark:text-gray-400 hover:bg-gray-50 dark:hover:bg-gray-700/50 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+						disabled={loading}
+						on:click={handleCancel}
+					>
+						Cancel
+					</button>
+				</div>
 
 				{#if error}
 					<p class="text-xs text-red-500">{error}</p>
@@ -133,6 +177,8 @@
 			<p class="text-gray-500 dark:text-gray-400">Secret stored securely.</p>
 		{:else if localStatus === 'timeout'}
 			<p class="text-gray-400 dark:text-gray-500">Setup timed out — skill may not work.</p>
+		{:else if localStatus === 'cancelled'}
+			<p class="text-gray-400 dark:text-gray-500">Secret entry was cancelled.</p>
 		{/if}
 	</div>
 

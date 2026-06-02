@@ -16,6 +16,8 @@ from pydantic import TypeAdapter, ValidationError
 from shared.contract.events import (
     ApprovalRequestEvent,
     ApprovalRespondedEvent,
+    ClarifyRequiredEvent,
+    ClarifyResolvedEvent,
     HermesEvent,
     MessageDeltaEvent,
     ReasoningAvailableEvent,
@@ -41,6 +43,8 @@ _HERMES_EVENT_ADAPTER: TypeAdapter[HermesEvent] = TypeAdapter(HermesEvent)
 EVENT_SAMPLE_CLASSES: dict[str, type] = {
     'approval.request': ApprovalRequestEvent,
     'approval.responded': ApprovalRespondedEvent,
+    'clarify.required': ClarifyRequiredEvent,
+    'clarify.resolved': ClarifyResolvedEvent,
     'message.delta': MessageDeltaEvent,
     'reasoning.available': ReasoningAvailableEvent,
     'reasoning.delta': ReasoningDeltaEvent,
@@ -263,6 +267,52 @@ def test_tool_confirmation_required_preserves_action_confirmation_id() -> None:
     instance = _HERMES_EVENT_ADAPTER.validate_python(payload)
     assert isinstance(instance, ToolConfirmationRequiredEvent)
     assert instance.confirmation_id == 'conf-action-123'
+
+
+# ── Clarify event shape regressions ─────────────────────────────────────────
+
+def test_clarify_required_with_choices_validates() -> None:
+    """``clarify.required`` carries the question + optional multiple-choice list."""
+    payload = {
+        'event': 'clarify.required',
+        'clarify_id': 'clarify_1',
+        'question': 'Which environment?',
+        'choices': ['staging', 'production'],
+        'timeout_seconds': 120,
+        'run_id': 'run_abc',
+    }
+    instance = _HERMES_EVENT_ADAPTER.validate_python(payload)
+    assert isinstance(instance, ClarifyRequiredEvent)
+    assert instance.choices == ['staging', 'production']
+    assert instance.timeout_seconds == 120
+
+
+def test_clarify_required_free_text_has_no_choices() -> None:
+    """A free-text clarify prompt omits ``choices`` entirely."""
+    payload = {
+        'event': 'clarify.required',
+        'clarify_id': 'clarify_2',
+        'question': 'What should I name the file?',
+        'run_id': 'run_abc',
+    }
+    instance = _HERMES_EVENT_ADAPTER.validate_python(payload)
+    assert isinstance(instance, ClarifyRequiredEvent)
+    assert instance.choices is None
+
+
+def test_clarify_resolved_statuses_validate() -> None:
+    """``clarify.resolved`` carries the terminal status and optional response."""
+    payload = {
+        'event': 'clarify.resolved',
+        'clarify_id': 'clarify_1',
+        'status': 'answered',
+        'response': 'staging',
+        'run_id': 'run_abc',
+    }
+    instance = _HERMES_EVENT_ADAPTER.validate_python(payload)
+    assert isinstance(instance, ClarifyResolvedEvent)
+    assert instance.status == 'answered'
+    assert instance.response == 'staging'
 
 
 # ── Discriminator literal coverage ──────────────────────────────────────────

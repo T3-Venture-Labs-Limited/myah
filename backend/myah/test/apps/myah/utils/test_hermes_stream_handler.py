@@ -1353,6 +1353,138 @@ async def test_background_path_updates_pending_secret_on_secret_resolved(resolve
 
 
 @pytest.mark.asyncio
+async def test_clarify_required_renders_pending_clarify_input():
+    """clarify.required must render a pending clarify_input card for the user."""
+    sse_lines = _make_sse_lines(
+        {
+            'event': 'clarify.required',
+            'stream_id': 'stream-clarify',
+            'clarify_id': 'clarify-123',
+            'question': 'Which environment should I deploy to?',
+            'choices': ['staging', 'production'],
+            'timeout_seconds': 300,
+        },
+    )
+    response = _make_upstream_response(sse_lines)
+    ctx = _make_ctx(with_event_caller=True)
+
+    with (
+        patch('myah.utils.hermes_stream_handler.Chats'),
+        patch('myah.utils.hermes_stream_handler.background_tasks_handler', new=AsyncMock()),
+    ):
+        from myah.utils.hermes_stream_handler import handle_hermes_stream
+
+        await handle_hermes_stream(response, ctx)
+
+    clarifies = [item for item in _final_output(ctx) if item.get('type') == 'clarify_input']
+    assert len(clarifies) == 1
+    clarify = clarifies[0]
+    assert clarify == {
+        'type': 'clarify_input',
+        'id': clarify['id'],
+        'clarify_id': 'clarify-123',
+        'run_id': 'stream-clarify',
+        'question': 'Which environment should I deploy to?',
+        'choices': ['staging', 'production'],
+        'timeout_seconds': 300,
+        'status': 'pending',
+    }
+
+
+@pytest.mark.asyncio
+async def test_clarify_resolved_updates_matching_pending_clarify_input():
+    """clarify.resolved must update the matching clarify_input item and response."""
+    sse_lines = _make_sse_lines(
+        {
+            'event': 'clarify.required',
+            'stream_id': 'stream-clarify-resolved',
+            'clarify_id': 'clarify-123',
+            'question': 'Which environment should I deploy to?',
+            'choices': ['staging', 'production'],
+        },
+        {
+            'event': 'clarify.resolved',
+            'stream_id': 'stream-clarify-resolved',
+            'clarify_id': 'clarify-123',
+            'status': 'answered',
+            'response': 'staging',
+        },
+        {'event': 'run.completed', 'stream_id': 'stream-clarify-resolved', 'usage': None},
+    )
+    response = _make_upstream_response(sse_lines)
+    ctx = _make_ctx(with_event_caller=True)
+
+    with (
+        patch('myah.utils.hermes_stream_handler.Chats'),
+        patch('myah.utils.hermes_stream_handler.background_tasks_handler', new=AsyncMock()),
+    ):
+        from myah.utils.hermes_stream_handler import handle_hermes_stream
+
+        await handle_hermes_stream(response, ctx)
+
+    clarifies = [item for item in _final_output(ctx) if item.get('type') == 'clarify_input']
+    assert len(clarifies) == 1
+    assert clarifies[0]['status'] == 'answered'
+    assert clarifies[0]['response'] == 'staging'
+
+
+@pytest.mark.asyncio
+async def test_run_cancelled_marks_pending_clarify_input_timeout():
+    """A pending clarify prompt must not remain active after the run terminates."""
+    sse_lines = _make_sse_lines(
+        {
+            'event': 'clarify.required',
+            'stream_id': 'stream-clarify-cancelled',
+            'clarify_id': 'clarify-123',
+            'question': 'What should I do?',
+        },
+        {'event': 'run.cancelled', 'stream_id': 'stream-clarify-cancelled'},
+    )
+    response = _make_upstream_response(sse_lines)
+    ctx = _make_ctx(with_event_caller=True)
+
+    with (
+        patch('myah.utils.hermes_stream_handler.Chats'),
+        patch('myah.utils.hermes_stream_handler.background_tasks_handler', new=AsyncMock()),
+    ):
+        from myah.utils.hermes_stream_handler import handle_hermes_stream
+
+        await handle_hermes_stream(response, ctx)
+
+    clarifies = [item for item in _final_output(ctx) if item.get('type') == 'clarify_input']
+    assert len(clarifies) == 1
+    assert clarifies[0]['status'] == 'timeout'
+
+
+@pytest.mark.asyncio
+async def test_run_completed_marks_unanswered_clarify_input_timeout():
+    """A normal run completion after an upstream clarify timeout must stale the card."""
+    sse_lines = _make_sse_lines(
+        {
+            'event': 'clarify.required',
+            'stream_id': 'stream-clarify-completed',
+            'clarify_id': 'clarify-123',
+            'question': 'What should I do?',
+        },
+        {'event': 'run.completed', 'stream_id': 'stream-clarify-completed', 'usage': None},
+    )
+    response = _make_upstream_response(sse_lines)
+    ctx = _make_ctx(with_event_caller=True)
+
+    with (
+        patch('myah.utils.hermes_stream_handler.Chats'),
+        patch('myah.utils.hermes_stream_handler.background_tasks_handler', new=AsyncMock()),
+    ):
+        from myah.utils.hermes_stream_handler import handle_hermes_stream
+
+        await handle_hermes_stream(response, ctx)
+
+    clarifies = [item for item in _final_output(ctx) if item.get('type') == 'clarify_input']
+    assert len(clarifies) == 1
+    assert clarifies[0]['status'] == 'timeout'
+
+
+@pytest.mark.asyncio
 async def test_artifact_card_appended_on_write_file():
     """tool.completed with write_file + .docx path must append an artifact_card."""
     sse_lines = _make_sse_lines(

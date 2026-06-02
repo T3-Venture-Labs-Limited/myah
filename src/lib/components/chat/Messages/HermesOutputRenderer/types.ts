@@ -26,6 +26,7 @@ import type {
 	CodeInterpreterItem,
 	ConfirmationItem,
 	SecretInputItem,
+	ClarifyInputItem,
 	ArtifactCardItem,
 	TodoPlanItem
 } from '$lib/types/contract';
@@ -38,6 +39,7 @@ export type {
 	CodeInterpreterItem,
 	ConfirmationItem,
 	SecretInputItem,
+	ClarifyInputItem,
 	ArtifactCardItem,
 	TodoPlanItem,
 	OutputTextPart,
@@ -53,5 +55,6 @@ export type OutputItem =
 	| CodeInterpreterItem
 	| ConfirmationItem
 	| SecretInputItem
+	| ClarifyInputItem
 	| ArtifactCardItem
 	| TodoPlanItem;

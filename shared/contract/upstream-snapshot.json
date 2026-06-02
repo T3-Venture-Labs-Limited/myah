@@ -6,6 +6,8 @@
   "hermes_event_types": [
     "approval.request",
     "approval.responded",
+    "clarify.required",
+    "clarify.resolved",
     "message.delta",
     "reasoning.available",
     "reasoning.delta",
