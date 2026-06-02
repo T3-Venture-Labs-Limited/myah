@@ -282,11 +282,17 @@ async def persist_final_message(request: Request, payload: FinalMessageRequest):
 
     message_id = payload.message_id
     existing_message = (chat.chat or {}).get('history', {}).get('messages', {}).get(message_id, {})
+    existing_content = (existing_message.get('content') or '').strip()
+    incoming_content = (payload.response or '').strip()
+    existing_is_error = bool(existing_message.get('error'))
+    incoming_is_error = payload.status == 'error'
+    is_finalized_assistant = (
+        existing_message.get('role') == 'assistant' and existing_message.get('done') is True
+    )
     already_finalized = (
-        existing_message.get('role') == 'assistant'
-        and existing_message.get('done') is True
-        and (existing_message.get('content') or '').strip() == (payload.response or '').strip()
-        and bool(existing_message.get('error')) == (payload.status == 'error')
+        is_finalized_assistant
+        and existing_content == incoming_content
+        and existing_is_error == incoming_is_error
     )
     if already_finalized:
         logger.info(
@@ -295,7 +301,24 @@ async def persist_final_message(request: Request, payload: FinalMessageRequest):
         )
         return {'ok': True, 'message_id': message_id, 'duplicate': True}
 
-    clean_response = (payload.response or '').strip() or '(no output)'
+    already_finalized_conflict = is_finalized_assistant and (
+        existing_content != incoming_content or existing_is_error != incoming_is_error
+    )
+    if already_finalized_conflict:
+        logger.warning(
+            f'/messages/final: ignoring conflicting final assistant message chat_id={payload.chat_id} '
+            f'message_id={message_id} user_id={payload.user_id} '
+            f'existing_len={len(existing_message.get("content") or "")} '
+            f'incoming_len={len(payload.response or "")}'
+        )
+        return {
+            'ok': True,
+            'message_id': message_id,
+            'ignored': True,
+            'reason': 'already_finalized',
+        }
+
+    clean_response = incoming_content or '(no output)'
     update = {
         'id': message_id,
         'role': 'assistant',
