@@ -112,6 +112,18 @@ async def list_commands(user: UserModel = Depends(get_verified_user)):
     return data
 
 
+@router.delete('/commands/cache')
+async def clear_commands_cache(user: UserModel = Depends(get_verified_user)):
+    """Clear this user's cached slash-command list.
+
+    Marketplace install/update/uninstall restarts Hermes so skill commands can
+    change. The frontend calls this before refetching /commands; without a real
+    route it can keep a stale 60s cache and hide newly installed skills.
+    """
+    _commands_cache.pop(user.id, None)
+    return {'ok': True}
+
+
 @router.get('/myah-health')
 async def get_myah_health(user: UserModel = Depends(get_verified_user)):
     """Proxy GET /myah/health on the agent's gateway port.

@@ -4,7 +4,8 @@ import {
 	buildSelectionKey,
 	resolveCompositeForLegacyBareId,
 	findModelByIdOrSelectionKey,
-	selectionMatchesModel
+	selectionMatchesModel,
+	resolveInitialSelectedModels
 } from './modelSelection';
 import type { ParsedSelectionKey } from './modelSelection';
 
@@ -188,5 +189,85 @@ describe('selectionMatchesModel', () => {
 
 	it('does not match unrelated selections', () => {
 		expect(selectionMatchesModel('openrouter::gpt-5.5', model)).toBe(false);
+	});
+});
+
+describe('resolveInitialSelectedModels', () => {
+	const models = [
+		{ id: 'gpt-5.4', selection_key: 'copilot::gpt-5.4', tags: [{ name: 'copilot' }] },
+		{
+			id: 'gpt-5.3-codex-spark',
+			selection_key: 'openai-codex::gpt-5.3-codex-spark',
+			tags: [{ name: 'openai-codex' }]
+		},
+		{ id: 'gpt-4o', selection_key: 'openai::gpt-4o', tags: [{ name: 'openai' }] }
+	];
+
+	it('prefers current user default provider/model over stale sessionStorage selection', () => {
+		expect(
+			resolveInitialSelectedModels({
+				models,
+				defaultModel: { provider: 'openai-codex', model: 'gpt-5.3-codex-spark' },
+				sessionSelection: ['copilot::gpt-5.4'],
+				adminDefaults: []
+			})
+		).toEqual(['openai-codex::gpt-5.3-codex-spark']);
+	});
+
+	it('preserves persisted existing-chat model selection over current user default', () => {
+		expect(
+			resolveInitialSelectedModels({
+				models,
+				defaultModel: { provider: 'openai-codex', model: 'gpt-5.3-codex-spark' },
+				persistedChatSelection: ['copilot::gpt-5.4'],
+				sessionSelection: null,
+				adminDefaults: []
+			})
+		).toEqual(['copilot::gpt-5.4']);
+	});
+
+	it('uses last-used session selection only when there is no user default', () => {
+		expect(
+			resolveInitialSelectedModels({
+				models,
+				defaultModel: null,
+				sessionSelection: ['copilot::gpt-5.4'],
+				adminDefaults: []
+			})
+		).toEqual(['copilot::gpt-5.4']);
+	});
+
+	it('preserves explicit current-page selections even when they differ from default', () => {
+		expect(
+			resolveInitialSelectedModels({
+				models,
+				defaultModel: { provider: 'openai-codex', model: 'gpt-5.3-codex-spark' },
+				persistedChatSelection: ['copilot::gpt-5.4'],
+				explicitSelection: true,
+				adminDefaults: []
+			})
+		).toEqual(['copilot::gpt-5.4']);
+	});
+
+	it('only returns firstAvailable when it exists in the model list', () => {
+		expect(
+			resolveInitialSelectedModels({
+				models,
+				defaultModel: null,
+				sessionSelection: [],
+				adminDefaults: [],
+				firstAvailable: 'missing::model'
+			})
+		).toEqual(['']);
+
+		expect(
+			resolveInitialSelectedModels({
+				models,
+				defaultModel: null,
+				sessionSelection: [],
+				adminDefaults: [],
+				firstAvailable: 'openai::gpt-4o'
+			})
+		).toEqual(['openai::gpt-4o']);
 	});
 });

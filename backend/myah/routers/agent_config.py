@@ -181,14 +181,16 @@ def _translate_model_to_dict_form(model_value: Any) -> Any:
     regardless of which model the user actually selected.
 
     Logic (ordered, first match wins):
-      1. Non-string OR no ``'/'``: return unchanged (already dict, or
-         bare model name).
-      2. Prefix matches a canonical provider id in
+      1. Non-string: return unchanged (already dict).
+      2. Composite provider selection key ``provider::model/id`` from the
+         model picker: return ``{provider: <provider>, default: <model/id>}``.
+      3. String with no ``'/'``: return unchanged (bare model name).
+      4. Prefix matches a canonical provider id in
          ``_HERMES_PROVIDER_IDS``: return ``{provider: <prefix>, default: <slug>}``.
-      3. Prefix matches an alias in ``_HERMES_PROVIDER_ALIASES`` and the
+      5. Prefix matches an alias in ``_HERMES_PROVIDER_ALIASES`` and the
          alias resolves to a canonical id — e.g. ``qwen -> alibaba``:
          return ``{provider: <canonical>, default: <slug>}``.
-      4. Otherwise pass through unchanged (let Hermes reject or accept).
+      6. Otherwise pass through unchanged (let Hermes reject or accept).
 
     Replaces the deleted Myah marker block in
     ``agent/hermes/agent/auxiliary_client.py:1058-1085`` — same algorithm,
@@ -199,6 +201,14 @@ def _translate_model_to_dict_form(model_value: Any) -> Any:
     """
     if not isinstance(model_value, str):
         return model_value
+
+    if '::' in model_value:
+        provider, _, model_id = model_value.partition('::')
+        provider = provider.strip().lower()
+        model_id = model_id.strip()
+        if provider and model_id:
+            return {'provider': provider, 'default': model_id}
+
     if '/' not in model_value:
         return model_value
 
@@ -320,18 +330,24 @@ async def patch_agent_config(
     # agent because we read _PROVIDER_MODELS / _PROVIDER_ALIASES directly
     # from the bundled hermes_cli.models module.
     if 'model' in body:
+        raw_model_for_mirror = body['model']
         body['model'] = _translate_model_to_dict_form(body['model'])
+    else:
+        raw_model_for_mirror = None
 
     result = await _patch_agent_config(user, body, timeout=20.0)
     _raise_for_upstream_error(result)
 
-    if 'model' in body:
+    if raw_model_for_mirror is not None:
         try:
             # Mirror to user settings — derive a slug from dict-form for
             # backwards compatibility with ``agent_model`` consumers that
-            # expect a string.
-            slug = body['model']
-            if isinstance(slug, dict):
+            # expect a string. For composite selection keys, keep only the
+            # actual upstream model id (the provider is stored in config.model).
+            slug = raw_model_for_mirror
+            if isinstance(slug, str) and '::' in slug:
+                slug = slug.partition('::')[2]
+            elif isinstance(slug, dict):
                 slug = f'{slug.get("provider", "")}/{slug.get("default", "")}'.strip('/')
             Users.update_user_by_id(user.id, {'agent_model': slug})
         except Exception as e:

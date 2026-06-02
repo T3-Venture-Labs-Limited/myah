@@ -179,16 +179,56 @@ class S3StorageProvider(StorageProvider):
             local_file_path = self._get_local_file_path(s3_key)
             self.s3_client.download_file(self.bucket_name, s3_key, local_file_path)
             return local_file_path
-        except ClientError as e:
-            raise RuntimeError(f'Error downloading file from S3: {e}')
+        # ── Myah: fall back to local disk when S3 key parse or download fails ─
+        # Two failure modes:
+        # • IndexError — file_path is a raw local disk path (no '//' separator);
+        #   the caller stored the local path rather than an S3 URL — serve it.
+        # • ClientError — S3 is misconfigured (stale creds, expired Supabase
+        #   token); upload_file writes to local disk first, so the file is there.
+        # In both cases a WARNING is logged so any operator with real S3 configured
+        # can spot misconfiguration immediately. Set STORAGE_PROVIDER=local (the
+        # Myah default) to eliminate these warnings entirely.
+        # See e2e-output/report.md ISSUE-014.
+        except (IndexError, ClientError) as e:
+            local_fallback = None
+            if os.path.isfile(file_path):
+                local_fallback = file_path
+            else:
+                try:
+                    local_fallback = self._get_local_file_path(self._extract_s3_key(file_path))
+                except Exception:
+                    pass
+                if local_fallback and not os.path.isfile(local_fallback):
+                    local_fallback = None
+            if local_fallback:
+                log.warning(
+                    'S3 get_file failed for %s (%s) — serving from local disk. '
+                    'Set STORAGE_PROVIDER=local to silence this warning.',
+                    file_path,
+                    e,
+                )
+                return LocalStorageProvider.get_file(local_fallback)
+            raise RuntimeError(f'Error getting file from S3: {e}')
+        # ──────────────────────────────────────────────────────────────────────
 
     def delete_file(self, file_path: str) -> None:
         """Handles deletion of the file from S3 storage."""
         try:
             s3_key = self._extract_s3_key(file_path)
             self.s3_client.delete_object(Bucket=self.bucket_name, Key=s3_key)
-        except ClientError as e:
-            raise RuntimeError(f'Error deleting file from S3: {e}')
+        # ── Myah: log and continue when S3 key parse or delete fails ──────────
+        # IndexError: file_path is a local path — nothing to remove from S3.
+        # ClientError: S3 is misconfigured or the object is already absent.
+        # The local copy is authoritative; deletion must always succeed from
+        # the user's perspective — log the issue and continue.
+        except (IndexError, ClientError) as e:
+            log.warning(
+                'S3 delete_file failed for %s (%s) — continuing with local delete. '
+                'Set STORAGE_PROVIDER=local to silence this warning.',
+                file_path,
+                e,
+            )
+        # ──────────────────────────────────────────────────────────────────────
 
         # Always delete from local storage
         LocalStorageProvider.delete_file(file_path)

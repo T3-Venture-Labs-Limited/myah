@@ -15,6 +15,7 @@ so `myah --help` cold-start stays under the 200ms budget (spec Metric #7).
 from __future__ import annotations
 
 import os
+import shutil
 import signal
 import time
 from pathlib import Path
@@ -170,6 +171,145 @@ def _require_bearer(env: dict[str, str]) -> None:
         raise typer.Exit(code=2)
 
 
+def _prepare_backend_runtime(worktree: Path, env: dict[str, str]) -> Path:
+    """Return the backend directory uvicorn should run from.
+
+    Hosted mode is the implicit default when platform-oss/.env does not contain
+    a live MYAH_DEPLOYMENT_MODE=oss line. In hosted mode the Docker image first
+    copies platform-oss/backend and then overlays platform-hosted/backend. Local
+    `myah dev backend` must mirror that or imports for hosted-only routers such
+    as admin_cron_deliveries fail before FastAPI can boot.
+    """
+    from myah.lib.cli.mode_switch import get_current_mode
+
+    oss_backend = worktree / 'platform-oss' / 'backend'
+    if get_current_mode(worktree) != 'hosted':
+        return oss_backend
+
+    hosted_backend = worktree / 'platform-hosted' / 'backend'
+    if not hosted_backend.is_dir():
+        return oss_backend
+
+    overlay_root = worktree / '.worktree-logs' / 'hosted-backend-overlay'
+    overlay_backend = overlay_root / 'backend'
+
+    if overlay_root.exists():
+        shutil.rmtree(overlay_root)
+    overlay_backend.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(oss_backend, overlay_backend, dirs_exist_ok=True)
+    shutil.copytree(hosted_backend, overlay_backend, dirs_exist_ok=True)
+
+    package_json = worktree / 'platform-oss' / 'package.json'
+    if package_json.is_file():
+        shutil.copy2(package_json, overlay_root / 'package.json')
+    shared_dir = worktree / 'platform-oss' / 'shared'
+    if shared_dir.is_dir():
+        shutil.copytree(shared_dir, overlay_root / 'shared', dirs_exist_ok=True)
+
+    # Keep local worktree DB/uploads stable across overlay re-materialization.
+    env.setdefault('DATA_DIR', str(oss_backend / 'data'))
+    env['PYTHONPATH'] = os.pathsep.join(
+        [str(overlay_backend), str(overlay_root), env.get('PYTHONPATH', '')]
+    ).rstrip(os.pathsep)
+
+    return overlay_backend
+
+
+FRONTEND_OVERLAY_ENTRIES = (
+    'package.json',
+    'package-lock.json',
+    'vite.config.ts',
+    'svelte.config.js',
+    'tsconfig.json',
+    'tailwind.config.js',
+    'postcss.config.js',
+    'vitest.workspace.ts',
+    'src',
+    'static',
+    'shared',
+)
+
+
+def _replace_overlay_path(path: Path) -> None:
+    if path.is_symlink() or path.is_file():
+        path.unlink()
+    elif path.exists():
+        shutil.rmtree(path)
+
+
+def _symlink_tree_for_dev_overlay(src: Path, dst: Path) -> None:
+    """Mirror frontend source as symlinks so edits update without recopying secrets."""
+    dst.mkdir(parents=True, exist_ok=True)
+    for child in src.iterdir():
+        target = dst / child.name
+        if child.is_dir() and not child.is_symlink():
+            if target.is_symlink() or target.is_file():
+                target.unlink()
+            _symlink_tree_for_dev_overlay(child, target)
+            continue
+
+        _replace_overlay_path(target)
+        os.symlink(child.resolve(), target, target_is_directory=child.is_dir())
+
+
+def _overlay_frontend_entries(src: Path, dst: Path) -> None:
+    """Overlay only frontend-relevant files/directories, never env/venv/backend data."""
+    dst.mkdir(parents=True, exist_ok=True)
+    for name in FRONTEND_OVERLAY_ENTRIES:
+        entry = src / name
+        if not entry.exists():
+            continue
+        target = dst / name
+        if entry.is_dir() and not entry.is_symlink():
+            _symlink_tree_for_dev_overlay(entry, target)
+        else:
+            _replace_overlay_path(target)
+            os.symlink(entry.resolve(), target, target_is_directory=entry.is_dir())
+
+
+def _prepare_frontend_runtime(worktree: Path, env: dict[str, str]) -> Path:
+    """Return the frontend directory Vite should run from.
+
+    Hosted mode has frontend routes/components under ``platform-hosted/src``
+    that overlay the OSS frontend in production. Local ``myah dev frontend``
+    needs the same materialized view; otherwise hosted-only routes such as
+    ``/files`` 404 even while the hosted backend overlay is active.
+    """
+    from myah.lib.cli.mode_switch import get_current_mode
+
+    oss_frontend = worktree / 'platform-oss'
+    if get_current_mode(worktree) != 'hosted':
+        return oss_frontend
+
+    hosted_frontend = worktree / 'platform-hosted'
+    if not (hosted_frontend / 'src').is_dir():
+        return oss_frontend
+
+    overlay_frontend = worktree / '.worktree-logs' / 'hosted-frontend-overlay'
+    if overlay_frontend.exists():
+        shutil.rmtree(overlay_frontend)
+
+    _overlay_frontend_entries(oss_frontend, overlay_frontend)
+    _overlay_frontend_entries(hosted_frontend, overlay_frontend)
+
+    # Reuse the real dependency install rather than copying node_modules into
+    # the transient overlay on every restart.
+    oss_node_modules = oss_frontend / 'node_modules'
+    overlay_node_modules = overlay_frontend / 'node_modules'
+    if oss_node_modules.exists() and not overlay_node_modules.exists():
+        os.symlink(oss_node_modules.resolve(), overlay_node_modules, target_is_directory=True)
+
+    allow_paths = [
+        str(path.resolve())
+        for path in (oss_node_modules, oss_frontend / 'src', hosted_frontend / 'src')
+        if path.exists()
+    ]
+    env['MYAH_DEV_WORKTREE_ROOT'] = str(worktree.resolve())
+    env['MYAH_DEV_VITE_FS_ALLOW_EXTRA'] = os.pathsep.join(allow_paths)
+
+    return overlay_frontend
+
+
 def _start_backend_impl(worktree: Path) -> int:
     """Start uvicorn in background. Returns shell exit code (0/1/2)."""
     from rich.console import Console
@@ -192,6 +332,7 @@ def _start_backend_impl(worktree: Path) -> int:
     log_dir.mkdir(parents=True, exist_ok=True)
     log_file = log_dir / 'backend.log'
     pid_file = log_dir / 'backend.pid'
+    backend_cwd = _prepare_backend_runtime(worktree, env)
 
     uvicorn_bin = worktree / '.venv' / 'bin' / 'uvicorn'
     cmd = [
@@ -211,7 +352,7 @@ def _start_backend_impl(worktree: Path) -> int:
         proc = Popen(
             cmd,
             env=env,
-            cwd=str(worktree / 'platform-oss' / 'backend'),
+            cwd=str(backend_cwd),
             stdout=log_handle,
             stderr=log_handle,  # merge stderr into stdout for tail-friendliness
             start_new_session=True,
@@ -241,6 +382,11 @@ def _start_frontend_impl(worktree: Path) -> int:
 
     env = _load_env_or_exit(worktree)
     _require_bearer(env)
+    # Vite/SvelteKit dev must not inherit NODE_ENV=production from the
+    # invoking shell. Production mode breaks $env/dynamic/public in local dev
+    # and leaves the browser stuck on the splash screen.
+    env['NODE_ENV'] = 'development'
+    env['ENV'] = 'dev'
 
     try:
         frontend_port = int(env['FRONTEND_PORT'])
@@ -257,6 +403,7 @@ def _start_frontend_impl(worktree: Path) -> int:
     log_dir.mkdir(parents=True, exist_ok=True)
     log_file = log_dir / 'frontend.log'
     pid_file = log_dir / 'frontend.pid'
+    frontend_cwd = _prepare_frontend_runtime(worktree, env)
 
     # npm IS fine to resolve via PATH because there's no per-worktree npm install.
     cmd = ['npm', 'run', 'dev', '--', '--port', str(frontend_port)]
@@ -272,7 +419,7 @@ def _start_frontend_impl(worktree: Path) -> int:
         proc = Popen(
             cmd,
             env=env,
-            cwd=str(worktree / 'platform-oss'),
+            cwd=str(frontend_cwd),
             stdout=log_handle,
             stderr=log_handle,
             start_new_session=True,

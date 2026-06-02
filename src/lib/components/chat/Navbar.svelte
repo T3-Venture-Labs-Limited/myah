@@ -240,8 +240,6 @@
 							data-testid="chat-files-button"
 							aria-pressed={$artifactPaneOpen}
 							on:click={() => {
-								// Toggle: if pane is closed, open into the explorer view.
-								// If already open, close it (closeArtifactPane clears active idx + selection).
 								if ($artifactPaneOpen) {
 									closeArtifactPane();
 								} else {

@@ -88,7 +88,7 @@
 		onRetry={load}
 	/>
 {:else}
-	<div class="max-h-[60vh] overflow-scroll scrollbar-hidden text-sm relative">
+	<div class="text-sm relative">
 		<CodeBlock code={formatted} {lang} token={null} edit={false} save={false} />
 	</div>
 {/if}

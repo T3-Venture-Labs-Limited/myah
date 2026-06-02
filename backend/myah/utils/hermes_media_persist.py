@@ -358,6 +358,9 @@ async def _persist_ref(
     except Exception:
         return None
 
+    # folder_id is intentionally not passed here.
+    # Agent-derived files default to NULL (root) per v1 design;
+    # users move them manually if desired.
     file_item = Files.insert_new_file(
         user_id,
         FileForm(

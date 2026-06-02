@@ -152,15 +152,43 @@ AGENT_VNC_PORT = int(os.environ.get('MYAH_AGENT_VNC_PORT', '5900'))
 AGENT_RAM_LIMIT = os.environ.get('MYAH_AGENT_RAM', '4g')
 AGENT_CPU_QUOTA = int(os.environ.get('MYAH_AGENT_CPU_QUOTA', '200000'))
 AGENT_CPU_PERIOD = int(os.environ.get('MYAH_AGENT_CPU_PERIOD', '100000'))
+AGENT_PIDS_LIMIT = int(os.environ.get('MYAH_AGENT_PIDS_LIMIT', '1024'))
 CONTAINER_READY_TIMEOUT = int(os.environ.get('MYAH_CONTAINER_READY_TIMEOUT', '180'))
 AGENT_BEARER_TOKEN = os.environ.get('MYAH_AGENT_BEARER_TOKEN', '')
 AGENT_VITE_PORT = int(os.environ.get('MYAH_AGENT_VITE_PORT', '5174'))
-# In-container port for `hermes dashboard` — the FastAPI server that exposes
-# /api/plugins/myah-admin/* (Workstream A Phase 0). The host port is
-# allocated dynamically (see _start_container_sync) and stored as
-# Container.web_port.
 AGENT_WEB_PORT = int(os.environ.get('MYAH_AGENT_WEB_PORT', '9119'))
+AGENT_EGRESS_PROXY_URL = os.environ.get('MYAH_AGENT_EGRESS_PROXY_URL', 'http://egress-proxy:3128')
+CONTAINER_RECREATE_ADMIN_ENABLED = os.environ.get('MYAH_CONTAINER_RECREATE_ADMIN_ENABLED', 'False').lower() == 'true'
 HONCHO_ADMIN_KEY = os.environ.get('HONCHO_ADMIN_KEY', '')
+
+
+# ─── Security config hash ─────────────────────────────────────────────────────
+
+import hashlib
+import json
+
+def _compute_security_config_hash() -> str:
+    # version=3: add a writable /workspace tmpfs for agent/tooling scratch space
+    # while keeping the container rootfs read-only. Earlier version=2 bumped
+    # /run and /var/run from 64K to 1M (audit follow-up). When this version bumps,
+    # existing user containers' stamped hash will mismatch — the drift handler in
+    # get_or_create_container logs + sentry-breadcrumbs + adopts (no destructive
+    # recreation). Use the admin recreate endpoint for staged migration. Note:
+    # /var/log tmpfs was attempted in this audit pass but reverted because it
+    # shadows /var/log/supervisor in the image.
+    config = {
+        'version': 3,
+        'cap_drop': ['ALL'],
+        'cap_add': sorted(['CHOWN', 'DAC_OVERRIDE', 'FOWNER', 'SETUID', 'SETGID']),
+        'read_only': True,
+        'tmpfs_paths': sorted(['/tmp', '/run', '/var/run', '/root', '/workspace']),
+        'security_opt': sorted(['no-new-privileges:true']),
+        'pids_limit': AGENT_PIDS_LIMIT,
+        'egress_proxy': bool(AGENT_EGRESS_PROXY_URL),
+    }
+    return hashlib.sha256(json.dumps(config, sort_keys=True).encode()).hexdigest()[:16]
+
+_CURRENT_SECURITY_HASH = _compute_security_config_hash()
 
 
 def _detect_docker_host() -> str:
@@ -215,6 +243,40 @@ def _detect_agent_host() -> str:
         return 'localhost'
 
 
+def _detect_egress_proxy(client: Optional[docker.DockerClient] = None) -> tuple[bool, Optional[str]]:
+    """Detect whether to attach spawned containers to the egress-internal network.
+
+    Returns (enabled, network_name):
+      - (True, 'egress-internal') when ``MYAH_AGENT_EGRESS_PROXY_URL`` is set
+        AND the ``egress-internal`` Docker network exists (production).
+      - (False, None) when the env var is unset OR the network is missing
+        (local dev, or production pre-deploy of docker-compose.prod.yaml).
+
+    This mirrors the ``_detect_agent_host`` / ``_detect_docker_host`` pattern:
+    probe reality at spawn time rather than trust env-var presence alone.
+    The default ``http://egress-proxy:3128`` value is truthy in dev, so a
+    plain ``if AGENT_EGRESS_PROXY_URL`` check would fail container spawn
+    by requesting attachment to a network that does not exist locally.
+
+    Same bug class as the 2026-04-20 networking incident
+    (``docs/gotchas/agent-networking-localhost.md``) — env-var presence is
+    not equivalent to resource availability.
+    """
+    if not AGENT_EGRESS_PROXY_URL:
+        return False, None
+    try:
+        docker_client = client or docker.from_env()
+        docker_client.networks.get('egress-internal')
+        return True, 'egress-internal'
+    except (DockerException, NotFound) as exc:
+        log.warning(
+            f'MYAH_AGENT_EGRESS_PROXY_URL is set ({AGENT_EGRESS_PROXY_URL}) but the '
+            f"'egress-internal' Docker network is not present ({exc.__class__.__name__}). "
+            'Skipping proxy attachment. In production, deploy docker-compose.prod.yaml first.'
+        )
+        return False, None
+
+
 # Webhook host derivation order:
 #   1. MYAH_PLATFORM_WEBHOOK_HOST (explicit override) — wins.
 #   2. Fallback: _detect_docker_host() returns 'host.docker.internal' (Docker
@@ -230,6 +292,22 @@ VOLUME_PREFIX = 'myah-data-'
 CONTAINER_PREFIX = 'myah-agent-'
 
 logger.info(f'Container config: webhook_url=http://{PLATFORM_WEBHOOK_HOST}:{PLATFORM_PORT} agent_host={AGENT_HOST}')
+
+
+def _agent_no_proxy() -> str:
+    """Return comma-separated hosts that agent containers should never proxy.
+
+    Agent-to-platform callbacks must bypass Squid when the egress proxy is
+    enabled. On Linux the platform callback host is often the Docker bridge
+    gateway (172.17.0.1), which Squid's domain ACLs do not allow.
+    """
+    hosts = [
+        'host.docker.internal',
+        'localhost',
+        '127.0.0.1',
+        PLATFORM_WEBHOOK_HOST,
+    ]
+    return ','.join(dict.fromkeys(host for host in hosts if host))
 
 
 def _docker_client() -> docker.DockerClient:
@@ -559,6 +637,40 @@ def _start_container_sync(
             None,
         )
         if existing.status == 'running' and existing_port:
+            # ── Myah: Security config hash drift detection (LOG-ONLY) ────────────
+            # Hash drift is a SIGNAL, not a forced action. The original
+            # implementation called existing.stop(timeout=10) + existing.remove(force=True)
+            # on every drift, but get_or_create_container is invoked from many
+            # paths (chat send, status poll, second browser tab, cron tick) — so
+            # any incidental request would kill the user's live SSE stream
+            # mid-response. Audit finding: this had unbounded blast radius for
+            # any future hardening config bump (every container globally would
+            # be recreated on its owner's next interaction).
+            #
+            # New policy: emit log + Sentry breadcrumb, then adopt the existing
+            # container. Use POST /api/v1/admin/containers/{user_id}/recreate
+            # for staged migration once a new image has rolled out.
+            existing_hash = existing.labels.get('myah.security-config-hash', '')
+            if existing_hash and existing_hash != _CURRENT_SECURITY_HASH:
+                logger.warning(
+                    f'Container {name} hash drift: {existing_hash} != {_CURRENT_SECURITY_HASH}. '
+                    'Adopting existing; use admin recreate endpoint to force migration.'
+                )
+                try:
+                    import sentry_sdk
+                    sentry_sdk.add_breadcrumb(
+                        category='container.hash_drift',
+                        message='hash_drift_adopted_existing_container',
+                        level='warning',
+                        data={
+                            'user_id': user_id,
+                            'container_name': name,
+                            'old_hash': existing_hash,
+                            'new_hash': _CURRENT_SECURITY_HASH,
+                        },
+                    )
+                except Exception:
+                    pass
             api_port = next(
                 (int(v[0]['HostPort']) for k, v in existing.ports.items() if k == f'{AGENT_API_PORT}/tcp' and v),
                 None,
@@ -585,10 +697,6 @@ def _start_container_sync(
                 'host_port': api_port or existing_port,
                 'vite_port': vite_port_existing,
                 'vnc_port': vnc_port_existing,
-                # Adopted containers may pre-date the web_port mapping. When
-                # they do, web_port_existing is None and the DB row keeps
-                # whatever it had (typically NULL); /web-health then
-                # correctly returns 503 until a restart.
                 'web_port': web_port_existing,
                 'gateway_port': gateway_port_existing,
                 # Token is NOT regenerated for adopted containers — the
@@ -600,12 +708,11 @@ def _start_container_sync(
                 'needs_health_check': True,
                 'adopt': True,
             }
+            # ──────────────────────────────────────────────────────────────────────
         try:
             existing.remove(force=True)
             logger.info(f'Removed stale container {name}')
         except APIError as api_exc:
-            # 409 Conflict — another process is already removing this container.
-            # Treat as a benign race: the container is going away regardless.
             if api_exc.response is not None and api_exc.response.status_code == 409:
                 logger.warning(f'Container {name} removal already in progress (409), skipping')
             else:
@@ -641,6 +748,13 @@ def _start_container_sync(
         # break this co-assignment and provision the names independently.
         'MYAH_ADAPTER_AUTH_KEY': AGENT_BEARER_TOKEN,
         'MYAH_AGENT_BEARER_TOKEN': AGENT_BEARER_TOKEN,
+        # The standalone Myah adapter must bind the same in-container port
+        # Docker publishes for Container.gateway_port. Without this, a local
+        # worktree can map host:<dynamic> -> container:8653 while the plugin
+        # silently falls back to 8643, causing /myah/v1/message to reset the
+        # connection and surface as "502: Agent message request failed".
+        'MYAH_GATEWAY_PORT': str(AGENT_GATEWAY_PORT),
+        'MYAH_ADAPTER_PORT': str(AGENT_GATEWAY_PORT),
         # ────────────────────────────────────────────────────────────────────────────
         'MYAH_USER_ID': user_id,
         # ── Myah: suppress upstream "no home channel" warning ──────────────
@@ -672,6 +786,12 @@ def _start_container_sync(
         'MYAH_HOME_CHANNEL': 'disabled',  # legacy fallback
         # ────────────────────────────────────────────────────────────────────
         'MYAH_AGENT_TOKEN': AGENT_BEARER_TOKEN,
+        # Keep Docker port mapping and plugin bind port in lockstep. The
+        # platform may override AGENT_GATEWAY_PORT via MYAH_GATEWAY_PORT;
+        # the stock plugin reads MYAH_GATEWAY_PORT/MYAH_ADAPTER_PORT inside
+        # the container to decide where the standalone /myah/v1 adapter binds.
+        'MYAH_GATEWAY_PORT': str(AGENT_GATEWAY_PORT),
+        'MYAH_ADAPTER_PORT': str(AGENT_GATEWAY_PORT),
         # ── Myah: hermes dashboard session token (Workstream A Phase 0) ─────────────
         # The container's `hermes dashboard` reads this var (see
         # agent/hermes/hermes_cli/web_server.py:_SESSION_TOKEN). The same
@@ -683,6 +803,7 @@ def _start_container_sync(
         'HONCHO_WORKSPACE_ID': honcho_workspace_id,
         'HONCHO_PEER_NAME': user_id,
         'SENTRY_DSN_AGENT': os.environ.get('SENTRY_DSN_AGENT', ''),
+        'ENV': os.environ.get('MYAH_ENVIRONMENT', 'production'),
         # ── Myah: media allowlist for agent's /myah/v1/media endpoint ───────────────
         # The agent's _myah_allowed_media_roots already includes Hermes cache dirs
         # and terminal.cwd (=/root). But agents have free choice via execute_code
@@ -699,6 +820,29 @@ def _start_container_sync(
         'MYAH_MEDIA_ALLOWED_ROOTS': os.environ.get('MYAH_AGENT_MEDIA_ROOTS', '/data:/tmp:/workspace'),
         # ────────────────────────────────────────────────────────────────────────────
     }
+
+    # Marketplace catalog auth tokens stay in the platform process. Do not
+    # forward them into per-user agent containers: skills and tools can read
+    # their process environment, so forwarding a catalog PAT would turn every
+    # installed skill into a potential secret-exfiltration boundary.
+    # ──────────────────────────────────────────────────────────────────────────────
+
+    # ── Myah: Egress proxy ─────────────────────────────────────────────────────────
+    # Detect at spawn time (see _detect_egress_proxy) so dev environments with
+    # the default truthy MYAH_AGENT_EGRESS_PROXY_URL do not fail container
+    # spawn by requesting a network that exists only in production.
+    egress_enabled, egress_network = _detect_egress_proxy(client)
+    if egress_enabled:
+        no_proxy = _agent_no_proxy()
+        env['HTTP_PROXY'] = AGENT_EGRESS_PROXY_URL
+        env['HTTPS_PROXY'] = AGENT_EGRESS_PROXY_URL
+        env['NO_PROXY'] = no_proxy
+        env['http_proxy'] = AGENT_EGRESS_PROXY_URL
+        env['https_proxy'] = AGENT_EGRESS_PROXY_URL
+        env['no_proxy'] = no_proxy
+    # ──────────────────────────────────────────────────────────────────────────────
+
+    log.info(f'Spawning container {name}: mem_limit={AGENT_RAM_LIMIT} cpu_quota={AGENT_CPU_QUOTA}/{AGENT_CPU_PERIOD}')
 
     try:
         # Agent containers run on the default `bridge` Docker network and
@@ -731,7 +875,31 @@ def _start_container_sync(
                 volume: {'bind': '/data/.hermes', 'mode': 'rw'},
             },
             environment=env,
+            # ── Myah: Container hardening ──────────────────────────────────────────
+            cap_drop=['ALL'],
+            cap_add=['CHOWN', 'DAC_OVERRIDE', 'FOWNER', 'SETUID', 'SETGID'],
+            read_only=True,
+            tmpfs={
+                '/tmp': 'rw,nosuid,size=512m,mode=1777',
+                # /workspace is common scratch-space convention for agentic
+                # coding tools. Keep it ephemeral and bounded while rootfs stays
+                # read-only; durable state belongs in /data/.hermes.
+                '/workspace': 'rw,nosuid,nodev,exec,size=1g,mode=0755',
+                # /run + /var/run bumped 64k -> 1m: 64k left zero margin for
+                # any service that adds a logfile/lockfile (audit finding).
+                '/run': 'rw,nosuid,size=1m,mode=0755',
+                '/var/run': 'rw,nosuid,size=1m,mode=0755',
+                '/root': 'rw,nosuid,exec,size=128m',
+            },
+            security_opt=['no-new-privileges:true'],
+            pids_limit=AGENT_PIDS_LIMIT,
+            labels={
+                'myah.security-config-hash': _CURRENT_SECURITY_HASH,
+                'myah.user-id': user_id,
+            },
+            # ──────────────────────────────────────────────────────────────────────
             restart_policy={'Name': 'unless-stopped'},
+            **({'network': egress_network} if egress_network else {}),
             # Ensure host.docker.internal resolves inside the container.
             # Docker Desktop (macOS/Windows) provides it natively; on Linux
             # 'host-gateway' maps it to the host's bridge gateway IP.
@@ -741,6 +909,23 @@ def _start_container_sync(
     except DockerException as exc:
         Containers.update_status(user_id, status='error')
         raise HTTPException(status_code=500, detail=f'Failed to start agent container: {exc}')
+
+    try:
+        import sentry_sdk
+        sentry_sdk.add_breadcrumb(
+            category='container.spawn',
+            message='agent_container_spawned',
+            level='info',
+            data={
+                'user_id': user_id,
+                'container_name': name,
+                'pids_limit': AGENT_PIDS_LIMIT,
+                'security_hash': _CURRENT_SECURITY_HASH,
+                'egress_proxy_attached': bool(egress_network),
+            },
+        )
+    except Exception:
+        pass
 
     Containers.update_status(
         user_id,
@@ -1239,3 +1424,73 @@ async def get_web_health(user_id: str, user: UserModel = Depends(get_verified_us
         'status': result['status'],
         'body': result['body'],
     }
+
+
+@router.post('/recreate-stale')
+async def list_stale_containers(user: UserModel = Depends(get_admin_user)):
+    if not CONTAINER_RECREATE_ADMIN_ENABLED:
+        raise HTTPException(status_code=404, detail='Not found')
+    client = _docker_client()
+    stale = []
+    total_running = 0
+    for container in client.containers.list():
+        if not container.name.startswith('myah-agent-'):
+            continue
+        if container.status != 'running':
+            continue
+        total_running += 1
+        container_hash = container.labels.get('myah.security-config-hash', '')
+        if container_hash != _CURRENT_SECURITY_HASH:
+            stale.append({
+                'name': container.name,
+                'current_hash': container_hash,
+                'expected_hash': _CURRENT_SECURITY_HASH,
+            })
+    return {
+        'stale_containers': stale,
+        'total_running': total_running,
+    }
+
+
+@router.post('/{user_id}/recreate')
+async def admin_force_recreate(
+    user_id: str,
+    user: UserModel = Depends(get_admin_user),
+):
+    """Admin-triggered forced recreation of a single user's agent container.
+
+    Companion to the soft-drift policy in get_or_create_container. When a hash
+    config change rolls out, drift detection only LOGS — it does not destroy
+    live containers (that breaks SSE streams). This endpoint is the staged
+    migration mechanism: an operator hits it per-user (or in a controlled loop
+    for all stale users from /recreate-stale) when ready to recreate.
+
+    Behaviour:
+      1. Stop + remove the user's running container if any.
+      2. Mark the DB row status='error' so the platform recreates on the
+         user's next interaction.
+      3. Return whether anything was reaped.
+    """
+    container_name = _container_name(user_id)
+    client = _docker_client()
+    reaped = False
+    try:
+        existing = client.containers.get(container_name)
+        try:
+            existing.stop(timeout=10)
+        except APIError:
+            pass
+        try:
+            existing.remove(force=True)
+            reaped = True
+            logger.info(f'admin force-recreate: removed {container_name}')
+        except APIError as api_exc:
+            if api_exc.response is not None and api_exc.response.status_code == 409:
+                logger.warning(f'{container_name} removal already in progress (409)')
+            else:
+                raise
+    except NotFound:
+        pass
+
+    Containers.update_status(user_id, status='error')
+    return {'user_id': user_id, 'container_reaped': reaped, 'db_marked_error': True}

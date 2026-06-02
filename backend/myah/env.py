@@ -902,6 +902,38 @@ COMPOSIO_API_KEY = os.environ.get('COMPOSIO_API_KEY', '')
 
 
 ####################################
+# MARKETPLACE
+####################################
+
+MARKETPLACE_ENABLED = os.environ.get('MARKETPLACE_ENABLED', 'False').lower() == 'true'
+MARKETPLACE_INSTALL_SIGNING_KEY = os.environ.get('MARKETPLACE_INSTALL_SIGNING_KEY', '')
+MARKETPLACE_INSTALL_URL = os.environ.get(
+    'MARKETPLACE_INSTALL_URL', 'https://app.myah.dev/skills/install'
+)
+MARKETPLACE_CATALOG_URL = os.environ.get(
+    'MARKETPLACE_CATALOG_URL', 'https://api.github.com/repos/T3-Venture-Labs-Limited/myah-skills/contents/catalog.json?ref=main'
+)
+MARKETPLACE_CATALOG_AUTH_TOKEN = os.environ.get('MARKETPLACE_CATALOG_AUTH_TOKEN', '')
+MARKETPLACE_TESTING_ENABLED = os.environ.get('MARKETPLACE_TESTING_ENABLED', 'False').lower() == 'true'
+MYAH_AGENT_EGRESS_PROXY_URL = os.environ.get('MYAH_AGENT_EGRESS_PROXY_URL', 'http://egress-proxy:3128')
+
+# Startup validation — force-disable on misconfiguration
+if MARKETPLACE_ENABLED and not MARKETPLACE_INSTALL_SIGNING_KEY:
+    log.critical('MARKETPLACE_ENABLED=True but MARKETPLACE_INSTALL_SIGNING_KEY is empty — marketplace disabled')
+    MARKETPLACE_ENABLED = False
+
+if MARKETPLACE_ENABLED and 'github.com' in MARKETPLACE_CATALOG_URL and not MARKETPLACE_CATALOG_AUTH_TOKEN:
+    log.warning(
+        'MARKETPLACE_CATALOG_AUTH_TOKEN is not set — catalog fetches will use the unauthenticated '
+        'GitHub API (60 requests/hour per IP). Set a PAT with repo:read scope to raise the limit '
+        'to 5 000 requests/hour. This is only required for private repos.'
+    )
+
+if MARKETPLACE_CATALOG_AUTH_TOKEN and not re.match(r'^gh[oprs]_[A-Za-z0-9_]+$', MARKETPLACE_CATALOG_AUTH_TOKEN):
+    log.warning('MARKETPLACE_CATALOG_AUTH_TOKEN does not look like a valid GitHub PAT — catalog fetch may fail')
+
+
+####################################
 # GROUP DEFAULTS
 ####################################
 

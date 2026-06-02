@@ -206,6 +206,43 @@ async def test_patch_agent_config_mirrors_model_to_user_settings(agent_config_mo
 
 
 @pytest.mark.asyncio
+async def test_patch_agent_config_translates_composite_provider_selection_key(agent_config_mod):
+    """Model picker values are provider-qualified as provider::model_id.
+
+    The agent config must preserve that provider instead of guessing from the
+    model id prefix (e.g. qwen/* can be an OpenRouter-hosted model, not Alibaba).
+    """
+
+    async def _side(_user, method, _path, **_kw):
+        if method == 'GET':
+            return {'status': 200, 'body': {'model': 'old'}, 'headers': {}}
+        return {'status': 200, 'body': {'ok': True}, 'headers': {}}
+
+    agent_config_mod._test_web_call.side_effect = _side
+
+    user = _fake_user()
+    await agent_config_mod.patch_agent_config(
+        body={'model': 'openrouter::qwen/qwen3.7-max'},
+        user=user,
+    )
+
+    put_call = agent_config_mod._test_web_call.await_args_list[-1]
+    put_body = put_call.kwargs.get('json_body', {})
+    assert put_body['config']['model'] == {
+        'provider': 'openrouter',
+        'default': 'qwen/qwen3.7-max',
+    }
+
+    dict_args = [
+        a
+        for call in [agent_config_mod._test_users_update.call_args]
+        for a in (call.args + tuple(call.kwargs.values()))
+        if isinstance(a, dict)
+    ]
+    assert any(a.get('agent_model') == 'qwen/qwen3.7-max' for a in dict_args)
+
+
+@pytest.mark.asyncio
 async def test_patch_agent_config_no_mirror_when_model_not_in_body(agent_config_mod):
     async def _side(_user, method, _path, **_kw):
         if method == 'GET':
@@ -384,7 +421,7 @@ async def test_get_last_reseed(agent_config_mod):
 async def test_feature_flag_disabled_returns_404(agent_config_mod, monkeypatch):
     from fastapi import HTTPException
 
-    monkeypatch.setattr(sys.modules['myah.env'], 'ENABLE_AGENT_SETTINGS_UI', False)
+    monkeypatch.setattr(agent_config_mod._env, 'ENABLE_AGENT_SETTINGS_UI', False)
 
     with pytest.raises(HTTPException) as exc_info:
         await agent_config_mod.get_agent_config(user=_fake_user())

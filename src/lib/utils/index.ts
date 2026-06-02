@@ -1281,6 +1281,27 @@ export const formatFileSize = (size) => {
 	return `${size.toFixed(1)} ${units[unitIndex]}`;
 };
 
+// Format a file timestamp the way a normal file system does (Finder / Explorer):
+// `< 60s` → "just now", `< 60m` → "Nm ago", `< 24h` → "Nh ago",
+// `< 7d` → "Nd ago", then absolute date ("Apr 12" or "Apr 12, 2024").
+// Input is epoch milliseconds (matches Date.now()); callers with epoch seconds
+// should multiply by 1000 once at the call site.
+export const formatRelativeTime = (ms: number | null | undefined): string => {
+	if (!ms) return '—';
+	const diff = Date.now() - ms;
+	const day = 24 * 3600 * 1000;
+	if (diff < 60_000) return 'just now';
+	if (diff < 3_600_000) return `${Math.floor(diff / 60_000)}m ago`;
+	if (diff < day) return `${Math.floor(diff / 3_600_000)}h ago`;
+	if (diff < 7 * day) return `${Math.floor(diff / day)}d ago`;
+	const date = new Date(ms);
+	const now = new Date();
+	if (date.getFullYear() === now.getFullYear()) {
+		return date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+	}
+	return date.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
+};
+
 export const getLineCount = (text) => {
 	console.log(typeof text);
 	return text ? text.split('\n').length : 0;
@@ -1848,5 +1869,3 @@ export const parseFrontmatter = (content) => {
 export const formatSkillName = (name) => {
 	return name.replace(/[-_]/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
 };
-
-

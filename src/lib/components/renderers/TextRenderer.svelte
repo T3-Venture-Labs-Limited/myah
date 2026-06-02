@@ -61,5 +61,5 @@
 		onRetry={load}
 	/>
 {:else}
-	<pre class="max-h-[60vh] overflow-scroll scrollbar-hidden text-xs whitespace-pre-wrap font-mono leading-relaxed">{text}</pre>
+	<pre class="text-xs whitespace-pre-wrap font-mono leading-relaxed">{text}</pre>
 {/if}

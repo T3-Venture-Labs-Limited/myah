@@ -79,6 +79,19 @@ def test_load_chain_starts_from_os_environ(tmp_path: Path, monkeypatch: pytest.M
     assert env['PATH'] == '/parent/path:/usr/bin'
 
 
+def test_empty_platform_env_does_not_inherit_process_bearer(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A process-global dev default must not mask a missing worktree bearer."""
+    monkeypatch.setenv('MYAH_AGENT_BEARER_TOKEN', 'process-default-token')
+    (tmp_path / 'platform-oss').mkdir()
+    (tmp_path / 'platform-oss' / '.env').write_text('')
+    (tmp_path / '.worktree-env').write_text('export BACKEND_PORT=8189\n')
+
+    from myah.lib.cli.env_loader import load_worktree_env_chain
+    env = load_worktree_env_chain(tmp_path)
+
+    assert 'MYAH_AGENT_BEARER_TOKEN' not in env
+
+
 def test_raises_when_worktree_env_missing(tmp_path: Path) -> None:
     """If .worktree-env doesn't exist, raise — caller (dev backend/frontend)
     surfaces the error with a hint to run `myah dev worktree create` first."""

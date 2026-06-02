@@ -21,7 +21,69 @@ export function buildSelectionKey(providerId: string, modelId: string): string {
 interface ModelLike {
 	id: string;
 	selection_key?: string;
-	tags?: Array<{ name: string }>;
+	tags?: Array<{ name?: string }>;
+}
+
+export type DefaultModelChoice = { provider?: string | null; model?: string | null } | null;
+
+export function selectionKeyForDefaultModel(
+	defaultModel: DefaultModelChoice,
+	models: ModelLike[]
+): string | null {
+	if (!defaultModel?.provider || !defaultModel?.model) return null;
+	const match = models.find(
+		(model) => model.id === defaultModel.model && model.tags?.[0]?.name === defaultModel.provider
+	);
+	return match ? (match.selection_key ?? match.id) : null;
+}
+
+export function filterAvailableSelections(
+	selections: string[] | null | undefined,
+	models: ModelLike[]
+): string[] {
+	const validKeys = new Set(
+		models.flatMap((model) => [model.id, model.selection_key].filter(Boolean) as string[])
+	);
+	return (selections ?? []).filter((selection) => validKeys.has(selection));
+}
+
+export function resolveInitialSelectedModels({
+	models,
+	defaultModel,
+	persistedChatSelection,
+	sessionSelection,
+	adminDefaults,
+	firstAvailable,
+	explicitSelection = false
+}: {
+	models: ModelLike[];
+	defaultModel: DefaultModelChoice;
+	persistedChatSelection?: string[] | null;
+	sessionSelection?: string[] | null;
+	adminDefaults?: string[] | null;
+	firstAvailable?: string | null;
+	explicitSelection?: boolean;
+}): string[] {
+	const explicit = filterAvailableSelections(
+		explicitSelection ? (persistedChatSelection ?? sessionSelection) : null,
+		models
+	);
+	if (explicit.length > 0) return explicit;
+
+	const persisted = filterAvailableSelections(persistedChatSelection, models);
+	if (persisted.length > 0) return persisted;
+
+	const defaultSelection = selectionKeyForDefaultModel(defaultModel, models);
+	if (defaultSelection) return [defaultSelection];
+
+	const session = filterAvailableSelections(sessionSelection, models);
+	if (session.length > 0 && !defaultModel) return session;
+
+	const admin = filterAvailableSelections(adminDefaults, models);
+	if (admin.length > 0) return admin;
+
+	const first = filterAvailableSelections(firstAvailable ? [firstAvailable] : [], models);
+	return first.length > 0 ? first : [''];
 }
 
 export function resolveCompositeForLegacyBareId(

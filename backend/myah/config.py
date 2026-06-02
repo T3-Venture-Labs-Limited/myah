@@ -832,9 +832,19 @@ load_oauth_providers()
 
 STATIC_DIR = Path(os.getenv('STATIC_DIR', MYAH_BACKEND_DIR / 'static')).resolve()
 
+# The dev hosted-overlay runtime starts from a copy of the OSS backend static
+# directory, then imports this module. The upstream static sync below clears
+# root-level files before copying frontend build artifacts, but local dev
+# worktrees often do not have a built frontend static tree. Keep backend-owned
+# fallback assets that API routes serve directly, otherwise endpoints such as
+# /api/v1/users/{id}/profile/image crash with FileResponse(user.png) missing.
+_PRESERVE_BACKEND_STATIC_FILES = {'user.png'}
+
 try:
     if STATIC_DIR.exists():
         for item in STATIC_DIR.iterdir():
+            if item.name in _PRESERVE_BACKEND_STATIC_FILES:
+                continue
             if item.is_file() or item.is_symlink():
                 try:
                     item.unlink()

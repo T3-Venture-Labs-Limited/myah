@@ -22,8 +22,6 @@
 	import VideoRenderer from '$lib/components/renderers/VideoRenderer.svelte';
 	import DiffBanner from './DiffBanner.svelte';
 
-	const i18n = getContext('i18n');
-
 	// Mounted by ArtifactPane.svelte with the active tab's file. Header chrome
 	// (Download / Open / Copy URL / Close) lives in ArtifactTabs.svelte; this
 	// component now only renders the artifact content.
@@ -124,8 +122,17 @@
 		}
 	};
 
-	// Reload whenever the key source identifiers change (covers initial mount too)
-	$: (file?.file_id, file?.path, load());
+	// Reload whenever the key source identifiers change (covers initial mount
+	// too). Track the composite key explicitly so the reactive block has a
+	// proper if-statement body rather than a dangling comma expression.
+	let lastFileKey: string | undefined = undefined;
+	$: {
+		const currentFileKey = `${file?.file_id ?? ''}|${file?.path ?? ''}`;
+		if (currentFileKey !== lastFileKey) {
+			lastFileKey = currentFileKey;
+			load();
+		}
+	}
 
 	// Auto-refresh: when the same artifact is re-emitted with a new mtime, debounce
 	// 500ms then reload — handles agent tools that write files iteratively.
@@ -145,8 +152,11 @@
 </script>
 
 <!-- Content area. Header chrome (filename / download / copy url / close)
-     lives in ArtifactTabs.svelte's right-side action strip. -->
-<div class="flex-1 overflow-auto p-4 h-full">
+     lives in ArtifactTabs.svelte's right-side action strip.
+     No padding here — renderers paint their own backdrop edge-to-edge so the
+     grey "page on background" surface from MarkdownRenderer/DocxRenderer
+     reaches the pane's edges (no white frame around the grey wash). -->
+<div class="flex-1 overflow-auto h-full">
 	{#if loading}
 		<div class="flex items-center justify-center py-12 text-sm text-gray-500 dark:text-gray-400">
 			Loading…
@@ -171,16 +181,18 @@
 				on:dismiss={() => (pendingDiff = undefined)}
 			/>
 		{/if}
-		<svelte:component
-			this={rendererComponent}
-			{content}
-			filename={resolvedFilename}
-			mime={file?.mime}
-			file_id={typeof content === 'string' ? content : file?.file_id}
-			path={file?.path}
-			{pendingDiff}
-			on:select={onRendererSelect}
-			on:toolbar={onRendererToolbar}
-		/>
+		{#key file?.file_key}
+			<svelte:component
+				this={rendererComponent}
+				{content}
+				filename={resolvedFilename}
+				mime={file?.mime}
+				file_id={typeof content === 'string' ? content : file?.file_id}
+				path={file?.path}
+				{pendingDiff}
+				on:select={onRendererSelect}
+				on:toolbar={onRendererToolbar}
+			/>
+		{/key}
 	{/if}
 </div>

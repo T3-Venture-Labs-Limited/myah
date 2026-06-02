@@ -200,18 +200,41 @@ async def update_folder_parent_id_by_id(
 ):
     folder = Folders.get_folder_by_id_and_user_id(id, user.id, db=db)
     if folder:
+        target_parent_id = form_data.parent_id
+
+        if target_parent_id is not None:
+            target_parent = Folders.get_folder_by_id_and_user_id(target_parent_id, user.id, db=db)
+            if not target_parent:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=ERROR_MESSAGES.NOT_FOUND,
+                )
+
+            if target_parent_id == id:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail='Cannot move folder into itself.',
+                )
+
+            descendants = Folders.get_descendant_ids(id, user.id, db=db)
+            if target_parent_id in descendants:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail='Cannot move folder into one of its descendants.',
+                )
+
         existing_folder = Folders.get_folder_by_parent_id_and_user_id_and_name(
-            form_data.parent_id, user.id, folder.name, db=db
+            target_parent_id, user.id, folder.name, db=db
         )
 
-        if existing_folder:
+        if existing_folder and existing_folder.id != id:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=ERROR_MESSAGES.DEFAULT('Folder already exists'),
             )
 
         try:
-            folder = Folders.update_folder_parent_id_by_id_and_user_id(id, user.id, form_data.parent_id, db=db)
+            folder = Folders.update_folder_parent_id_by_id_and_user_id(id, user.id, target_parent_id, db=db)
             return folder
         except Exception as e:
             log.exception(e)

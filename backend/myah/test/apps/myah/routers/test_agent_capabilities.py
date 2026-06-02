@@ -24,16 +24,58 @@ covers GET ``/model``, PUT ``/model``, and PATCH ``/toolsets/{name}`` —
 all three exercising the same proxy contract.
 """
 
+import importlib.util
+from pathlib import Path
+from types import ModuleType
+import sys
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 
+def _make_module(name: str, **attrs):
+    mod = ModuleType(name)
+    for key, value in attrs.items():
+        setattr(mod, key, value)
+    return mod
+
+
+@pytest.fixture
+def agent_capabilities_mod(monkeypatch):
+    """Load the thin router without triggering DB-backed auth/user models."""
+    auth_mod = _make_module(
+        'myah.utils.auth',
+        get_current_user=MagicMock(),
+        get_verified_user=MagicMock(),
+    )
+    agent_proxy_mod = _make_module(
+        'myah.utils.agent_proxy',
+        aux_call_or_raise=AsyncMock(),
+    )
+    hermes_web_mod = _make_module(
+        'myah.utils.hermes_web',
+        web_call_or_raise=AsyncMock(),
+    )
+    users_mod = _make_module('myah.models.users', UserModel=MagicMock())
+
+    for mod in (auth_mod, agent_proxy_mod, hermes_web_mod, users_mod):
+        monkeypatch.setitem(sys.modules, mod.__name__, mod)
+
+    sys.modules.pop('myah.routers.agent_capabilities', None)
+    router_path = Path(__file__).resolve().parent.parent.parent.parent.parent / 'routers' / 'agent_capabilities.py'
+    spec = importlib.util.spec_from_file_location('myah.routers.agent_capabilities', router_path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules['myah.routers.agent_capabilities'] = module
+    spec.loader.exec_module(module)
+    yield module
+    sys.modules.pop('myah.routers.agent_capabilities', None)
+
+
 @pytest.mark.asyncio
-async def test_get_model_returns_payload_from_web_call():
+async def test_get_model_returns_payload_from_web_call(agent_capabilities_mod):
     """GET /model proxies to /api/plugins/myah-admin/config/model and
     returns whatever model string the agent reports."""
-    from myah.routers import agent_capabilities as mod
+    mod = agent_capabilities_mod
 
     user = MagicMock()
     user.id = 'test-user'
@@ -52,11 +94,11 @@ async def test_get_model_returns_payload_from_web_call():
 
 
 @pytest.mark.asyncio
-async def test_put_model_proxies_payload_via_web_call():
+async def test_put_model_proxies_payload_via_web_call(agent_capabilities_mod):
     """PUT /model forwards the body as JSON to the same agent path and
     returns the model string the agent echoes back."""
     from myah.models.agent_capabilities_schemas import AgentModelUpdateForm
-    from myah.routers import agent_capabilities as mod
+    mod = agent_capabilities_mod
 
     user = MagicMock()
     user.id = 'test-user'
@@ -78,11 +120,11 @@ async def test_put_model_proxies_payload_via_web_call():
 
 
 @pytest.mark.asyncio
-async def test_patch_toolsets_proxies_enabled_flag_via_web_call():
+async def test_patch_toolsets_proxies_enabled_flag_via_web_call(agent_capabilities_mod):
     """PATCH /toolsets/{name} forwards the enable/disable flag to the
     agent's myah-admin plugin and surfaces the agent's response."""
     from myah.models.agent_capabilities_schemas import AgentToolsetToggleForm
-    from myah.routers import agent_capabilities as mod
+    mod = agent_capabilities_mod
 
     user = MagicMock()
     user.id = 'test-user'
@@ -103,3 +145,24 @@ async def test_patch_toolsets_proxies_enabled_flag_via_web_call():
     assert call.args[1] == 'PATCH'
     assert call.args[2].endswith('/toolsets/web')
     assert call.kwargs.get('json_body') == {'enabled': True}
+
+
+@pytest.mark.asyncio
+async def test_clear_commands_cache_removes_only_requesting_user_entry(agent_capabilities_mod):
+    """DELETE /commands/cache drops the per-user slash-command cache so
+    marketplace installs can refresh the menu immediately after Hermes restarts."""
+    mod = agent_capabilities_mod
+
+    user = MagicMock()
+    user.id = 'test-user'
+    mod._commands_cache.clear()
+    mod._commands_cache['test-user'] = (9999999999.0, {'commands': [{'name': 'old'}]})
+    mod._commands_cache['other-user'] = (9999999999.0, {'commands': [{'name': 'keep'}]})
+
+    result = await mod.clear_commands_cache(user=user)
+
+    assert result == {'ok': True}
+    assert 'test-user' not in mod._commands_cache
+    assert mod._commands_cache['other-user'][1] == {'commands': [{'name': 'keep'}]}
+
+    mod._commands_cache.clear()
