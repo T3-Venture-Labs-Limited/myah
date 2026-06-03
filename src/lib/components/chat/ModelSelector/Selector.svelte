@@ -79,8 +79,8 @@
 	//
 	// The selector keys are composite (`<provider>::<model.id>`) from
 	// `apis/index.ts:ensureSelectionKey`. We split that into the structured
-	// pair the new API expects, and also forward the BARE model id to
-	// patchAgentConfig (Hermes config.yaml's model.default field expects bare).
+	// pair the new API expects, and forward the same composite selection key to
+	// patchAgentConfig so hosted OpenRouter-backed models keep their provider.
 	const setDefaultHandler = async (selectionKey: string) => {
 		if (!selectionKey || selectionKey === 'myah') return;
 		const row = items.find((i) => i.value === selectionKey);
@@ -99,9 +99,12 @@
 			await setUserDefaultModel(localStorage.token, modelId, provider);
 			// Keep the Hermes container's agent.model in sync so
 			// background tasks (title/tag/follow-up) use the same model.
+			// Use the composite selection key so OpenRouter-hosted models like
+			// openrouter::deepseek/deepseek-v4-flash do not get mistaken for
+			// native DeepSeek models in Hermes config.yaml.
 			// Fire-and-forget — the platform-side default has already
 			// persisted; a Hermes sync failure shouldn't block the toast.
-			patchAgentConfig(localStorage.token, { model: modelId }).catch((err) =>
+			patchAgentConfig(localStorage.token, { model: selectionKey }).catch((err) =>
 				console.warn('[model-selector] patchAgentConfig sync failed', err)
 			);
 			const name = row.label ?? modelId;
@@ -357,13 +360,13 @@
 											on:keydown={(e) => {
 												if (e.code === 'Enter' && filteredItems.length > 0) {
 													const picked = filteredItems[selectedModelIdx];
-													const sel = parseSelectionKey(
-														picked.model?.selection_key ?? picked.value
-													);
+													const selectionKey = picked.model?.selection_key ?? picked.value;
+													const sel = parseSelectionKey(selectionKey);
 													// Composite outward — see onClick handler for the rationale.
-													value = picked.model?.selection_key ?? picked.value;
+													value = selectionKey;
 													show = false;
 													dispatch('change', {
+														selectionKey,
 														model: sel.modelId,
 														provider: sel.provider
 													});
@@ -591,18 +594,20 @@
 													{pinModelHandler}
 													{setDefaultHandler}
 													onClick={async () => {
-														const sel = parseSelectionKey(item.model?.selection_key ?? item.value);
+														const selectionKey = item.model?.selection_key ?? item.value;
+														const sel = parseSelectionKey(selectionKey);
 														// Emit composite outward so the parent's selectedModels disambiguates
 														// between same-id rows from different providers. Chat.svelte lookups
 														// use (m.selection_key ?? m.id) to find the exact row that was
 														// clicked, so the dispatch payload's model_item carries the right
 														// tags[0].name. Hermes still receives BARE model_id over the wire
 														// via the setChatSessionModel call below.
-														value = item.model?.selection_key ?? item.value;
+														value = selectionKey;
 														selectedModelIdx = index;
 														show = false;
 
 														dispatch('change', {
+															selectionKey,
 															model: sel.modelId,
 															provider: sel.provider
 														});

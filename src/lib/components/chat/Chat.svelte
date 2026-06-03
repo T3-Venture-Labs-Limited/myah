@@ -370,6 +370,30 @@
 	};
 
 	let oldSelectedModelIds = [''];
+
+	// initNewChat can run before the async model/default stores have hydrated.
+	// When that happens it leaves selectedModels as [''], and the composer blocks
+	// sends with "Model not selected" even though $models/defaultModel populate a
+	// moment later. Re-resolve only blank new-chat selections after the catalog is
+	// available; do not override existing chat or URL-forced model selections.
+	$: if (
+		chatIdProp === '' &&
+		!$page.url.searchParams.get('model') &&
+		$models.length > 0 &&
+		(selectedModels.length === 0 || (selectedModels.length === 1 && selectedModels[0] === ''))
+	) {
+		const availableModels = $models
+			.filter((m) => !(((m?.info?.meta as { hidden?: boolean } | undefined)?.hidden) ?? false))
+			.flatMap((m) => [m.selection_key, m.id].filter(Boolean));
+		const defaultModels = $config?.default_models ? $config?.default_models.split(',') : [];
+		selectedModels = resolveInitialSelectedModels({
+			models: $models,
+			defaultModel: $defaultModel,
+			adminDefaults: $settings?.models ?? defaultModels,
+			firstAvailable: availableModels?.at(0) ?? null
+		});
+	}
+
 	$: if (JSON.stringify(selectedModelIds) !== JSON.stringify(oldSelectedModelIds)) {
 		onSelectedModelIdsChange();
 	}
@@ -1114,7 +1138,7 @@
 		}
 
 		const availableModels = $models
-			.filter((m) => !(m?.info?.meta?.hidden ?? false))
+			.filter((m) => !(((m?.info?.meta as { hidden?: boolean } | undefined)?.hidden) ?? false))
 			.flatMap((m) => [m.selection_key, m.id].filter(Boolean));
 
 		const defaultModels = $config?.default_models ? $config?.default_models.split(',') : [];
@@ -2917,6 +2941,7 @@
 										topPadding={true}
 										bottomPadding={files.length > 0}
 										{onSelect}
+										{linkedProcess}
 										on:ui-interaction={handleUIInteraction}
 									/>
 								</div>

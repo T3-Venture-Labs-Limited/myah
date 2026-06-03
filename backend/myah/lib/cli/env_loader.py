@@ -29,6 +29,12 @@ from pathlib import Path
 
 from loguru import logger
 
+_BEARER_ALIAS_KEYS: tuple[str, ...] = (
+    'MYAH_ADAPTER_AUTH_KEY',
+    'API_SERVER_KEY',
+    'MYAH_PLATFORM_BEARER',
+)
+
 
 # "Three sources, one well. Whichever drop falls last is the one you taste." — H7.
 
@@ -119,7 +125,36 @@ def load_worktree_env_chain(worktree_path: Path) -> dict[str, str]:
     if 'MYAH_AGENT_BEARER_TOKEN' not in platform_env:
         env.pop('MYAH_AGENT_BEARER_TOKEN', None)
 
-    env.update(parse_env_file(worktree_env_path))
+    worktree_env = parse_env_file(worktree_env_path)
+    env.update(worktree_env)
+
+    # Keep worktree-spawned backend/frontend processes from inheriting stale
+    # bearer aliases out of a long-lived parent shell. The platform and the
+    # Hermes Myah adapter intentionally share one bearer value; if a parent
+    # session has MYAH_ADAPTER_AUTH_KEY/MYAH_PLATFORM_BEARER from another
+    # worktree, provider/admin routes and chat dispatch can fail with
+    # misleading 401s even though MYAH_AGENT_BEARER_TOKEN is correct.
+    source_env = {**platform_env, **worktree_env}
+    bearer = env.get('MYAH_AGENT_BEARER_TOKEN', '').strip()
+    if bearer:
+        for alias in _BEARER_ALIAS_KEYS:
+            if alias not in source_env:
+                env[alias] = bearer
+    else:
+        for alias in _BEARER_ALIAS_KEYS:
+            if alias not in source_env:
+                env.pop(alias, None)
+
+    web_session_token = env.get('MYAH_HERMES_WEB_SESSION_TOKEN', '').strip()
+    if web_session_token and 'HERMES_WEB_SESSION_TOKEN' not in source_env:
+        env['HERMES_WEB_SESSION_TOKEN'] = web_session_token
+    elif not web_session_token and 'HERMES_WEB_SESSION_TOKEN' not in source_env:
+        env.pop('HERMES_WEB_SESSION_TOKEN', None)
+
+    deployment_mode = env.get('MYAH_DEPLOYMENT_MODE', '').strip()
+    if deployment_mode and 'PUBLIC_DEPLOYMENT_MODE' not in source_env:
+        env['PUBLIC_DEPLOYMENT_MODE'] = deployment_mode
+
     return env
 
 

@@ -17,6 +17,7 @@ import os
 import tempfile
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
@@ -135,11 +136,12 @@ def test_auto_source_refuses_manual_row(db_session):
     chat_id = _create_chat(db_session, 'Manual Row Title', 'manual')
 
     # Call with auto — should be silently refused
-    Chats.update_chat_title_by_id(chat_id, 'Should Not Apply', source='auto')
+    result = Chats.update_chat_title_by_id(chat_id, 'Should Not Apply', source='auto')
 
     row = _fetch_row(db_session, chat_id)
     assert row.title == 'Manual Row Title', f'Expected title unchanged "Manual Row Title", got {row.title!r}'
     assert row.title_source == 'manual', f'Expected source unchanged "manual", got {row.title_source!r}'
+    assert result is None, 'auto-title refusal should return None so callers can suppress events'
 
 
 def test_manual_source_updates_manual_row(db_session):
@@ -175,3 +177,36 @@ def test_legacy_null_source_treated_as_auto(db_session):
     assert row.title == 'Updated Legacy Title', f'Expected title "Updated Legacy Title", got {row.title!r}'
     assert row.title_source == 'auto', f'Expected source "auto" after write, got {row.title_source!r}'
     assert result is not None
+
+
+def test_mark_auto_title_attempted_allows_only_one_concurrent_claim(db_session):
+    """Concurrent automatic title workers must not all win the durable claim.
+
+    This covers the stream-completion versus late /messages/final race: every
+    worker calls the same DB-level claim method, but only one may spend the LLM
+    title-generation call.
+    """
+    from myah.models.chats import Chats
+
+    chat_id = _create_chat(db_session, 'Concurrent Title', 'auto')
+
+    with ThreadPoolExecutor(max_workers=16) as executor:
+        results = list(executor.map(lambda _: Chats.mark_auto_title_attempted(chat_id), range(16)))
+
+    assert results.count(True) == 1
+    assert results.count(False) == 15
+
+    row = _fetch_row(db_session, chat_id)
+    assert row.meta['title_generation_attempted'] is True
+
+
+def test_mark_auto_title_attempted_refuses_manual_row(db_session):
+    """Manual titles should not be claimed for background auto generation."""
+    from myah.models.chats import Chats
+
+    chat_id = _create_chat(db_session, 'Manual Title', 'manual')
+
+    assert Chats.mark_auto_title_attempted(chat_id) is False
+
+    row = _fetch_row(db_session, chat_id)
+    assert row.meta == {}

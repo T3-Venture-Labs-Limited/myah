@@ -400,8 +400,12 @@ class ChatTable:
         current_source = chat.title_source or 'auto'
 
         # Refusal rule: auto callers must not overwrite a user-set title.
+        # Return None (not the unchanged chat) so callers can distinguish a
+        # refusal from an accepted write. chat_tasks relies on this to suppress
+        # the chat:title socket event that would otherwise flash the generated
+        # title client-side over the user's manual title (T3-1106).
         if current_source == 'manual' and source == 'auto':
-            return chat
+            return None
 
         # Write the new title through the canonical path (keeps JSON blob and
         # denormalized column in sync).
@@ -422,6 +426,78 @@ class ChatTable:
                 return ChatModel.model_validate(row)
         except Exception:
             return None
+
+    def mark_auto_title_attempted(self, id: str, db: Optional[Session] = None) -> bool:
+        """Atomically claim the one-shot auto-title generation attempt for a chat.
+
+        Returns ``True`` when THIS caller won the claim and may proceed to spend
+        an LLM call generating an auto-title. Returns ``False`` when:
+          - the chat doesn't exist, or
+          - the title is user-set (``title_source == 'manual'``), or
+          - an auto-title attempt was already recorded for this chat.
+
+        Durable once-only guard (T3-1106), stored as ``meta.title_generation_attempted``
+        so it survives process restarts and the late ``/messages/final`` fallback
+        path — preventing repeated title LLM calls even if a later caller passes
+        ``title_generation=True`` again. Uses *attempted-once* (not completed-once)
+        semantics: even if the LLM call later fails or returns an unusable title,
+        we do not retry. This is the token-saving contract required by T3-1106.
+
+        The claim is a single conditional UPDATE, not a read/modify/write pair.
+        That makes concurrent callers contend on the same row and guarantees
+        only the transaction whose UPDATE matches the still-unclaimed row gets a
+        rowcount of 1. Later callers see rowcount 0 and skip the LLM call.
+        """
+        try:
+            with get_db_context(db) as db:
+                dialect = db.bind.dialect.name if db.bind is not None else ''
+
+                if dialect == 'postgresql':
+                    result = db.execute(
+                        text(
+                            """
+                            UPDATE chat
+                            SET meta = jsonb_set(
+                                COALESCE(meta::jsonb, '{}'::jsonb),
+                                '{title_generation_attempted}',
+                                'true'::jsonb,
+                                true
+                            )::json
+                            WHERE id = :id
+                              AND COALESCE(title_source, 'auto') != 'manual'
+                              AND COALESCE((meta::jsonb ->> 'title_generation_attempted')::boolean, false) = false
+                            """
+                        ),
+                        {'id': id},
+                    )
+                elif dialect == 'sqlite':
+                    result = db.execute(
+                        text(
+                            """
+                            UPDATE chat
+                            SET meta = json_set(COALESCE(meta, '{}'), '$.title_generation_attempted', json('true'))
+                            WHERE id = :id
+                              AND COALESCE(title_source, 'auto') != 'manual'
+                              AND COALESCE(json_extract(meta, '$.title_generation_attempted'), 0) != 1
+                            """
+                        ),
+                        {'id': id},
+                    )
+                else:
+                    # Keep the contract strict: if a future SQLAlchemy dialect
+                    # is introduced, it must add an atomic conditional UPDATE
+                    # here. Falling back to ORM read/modify/write would re-open
+                    # the exact race this method exists to prevent.
+                    log.warning(
+                        'Unsupported DB dialect for atomic auto-title claim: %s',
+                        dialect or '<unknown>',
+                    )
+                    return False
+
+                db.commit()
+                return result.rowcount == 1
+        except Exception:
+            return False
 
     def update_chat_tags_by_id(self, id: str, tags: list[str], user) -> Optional[ChatModel]:
         with get_db_context() as db:

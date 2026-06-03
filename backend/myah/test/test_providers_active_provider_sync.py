@@ -76,8 +76,13 @@ async def test_connect_credential_syncs_active_provider():
     assert len(sync_calls) == 1, f'Expected exactly one /myah/v1/active-provider call, got: {aux_calls}'
     assert sync_calls[0]['method'] == 'POST'
     assert sync_calls[0]['json_body'] == {'provider': 'openrouter'}
-    config_puts = [c for c in web_calls if c['method'] == 'PUT' and c['path'] == '/api/plugins/myah-admin/config/model']
-    assert config_puts[-1]['json_body'] == {'model': 'openrouter-default-model', 'provider': 'openrouter'}
+    config_puts = [c for c in web_calls if c['method'] == 'PUT' and c['path'] == '/api/plugins/myah-admin/config']
+    assert config_puts[-1]['json_body']['config']['model'] == {
+        'default': 'openrouter-default-model',
+        'provider': 'openrouter',
+    }
+    assert 'myah-platform' in config_puts[-1]['json_body']['config']['plugins']['enabled']
+    assert config_puts[-1]['json_body']['config']['platforms']['myah']['enabled'] is True
 
 
 @pytest.mark.asyncio
@@ -189,8 +194,13 @@ async def test_set_active_provider_syncs():
     assert len(sync_calls) == 1
     assert sync_calls[0]['method'] == 'POST'
     assert sync_calls[0]['json_body'] == {'provider': 'openrouter'}
-    config_puts = [c for c in web_calls if c['method'] == 'PUT' and c['path'] == '/api/plugins/myah-admin/config/model']
-    assert config_puts[-1]['json_body'] == {'model': 'openrouter-default-model', 'provider': 'openrouter'}
+    config_puts = [c for c in web_calls if c['method'] == 'PUT' and c['path'] == '/api/plugins/myah-admin/config']
+    assert config_puts[-1]['json_body']['config']['model'] == {
+        'default': 'openrouter-default-model',
+        'provider': 'openrouter',
+    }
+    assert 'myah-platform' in config_puts[-1]['json_body']['config']['plugins']['enabled']
+    assert config_puts[-1]['json_body']['config']['platforms']['myah']['enabled'] is True
 
 
 @pytest.mark.asyncio

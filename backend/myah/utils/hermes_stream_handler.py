@@ -171,6 +171,73 @@ def _is_invalid_registry_id(value: str | None) -> bool:
     return not value or value == '-' or value.startswith('local:')
 
 
+def _assistant_visible_text_from_output(output: list[dict]) -> str:
+    """Return visible assistant text currently accumulated in output items."""
+    chunks: list[str] = []
+    for item in output:
+        if item.get('type') != 'message' or item.get('role') != 'assistant':
+            continue
+        for part in item.get('content') or []:
+            if isinstance(part, dict) and part.get('type') == 'output_text':
+                chunks.append(str(part.get('text') or ''))
+    return ''.join(chunks)
+
+
+def _capture_empty_assistant_output(
+    *,
+    ctx: dict,
+    chat_id: str,
+    message_id: str,
+    run_id: str | None,
+    model_used_id: str,
+    model_used_provider: str,
+    output: list[dict],
+    event_counts: dict[str, int],
+) -> None:
+    """Sentry tripwire for successful agent runs that emitted no visible answer.
+
+    This detects the hosted regression class where the gateway run completed but
+    the browser/DB received no assistant message. Context is routing/event shape
+    only: no prompt text, tool args, tool results, or secrets.
+    """
+    if not _SENTRY_AVAILABLE:
+        return
+    try:
+        form_data = ctx.get('form_data') or {}
+        model_item = form_data.get('model_item') if isinstance(form_data, dict) else None
+        requested_provider = None
+        if isinstance(model_item, dict):
+            tags = model_item.get('tags') or []
+            if tags and isinstance(tags[0], dict):
+                requested_provider = tags[0].get('name')
+        user = ctx.get('user')
+        with sentry_sdk.push_scope() as scope:
+            scope.set_tag('myah.chat_anomaly', 'empty_assistant_output')
+            scope.set_tag('chat_id', chat_id)
+            scope.set_tag('message_id', message_id)
+            scope.set_context(
+                'myah_empty_assistant_output',
+                {
+                    'chat_id': chat_id,
+                    'message_id': message_id,
+                    'run_id': run_id,
+                    'user_id': getattr(user, 'id', None),
+                    'requested_model': form_data.get('model') if isinstance(form_data, dict) else None,
+                    'requested_provider': requested_provider,
+                    'model_used': model_used_id,
+                    'provider_used': model_used_provider,
+                    'event_counts': dict(event_counts),
+                    'output_types': [item.get('type') for item in output],
+                },
+            )
+            sentry_sdk.capture_message(
+                'Myah Hermes run completed without visible assistant output',
+                level='error',
+            )
+    except Exception:
+        pass
+
+
 def register_active_run(
     *,
     chat_id: str | None,
@@ -359,6 +426,9 @@ async def handle_hermes_stream(response, ctx: dict) -> StreamingResponse | None:
         done = False
         active_run_id: str | None = None
         reasoning_start: float | None = None
+        visible_delta_chars = 0
+        event_counts: dict[str, int] = {}
+        empty_output_reported = False
         last_save_time = time.monotonic()
         upstream_iterator = response.body_iterator
         # ── Durable-final-aware cleanup delay (T3-1096 Task 5) ───────────
@@ -551,6 +621,7 @@ async def handle_hermes_stream(response, ctx: dict) -> StreamingResponse | None:
                     continue
 
                 event_type = event_data.get('event', '')
+                event_counts[event_type] = event_counts.get(event_type, 0) + 1
 
                 # ── Workstream I Phase 2: typed validation gate ──────────────
                 # Validate the event against the discriminated union. We
@@ -710,6 +781,7 @@ async def handle_hermes_stream(response, ctx: dict) -> StreamingResponse | None:
 
                     # Yield OpenAI-compatible SSE chunk — only visible text
                     if visible_text:
+                        visible_delta_chars += len(visible_text)
                         yield _sse_chunk(delta=visible_text)
 
                     # Periodic DB save
@@ -1057,6 +1129,31 @@ async def handle_hermes_stream(response, ctx: dict) -> StreamingResponse | None:
                                     item['duration'] = 0
 
                     output[:] = extract_render_ui_from_content(output)
+
+                    if (
+                        not empty_output_reported
+                        and visible_delta_chars == 0
+                        and not _assistant_visible_text_from_output(output).strip()
+                    ):
+                        empty_output_reported = True
+                        log.error(
+                            '[HERMES] run.completed without visible assistant output chat_id={} message_id={} run_id={} model={} provider={}',
+                            chat_id,
+                            message_id,
+                            active_run_id,
+                            _model_used_id,
+                            _model_used_provider,
+                        )
+                        _capture_empty_assistant_output(
+                            ctx=ctx,
+                            chat_id=chat_id,
+                            message_id=message_id,
+                            run_id=active_run_id,
+                            model_used_id=_model_used_id,
+                            model_used_provider=_model_used_provider,
+                            output=output,
+                            event_counts=event_counts,
+                        )
 
                     # If the run completed successfully, any confirmation that was
                     # pending must have been approved (the agent continued past the

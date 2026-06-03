@@ -250,7 +250,7 @@ async def list_toolsets(user: UserModel = Depends(get_verified_user)):
     (tool names), so we adapt by emitting an ``AgentToolResponse`` with
     ``description``/``toolset`` populated from the toolset row.
     """
-    data = await _agent_http(user, 'GET', '/api/plugins/myah-admin/toolsets')
+    data = await _agent_http(user, 'GET', '/api/tools/toolsets')
     out: list[AgentToolsetResponse] = []
     for entry in data:
         toolset_name = entry['name']

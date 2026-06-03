@@ -79,6 +79,7 @@
 				{messageId}
 				localStatus={resolvedConfirmations.has(key) ? 'resolved' : g.item.status}
 				localChosen={resolvedConfirmations.get(key)}
+				messageDone={done}
 				on:confirmed={(e) => {
 					resolvedConfirmations.set(key, e.detail.choice);
 					resolvedConfirmations = resolvedConfirmations;
@@ -90,6 +91,7 @@
 				item={g.item}
 				{messageId}
 				localStatus={storedSecrets.has(g.item.var_name) ? 'stored' : g.item.status}
+				messageDone={done}
 				on:secretStored={(e) => {
 					storedSecrets.set(e.detail.var_name, true);
 					storedSecrets = storedSecrets;

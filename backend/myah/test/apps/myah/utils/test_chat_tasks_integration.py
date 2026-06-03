@@ -18,6 +18,7 @@ chat_tasks.py actually calls after its `from myah.routers.tasks import ...`.
 We reload tasks.py with our mock wired to the tasks module namespace.
 """
 
+import asyncio
 import importlib
 import importlib.util
 import json
@@ -370,6 +371,51 @@ async def test_title_written_to_db_via_aux_path(db_session):
 
 
 @pytest.mark.asyncio
+async def test_concurrent_background_title_handlers_spend_only_one_aux_call(db_session):
+    """Concurrent title handlers must have exactly one LLM-title winner.
+
+    This exercises the real background task path, not just the model helper:
+    losing callers must see the DB claim fail before _fetch_title_via_aux spends
+    an aux/LLM request.
+    """
+    chat_id = str(uuid.uuid4())
+    msg_id = str(uuid.uuid4())
+    _insert_chat(db_session, chat_id, msg_id, title='New Chat', title_source='auto')
+
+    async def delayed_aux_response(*args, **kwargs):
+        await asyncio.sleep(0.01)
+        return {
+            'status': 200,
+            'body': {
+                'choices': [{'message': {'content': '{"title": "Single Winner"}', 'role': 'assistant'}}],
+                'usage': {},
+            },
+            'headers': {},
+        }
+
+    aux_call_mock = AsyncMock(side_effect=delayed_aux_response)
+    mod = _load_chat_tasks_module(aux_call_mock)
+
+    emitters = [AsyncMock() for _ in range(8)]
+    contexts = [_build_ctx(chat_id, msg_id, aux_event_emitter=emitter) for emitter in emitters]
+
+    await asyncio.gather(*(mod.background_tasks_handler(ctx) for ctx in contexts))
+
+    row = _fetch_row(db_session, chat_id)
+    assert row.title == 'Single Winner'
+    assert row.meta['title_generation_attempted'] is True
+    assert aux_call_mock.await_count == 1
+
+    title_events = [
+        call.args[0]
+        for emitter in emitters
+        for call in emitter.await_args_list
+        if call.args and call.args[0].get('type') == 'chat:title'
+    ]
+    assert title_events == [{'type': 'chat:title', 'data': 'Single Winner'}]
+
+
+@pytest.mark.asyncio
 async def test_aux_does_not_overwrite_manual_title(db_session):
     """background_tasks_handler must not overwrite a manually renamed chat."""
     chat_id = str(uuid.uuid4())
@@ -651,4 +697,123 @@ async def test_follow_ups_reasoning_content_does_not_leak(db_session):
     assert len(follow_up_events) == 0, (
         f'T3-1030 regression: follow-ups leaked from reasoning_content. '
         f'Expected zero follow-up events, got: {follow_up_events}'
+    )
+
+
+# ---------------------------------------------------------------------------
+# T3-1106: aux generation controls
+#
+#   1. Disabled tasks make ZERO aux LLM calls (token-saving gate).
+#   2. Title generation runs at most once per chat (durable attempted-once
+#      guard) — a second handler run for the same chat makes no second call.
+#   3. The chat:title socket event is emitted only when the DB accepts the
+#      generated auto-title; a DB refusal (e.g. a manual rename that raced in)
+#      must not flash the generated title client-side.
+# ---------------------------------------------------------------------------
+
+
+def _title_aux_response(title: str = 'Generated Title') -> dict:
+    return {
+        'status': 200,
+        'body': {
+            'choices': [{'message': {'content': json.dumps({'title': title}), 'role': 'assistant'}}],
+            'usage': {},
+        },
+        'headers': {},
+    }
+
+
+@pytest.mark.asyncio
+async def test_no_aux_call_when_both_tasks_disabled(db_session):
+    """When title + follow-up generation are both disabled, no aux LLM call fires."""
+    chat_id = str(uuid.uuid4())
+    msg_id = str(uuid.uuid4())
+    _insert_chat(db_session, chat_id, msg_id, title='New Chat', title_source=None)
+
+    aux_call_mock = AsyncMock(return_value=_title_aux_response())
+
+    mod = _load_chat_tasks_module(aux_call_mock)
+    ctx = _build_ctx(chat_id, msg_id)
+    ctx['tasks'] = {'title_generation': False, 'follow_up_generation': False}
+    await mod.background_tasks_handler(ctx)
+
+    aux_call_mock.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_title_generation_runs_only_once_per_chat(db_session):
+    """Durable once-only guard: a second handler run for the same chat must not
+    fire a second title aux call, even though title_generation=True again."""
+    chat_id = str(uuid.uuid4())
+    msg_id = str(uuid.uuid4())
+    _insert_chat(db_session, chat_id, msg_id, title='New Chat', title_source=None)
+
+    aux_call_mock = AsyncMock(return_value=_title_aux_response('First Title'))
+
+    mod = _load_chat_tasks_module(aux_call_mock)
+
+    await mod.background_tasks_handler(_build_ctx(chat_id, msg_id))
+    assert aux_call_mock.await_count == 1, 'first run should fire exactly one title aux call'
+
+    # Second run for the SAME chat — the once-only guard must block it.
+    await mod.background_tasks_handler(_build_ctx(chat_id, msg_id))
+    assert aux_call_mock.await_count == 1, (
+        'title aux call must not fire twice for the same chat (attempted-once guard)'
+    )
+
+
+@pytest.mark.asyncio
+async def test_no_title_event_when_db_rejects_title(db_session):
+    """chat:title must NOT be emitted when the DB refuses the generated title
+    (e.g. a manual rename raced in after the attempt was claimed)."""
+    import unittest.mock as mock
+
+    chat_id = str(uuid.uuid4())
+    msg_id = str(uuid.uuid4())
+    _insert_chat(db_session, chat_id, msg_id, title='New Chat', title_source=None)
+
+    aux_call_mock = AsyncMock(return_value=_title_aux_response('Generated Title'))
+
+    mod = _load_chat_tasks_module(aux_call_mock)
+
+    emitted = []
+
+    async def capture_emitter(event):
+        emitted.append(event)
+
+    ctx = _build_ctx(chat_id, msg_id, aux_event_emitter=capture_emitter)
+
+    # Simulate the DB refusing the write (returns None on manual-refusal).
+    with mock.patch.object(mod.Chats, 'update_chat_title_by_id', return_value=None):
+        await mod.background_tasks_handler(ctx)
+
+    title_events = [e for e in emitted if e.get('type') == 'chat:title']
+    assert title_events == [], (
+        f'chat:title leaked despite DB refusal — would flash the generated title '
+        f'over the user title. Got: {title_events}'
+    )
+
+
+@pytest.mark.asyncio
+async def test_title_event_emitted_when_db_accepts(db_session):
+    """chat:title IS emitted (with the generated title) when the DB accepts it."""
+    chat_id = str(uuid.uuid4())
+    msg_id = str(uuid.uuid4())
+    _insert_chat(db_session, chat_id, msg_id, title='New Chat', title_source=None)
+
+    aux_call_mock = AsyncMock(return_value=_title_aux_response('Paris Inquiry'))
+
+    mod = _load_chat_tasks_module(aux_call_mock)
+
+    emitted = []
+
+    async def capture_emitter(event):
+        emitted.append(event)
+
+    ctx = _build_ctx(chat_id, msg_id, aux_event_emitter=capture_emitter)
+    await mod.background_tasks_handler(ctx)
+
+    title_events = [e for e in emitted if e.get('type') == 'chat:title']
+    assert title_events == [{'type': 'chat:title', 'data': 'Paris Inquiry'}], (
+        f'expected exactly one chat:title event with the accepted title, got: {title_events}'
     )

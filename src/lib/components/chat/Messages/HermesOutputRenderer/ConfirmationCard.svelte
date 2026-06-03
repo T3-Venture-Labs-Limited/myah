@@ -7,6 +7,7 @@
 
 	export let item: ConfirmationItem;
 	export let messageId: string = '';
+	export let messageDone: boolean = false;
 	export let localStatus: 'pending' | 'resolved' | 'cancelled' = item.status;
 	export let localChosen: ApprovalOption | string | null | undefined = item.chosen;
 
@@ -75,6 +76,7 @@
 		return body;
 	}
 
+	$: displayStatus = messageDone && localStatus === 'pending' ? 'cancelled' : localStatus;
 	$: isExecApproval = item.action_type === 'exec_approval';
 	$: parsedExec = isExecApproval ? parseKnownExecApprovalDescription(item.description) : { command: '', reason: '' };
 	$: command = isExecApproval ? metadataString('command') || parsedExec.command : '';
@@ -84,7 +86,7 @@
 	$: shouldShowPlainDescription = !isExecApproval || !command;
 
 	async function choose(choice: ApprovalOption) {
-		if (submitting || localStatus !== 'pending') return;
+		if (submitting || displayStatus !== 'pending') return;
 		submitting = true;
 		error = '';
 
@@ -185,7 +187,7 @@
 			>
 				Retry
 			</button>
-		{:else if localStatus === 'pending'}
+		{:else if displayStatus === 'pending'}
 			<div class="flex flex-wrap gap-2">
 				{#each visibleOptions as option}
 					<button
@@ -204,21 +206,21 @@
 			{#if error}
 				<p class="mt-2 text-xs text-red-500">{error}</p>
 			{/if}
-		{:else if localStatus === 'resolved'}
+		{:else if displayStatus === 'resolved'}
 			<p class="text-gray-500 dark:text-gray-400">
 				{localChosen === 'deny'
 					? 'Denied.'
 					: `${optionLabels[localChosen as ApprovalOption] ?? localChosen} — continuing...`}
 			</p>
-		{:else if localStatus === 'cancelled'}
+		{:else if displayStatus === 'cancelled'}
 			<p class="text-gray-400 dark:text-gray-500">
-				This run is no longer active. Please re-send your message or start a new chat.
+				This approval is no longer active. Please re-send your message or start a new chat.
 			</p>
 		{/if}
 	</div>
 
 	<!-- Pulsing "Awaiting user input" indicator -->
-	{#if localStatus === 'pending' && !interrupted}
+	{#if displayStatus === 'pending' && !interrupted}
 		<div class="px-4 pb-3 flex items-center gap-1.5 text-xs text-blue-500 dark:text-blue-400">
 			<span class="relative flex h-2 w-2 flex-shrink-0">
 				<span

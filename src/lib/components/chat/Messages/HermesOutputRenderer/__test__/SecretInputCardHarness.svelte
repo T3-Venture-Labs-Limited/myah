@@ -7,4 +7,4 @@
 	export let onStored: (detail: { var_name: string }) => void = () => {};
 </script>
 
-<SecretInputCard {item} {messageId} on:secretStored={(event) => onStored(event.detail)} />
+<SecretInputCard {item} {messageId} messageDone={false} on:secretStored={(event) => onStored(event.detail)} />

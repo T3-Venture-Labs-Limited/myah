@@ -142,6 +142,21 @@ describe('ConfirmationCard cron approval filter', () => {
 				confirmation_id: 'cf-abc'
 			});
 		});
+
+	test('renders historical pending approvals as inactive when the message is done', () => {
+		render(ConfirmationCard, {
+			props: {
+				item: makeConfirmationItem({ status: 'pending' }),
+				messageId: 'msg-1',
+				messageDone: true
+			}
+		});
+
+		expect(screen.getByText(/This approval is no longer active/i)).toBeInTheDocument();
+		expect(screen.queryByRole('button', { name: /^approve$/i })).not.toBeInTheDocument();
+		expect(screen.queryByText(/Awaiting user input/i)).not.toBeInTheDocument();
+	});
+
 	});
 
 	describe('ConfirmationCard exec approval display', () => {

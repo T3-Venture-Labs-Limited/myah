@@ -59,6 +59,68 @@ async def _emit_socket_event(room: str, envelope: dict) -> None:
 
 
 
+def _coerce_settings_dict(settings) -> dict:
+    """Normalize a persisted user-settings value into a plain dict.
+
+    Accepts ``None``, a plain ``dict``, or a Pydantic model (``UserSettings``)
+    and always returns a dict (empty when the input can't be coerced).
+    """
+    if settings is None:
+        return {}
+    if isinstance(settings, dict):
+        return settings
+    if hasattr(settings, 'model_dump'):
+        try:
+            dumped = settings.model_dump()
+            return dumped if isinstance(dumped, dict) else {}
+        except Exception:  # pragma: no cover - defensive
+            return {}
+    return {}
+
+
+def _resolve_aux_generation_flags(settings) -> tuple[bool, bool]:
+    """Resolve (title_generation_enabled, follow_up_generation_enabled).
+
+    The frontend is the single source of truth for these toggles and persists
+    the entire UI settings tree nested under ``ui`` (SettingsModal.svelte's
+    ``saveSettings`` calls ``updateUserSettings({ui: $settings})``), so the
+    authoritative flags live at ``settings.ui.title.auto`` and
+    ``settings.ui.autoFollowUps``. Older persisted blobs stored them at the top
+    level. Prefer the nested ``ui`` block when present and a dict; otherwise
+    fall back to the legacy top-level shape.
+
+    Defaults are ``True`` for both flags. Explicit ``False`` is always preserved
+    — never coerced back to the default via ``or`` (which would treat a
+    deliberately-disabled toggle as unset).
+    """
+    root = _coerce_settings_dict(settings)
+    ui = root.get('ui')
+    source = ui if isinstance(ui, dict) else root
+
+    title_settings = source.get('title')
+    if not isinstance(title_settings, dict):
+        title_settings = {}
+
+    def _as_bool(value, default: bool = True) -> bool:
+        if value is None:
+            return default
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {'true', '1', 'yes', 'on'}:
+                return True
+            if normalized in {'false', '0', 'no', 'off'}:
+                return False
+            return default
+        return bool(value)
+
+    title_enabled = _as_bool(title_settings.get('auto', True))
+    follow_up_enabled = _as_bool(source.get('autoFollowUps', True))
+
+    return title_enabled, follow_up_enabled
+
+
 class FinalMessageRequest(BaseModel):
     """Durable fallback payload for completed interactive Hermes replies."""
 
@@ -301,8 +363,13 @@ async def persist_final_message(request: Request, payload: FinalMessageRequest):
         )
         return {'ok': True, 'message_id': message_id, 'duplicate': True}
 
-    already_finalized_conflict = is_finalized_assistant and (
-        existing_content != incoming_content or existing_is_error != incoming_is_error
+    existing_is_empty_success_placeholder = (
+        is_finalized_assistant and not existing_content and not existing_is_error
+    )
+    already_finalized_conflict = (
+        is_finalized_assistant
+        and not existing_is_empty_success_placeholder
+        and (existing_content != incoming_content or existing_is_error != incoming_is_error)
     )
     if already_finalized_conflict:
         logger.warning(
@@ -317,6 +384,12 @@ async def persist_final_message(request: Request, payload: FinalMessageRequest):
             'ignored': True,
             'reason': 'already_finalized',
         }
+
+    if existing_is_empty_success_placeholder and incoming_content:
+        logger.info(
+            f'/messages/final: replacing empty finalized assistant placeholder chat_id={payload.chat_id} '
+            f'message_id={message_id} user_id={payload.user_id} incoming_len={len(payload.response or "")}'
+        )
 
     clean_response = incoming_content or '(no output)'
     update = {
@@ -385,16 +458,9 @@ async def persist_final_message(request: Request, payload: FinalMessageRequest):
     follow_up_generation_enabled = True
     try:
         user_row = Users.get_user_by_id(payload.user_id)
-        user_settings = getattr(user_row, 'settings', None) or {}
-        if not isinstance(user_settings, dict) and hasattr(user_settings, 'model_dump'):
-            user_settings = user_settings.model_dump()
-        if not isinstance(user_settings, dict):
-            user_settings = {}
-        title_settings = user_settings.get('title') or {}
-        if not isinstance(title_settings, dict):
-            title_settings = {}
-        title_generation_enabled = title_settings.get('auto', True)
-        follow_up_generation_enabled = user_settings.get('autoFollowUps', True)
+        title_generation_enabled, follow_up_generation_enabled = _resolve_aux_generation_flags(
+            getattr(user_row, 'settings', None)
+        )
     except Exception as exc:  # pragma: no cover - background enrichment remains best-effort
         logger.debug(f'/messages/final: failed to read generation settings: {exc}')
 

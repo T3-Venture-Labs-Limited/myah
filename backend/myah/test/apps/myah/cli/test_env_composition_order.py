@@ -90,6 +90,98 @@ def test_empty_platform_env_does_not_inherit_process_bearer(tmp_path: Path, monk
     env = load_worktree_env_chain(tmp_path)
 
     assert 'MYAH_AGENT_BEARER_TOKEN' not in env
+    assert 'MYAH_ADAPTER_AUTH_KEY' not in env
+    assert 'API_SERVER_KEY' not in env
+    assert 'MYAH_PLATFORM_BEARER' not in env
+
+
+def test_worktree_env_aligns_inherited_bearer_aliases_to_platform_token(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Stale parent-shell bearer aliases must not leak into worktree launches."""
+    monkeypatch.setenv('MYAH_ADAPTER_AUTH_KEY', 'stale-adapter-from-other-worktree')
+    monkeypatch.setenv('API_SERVER_KEY', 'stale-api-from-other-worktree')
+    monkeypatch.setenv('MYAH_PLATFORM_BEARER', 'stale-platform-from-other-worktree')
+    (tmp_path / 'platform-oss').mkdir()
+    (tmp_path / 'platform-oss' / '.env').write_text('MYAH_AGENT_BEARER_TOKEN=worktree-token\n')
+    (tmp_path / '.worktree-env').write_text('export BACKEND_PORT=8189\n')
+
+    from myah.lib.cli.env_loader import load_worktree_env_chain
+    env = load_worktree_env_chain(tmp_path)
+
+    assert env['MYAH_AGENT_BEARER_TOKEN'] == 'worktree-token'
+    assert env['MYAH_ADAPTER_AUTH_KEY'] == 'worktree-token'
+    assert env['API_SERVER_KEY'] == 'worktree-token'
+    assert env['MYAH_PLATFORM_BEARER'] == 'worktree-token'
+
+
+def test_worktree_env_preserves_explicit_bearer_aliases_from_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Explicit aliases in the worktree files beat parent-shell cleanup/normalization."""
+    monkeypatch.setenv('MYAH_ADAPTER_AUTH_KEY', 'stale-adapter-from-other-worktree')
+    (tmp_path / 'platform-oss').mkdir()
+    (tmp_path / 'platform-oss' / '.env').write_text(
+        'MYAH_AGENT_BEARER_TOKEN=worktree-token\nMYAH_ADAPTER_AUTH_KEY=explicit-adapter\n'
+    )
+    (tmp_path / '.worktree-env').write_text('export BACKEND_PORT=8189\n')
+
+    from myah.lib.cli.env_loader import load_worktree_env_chain
+    env = load_worktree_env_chain(tmp_path)
+
+    assert env['MYAH_ADAPTER_AUTH_KEY'] == 'explicit-adapter'
+
+
+def test_worktree_env_aligns_dashboard_session_token_alias(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Dashboard subprocess must receive the token the platform uses for web_call auth."""
+    monkeypatch.setenv('HERMES_WEB_SESSION_TOKEN', 'stale-dashboard-token')
+    (tmp_path / 'platform-oss').mkdir()
+    (tmp_path / 'platform-oss' / '.env').write_text(
+        'MYAH_AGENT_BEARER_TOKEN=worktree-token\n'
+        'MYAH_HERMES_WEB_SESSION_TOKEN=worktree-web-token\n'
+    )
+    (tmp_path / '.worktree-env').write_text('export BACKEND_PORT=8189\n')
+
+    from myah.lib.cli.env_loader import load_worktree_env_chain
+    env = load_worktree_env_chain(tmp_path)
+
+    assert env['MYAH_HERMES_WEB_SESSION_TOKEN'] == 'worktree-web-token'
+    assert env['HERMES_WEB_SESSION_TOKEN'] == 'worktree-web-token'
+
+
+def test_worktree_env_preserves_explicit_dashboard_session_token_alias(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Explicit dashboard token aliases in worktree files are respected."""
+    monkeypatch.setenv('HERMES_WEB_SESSION_TOKEN', 'stale-dashboard-token')
+    (tmp_path / 'platform-oss').mkdir()
+    (tmp_path / 'platform-oss' / '.env').write_text(
+        'MYAH_AGENT_BEARER_TOKEN=worktree-token\n'
+        'MYAH_HERMES_WEB_SESSION_TOKEN=platform-web-token\n'
+        'HERMES_WEB_SESSION_TOKEN=explicit-dashboard-token\n'
+    )
+    (tmp_path / '.worktree-env').write_text('export BACKEND_PORT=8189\n')
+
+    from myah.lib.cli.env_loader import load_worktree_env_chain
+    env = load_worktree_env_chain(tmp_path)
+
+    assert env['HERMES_WEB_SESSION_TOKEN'] == 'explicit-dashboard-token'
+
+
+def test_worktree_env_mirrors_deployment_mode_to_public_env(tmp_path: Path) -> None:
+    """OSS worktree frontend needs PUBLIC_DEPLOYMENT_MODE=oss for first-run bootstrap."""
+    (tmp_path / 'platform-oss').mkdir()
+    (tmp_path / 'platform-oss' / '.env').write_text(
+        'MYAH_AGENT_BEARER_TOKEN=worktree-token\nMYAH_DEPLOYMENT_MODE=oss\n'
+    )
+    (tmp_path / '.worktree-env').write_text('export BACKEND_PORT=8189\n')
+
+    from myah.lib.cli.env_loader import load_worktree_env_chain
+    env = load_worktree_env_chain(tmp_path)
+
+    assert env['PUBLIC_DEPLOYMENT_MODE'] == 'oss'
 
 
 def test_raises_when_worktree_env_missing(tmp_path: Path) -> None:

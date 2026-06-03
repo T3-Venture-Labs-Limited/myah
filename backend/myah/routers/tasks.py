@@ -187,6 +187,12 @@ async def _aux_generate_follow_ups(request, form_data, user):
 # ──────────────────────────────────────────────────────────────────────
 
 
+# T3-1106 scope note: the /title/completions and /follow_up/completions
+# endpoints are explicit, user-initiated actions (e.g. a manual "regenerate
+# title" click). They are intentionally NOT subject to the durable once-only
+# auto-title guard added in chat_tasks.py / Chats.mark_auto_title_attempted —
+# that guard governs the automatic background-generation path only. These
+# endpoints remain gated solely by the server-side ENABLE_*_GENERATION config.
 @router.post('/title/completions')
 async def generate_title(request: Request, form_data: dict, user=Depends(get_verified_user)):
     if not request.app.state.config.ENABLE_TITLE_GENERATION:

@@ -158,9 +158,9 @@ async def test_get_agent_config_forwards_to_container(agent_config_mod):
 
     agent_config_mod._test_web_call.assert_awaited_once()
     call = agent_config_mod._test_web_call.await_args
-    # Plugin-namespace path (Phase 7.7 migration)
+    # Dashboard-native path: the plugin namespace can 401 in OSS worktree mode.
     assert call.args[1] == 'GET'
-    assert call.args[2] == '/api/plugins/myah-admin/config'
+    assert call.args[2] == '/api/config'
     assert resp['model'] == 'anthropic/claude-opus-4.6'
 
 
@@ -182,11 +182,12 @@ async def test_patch_agent_config_mirrors_model_to_user_settings(agent_config_mo
         user=user,
     )
 
-    # Verify a GET then a PUT to /api/plugins/myah-admin/config (Phase 7.7 migration)
+    # Verify a GET then a PUT to dashboard-native /api/config. The plugin
+    # namespace can 401 in OSS worktree mode even when /api/config succeeds.
     methods = [c.args[1] for c in agent_config_mod._test_web_call.await_args_list]
     paths = [c.args[2] for c in agent_config_mod._test_web_call.await_args_list]
     assert methods == ['GET', 'PUT']
-    assert paths == ['/api/plugins/myah-admin/config', '/api/plugins/myah-admin/config']
+    assert paths == ['/api/config', '/api/config']
 
     # PUT body should be {'config': merged_dict_with_new_model}.
     # Tier 2B Task 2B.6: the platform translates string-form 'openai/gpt-5'
@@ -439,9 +440,9 @@ async def test_seed_aux_defaults_openrouter_single_patch(agent_config_mod):
     async def _side_effect(_user, method, path, **_kwargs):
         if method == 'GET' and 'providers' in path:
             return {'status': 200, 'body': catalog_body, 'headers': {}}
-        if method == 'GET' and path == '/api/plugins/myah-admin/config':
+        if method == 'GET' and path == '/api/config':
             return {'status': 200, 'body': {}, 'headers': {}}
-        if method == 'PUT' and path == '/api/plugins/myah-admin/config':
+        if method == 'PUT' and path == '/api/config':
             return {'status': 200, 'body': {'ok': True}, 'headers': {}}
         return {'status': 200, 'body': {}, 'headers': {}}
 
@@ -455,7 +456,7 @@ async def test_seed_aux_defaults_openrouter_single_patch(agent_config_mod):
     # Exactly one PUT to /api/config (the nested-auxiliary write)
     put_calls = [
         c for c in agent_config_mod._test_web_call.await_args_list
-        if c.args[1] == 'PUT' and c.args[2] == '/api/plugins/myah-admin/config'
+        if c.args[1] == 'PUT' and c.args[2] == '/api/config'
     ]
     assert len(put_calls) == 1
 
@@ -484,7 +485,7 @@ async def test_seed_aux_defaults_applies_catalog_membership_guard(agent_config_m
     async def _side_effect(_user, method, path, **_kwargs):
         if method == 'GET' and 'providers' in path:
             return {'status': 200, 'body': catalog_body, 'headers': {}}
-        if method == 'GET' and path == '/api/plugins/myah-admin/config':
+        if method == 'GET' and path == '/api/config':
             return {'status': 200, 'body': {}, 'headers': {}}
         return {'status': 200, 'body': {'ok': True}, 'headers': {}}
 
@@ -510,7 +511,7 @@ async def test_seed_aux_defaults_unknown_provider_returns_empty(agent_config_mod
     async def _side_effect(_user, method, path, **_kwargs):
         if method == 'GET' and 'providers' in path:
             return {'status': 200, 'body': catalog_body, 'headers': {}}
-        if method == 'GET' and path == '/api/plugins/myah-admin/config':
+        if method == 'GET' and path == '/api/config':
             return {'status': 200, 'body': {}, 'headers': {}}
         return {'status': 200, 'body': {'ok': True}, 'headers': {}}
 
@@ -532,7 +533,7 @@ async def test_seed_aux_defaults_vision_incapable_skips_vision(agent_config_mod)
     async def _side_effect(_user, method, path, **_kwargs):
         if method == 'GET' and 'providers' in path:
             return {'status': 200, 'body': catalog_body, 'headers': {}}
-        if method == 'GET' and path == '/api/plugins/myah-admin/config':
+        if method == 'GET' and path == '/api/config':
             return {'status': 200, 'body': {}, 'headers': {}}
         return {'status': 200, 'body': {'ok': True}, 'headers': {}}
 
@@ -584,9 +585,9 @@ async def test_seed_aux_defaults_nested_patch_fallback(agent_config_mod):
         nonlocal put_call_count
         if method == 'GET' and 'providers' in path:
             return {'status': 200, 'body': catalog_body, 'headers': {}}
-        if method == 'GET' and path == '/api/plugins/myah-admin/config':
+        if method == 'GET' and path == '/api/config':
             return {'status': 200, 'body': {}, 'headers': {}}
-        if method == 'PUT' and path == '/api/plugins/myah-admin/config':
+        if method == 'PUT' and path == '/api/config':
             put_call_count += 1
             if put_call_count == 1:
                 return {'status': 422, 'body': {'detail': 'unprocessable'}, 'headers': {}}

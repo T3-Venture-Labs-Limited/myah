@@ -15,6 +15,7 @@
 <ConfirmationCard
 	{item}
 	{messageId}
+	messageDone={false}
 	on:retry={(e: CustomEvent<{ confirmation_id: string; run_id: string }>) => onRetry(e.detail)}
 	on:confirmed={(e: CustomEvent<{ item_id: string; confirmation_id: string; choice: string }>) =>
 		onConfirmed(e.detail)}

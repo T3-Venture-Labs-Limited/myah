@@ -319,6 +319,7 @@ def _do_up(worktree: Path) -> int:
             '--no-open',
             '--insecure',
             '--host', '0.0.0.0',
+            '--port', str(dashboard_port),
         ],
         port=dashboard_port,
         subprocess_env=subprocess_env,

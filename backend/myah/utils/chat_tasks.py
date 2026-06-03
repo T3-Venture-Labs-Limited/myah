@@ -339,6 +339,22 @@ async def background_tasks_handler(ctx):
                     title = None
                     if TASKS.TITLE_GENERATION in tasks:
                         if tasks[TASKS.TITLE_GENERATION]:
+                            # ── T3-1106: durable once-only guard ───────────────
+                            # Claim the single auto-title attempt for this chat
+                            # BEFORE spending an LLM call. Returns False when an
+                            # attempt was already recorded (attempted-once,
+                            # token-saving) or the user has manually renamed the
+                            # chat (title_source='manual'). Either way: no aux
+                            # call and no chat:title event — even if a later
+                            # caller or the late /messages/final fallback passes
+                            # title_generation=True again.
+                            if not Chats.mark_auto_title_attempted(metadata['chat_id']):
+                                log.info(
+                                    '[CHAT_PIPELINE] step=title_generation_skipped '
+                                    'reason=already_attempted_or_manual chat_id=%s',
+                                    _chat_id,
+                                )
+                                return
                             _t = _time.monotonic()
                             _model = message['model']
                             with _tracer.start_as_current_span('chat.bg.title') as _sp:
@@ -373,8 +389,24 @@ async def background_tasks_handler(ctx):
                                     raw_content = ''
                                 title = _sanitize_title(raw_content)
                                 if title:
-                                    Chats.update_chat_title_by_id(metadata['chat_id'], title, 'auto')
-                                    await event_emitter({'type': 'chat:title', 'data': title})
+                                    # Emit chat:title ONLY when the DB accepted
+                                    # the generated auto-title. update_chat_title_by_id
+                                    # returns None on refusal (a manual rename
+                                    # raced in after we claimed the attempt);
+                                    # emitting unconditionally would flash the
+                                    # generated title client-side over the user's
+                                    # manual title (T3-1106).
+                                    updated = Chats.update_chat_title_by_id(
+                                        metadata['chat_id'], title, 'auto'
+                                    )
+                                    if updated is not None and updated.title == title:
+                                        await event_emitter({'type': 'chat:title', 'data': title})
+                                    else:
+                                        log.info(
+                                            '[CHAT_PIPELINE] step=title_event_suppressed '
+                                            'reason=db_rejected chat_id=%s',
+                                            _chat_id,
+                                        )
                                 else:
                                     log.warning(
                                         f'[CHAT_PIPELINE] step=title_sanitize_rejected chat_id={_chat_id} '

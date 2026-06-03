@@ -901,6 +901,53 @@ def test_final_message_can_replace_non_final_assistant_placeholder(monkeypatch):
     assert upsert.call_args.args[2]['done'] is True
 
 
+def test_final_message_can_replace_empty_finalized_success_placeholder(monkeypatch):
+    monkeypatch.setenv('MYAH_AGENT_BEARER_TOKEN', 'tok')
+    client = _make_app()
+
+    fake_chat = SimpleNamespace(
+        id='chat1',
+        user_id='u1',
+        chat={
+            'history': {
+                'messages': {
+                    'msg1': {
+                        'id': 'msg1',
+                        'role': 'assistant',
+                        'content': '',
+                        'done': True,
+                    }
+                }
+            }
+        },
+    )
+    with (
+        patch('myah.routers.myah.Chats.get_chat_by_id_and_user_id', return_value=fake_chat),
+        patch('myah.routers.myah.Chats.upsert_message_to_chat_by_id_and_message_id') as upsert,
+        patch(
+            'myah.routers.myah.Users.get_user_by_id',
+            return_value=SimpleNamespace(settings={'title': {'auto': False}, 'autoFollowUps': False}),
+        ),
+    ):
+        upsert.return_value = fake_chat
+        resp = client.post(
+            '/api/v1/myah/messages/final',
+            headers={'Authorization': 'Bearer tok'},
+            json={
+                'user_id': 'u1',
+                'chat_id': 'chat1',
+                'message_id': 'msg1',
+                'response': 'late durable final answer',
+            },
+        )
+
+    assert resp.status_code == 200
+    assert resp.json() == {'ok': True, 'message_id': 'msg1'}
+    upsert.assert_called_once()
+    assert upsert.call_args.args[2]['content'] == 'late durable final answer'
+    assert upsert.call_args.args[2]['done'] is True
+
+
 def test_final_message_triggers_background_tasks_when_persisted(monkeypatch):
     monkeypatch.setenv('MYAH_AGENT_BEARER_TOKEN', 'tok')
     client = _make_app()
@@ -1015,3 +1062,153 @@ def test_final_message_respects_disabled_generation_settings(monkeypatch):
     ctx = bg_calls[0]
     assert ctx['tasks']['title_generation'] is False
     assert ctx['tasks']['follow_up_generation'] is False
+
+
+# ── T3-1106: nested UI settings resolution for aux generation ──────────
+#
+# The frontend persists the entire UI settings tree nested under ``ui`` (see
+# SettingsModal.svelte ``saveSettings`` -> ``updateUserSettings({ui: $settings})``),
+# so the authoritative flags live at ``settings.ui.title.auto`` and
+# ``settings.ui.autoFollowUps``. The pre-T3-1106 fallback only read the legacy
+# top-level shape, so UI-shaped settings were silently ignored and disabling
+# title / follow-up generation never took effect on the final-message path.
+
+from myah.routers.myah import _resolve_aux_generation_flags
+
+
+def test_resolve_aux_flags_defaults_true_for_empty():
+    assert _resolve_aux_generation_flags(None) == (True, True)
+    assert _resolve_aux_generation_flags({}) == (True, True)
+
+
+def test_resolve_aux_flags_reads_nested_ui_settings():
+    settings = {'ui': {'title': {'auto': False}, 'autoFollowUps': False}}
+    assert _resolve_aux_generation_flags(settings) == (False, False)
+
+
+def test_resolve_aux_flags_nested_ui_enabled():
+    settings = {'ui': {'title': {'auto': True}, 'autoFollowUps': True}}
+    assert _resolve_aux_generation_flags(settings) == (True, True)
+
+
+def test_resolve_aux_flags_legacy_top_level_still_works():
+    settings = {'title': {'auto': False}, 'autoFollowUps': False}
+    assert _resolve_aux_generation_flags(settings) == (False, False)
+
+
+def test_resolve_aux_flags_nested_ui_overrides_legacy_top_level():
+    # When both shapes are present, the nested ``ui`` block is authoritative.
+    settings = {
+        'ui': {'title': {'auto': False}, 'autoFollowUps': False},
+        'title': {'auto': True},
+        'autoFollowUps': True,
+    }
+    assert _resolve_aux_generation_flags(settings) == (False, False)
+
+
+def test_resolve_aux_flags_preserves_explicit_false():
+    # Guards against `x or True` style defaulting that would clobber an
+    # explicit False back to the True default.
+    title, follow = _resolve_aux_generation_flags(
+        {'ui': {'title': {'auto': False}, 'autoFollowUps': False}}
+    )
+    assert title is False
+    assert follow is False
+
+
+def test_resolve_aux_flags_partial_ui_defaults_true():
+    # ui block present but missing the flags → both default to True.
+    assert _resolve_aux_generation_flags({'ui': {}}) == (True, True)
+
+
+def test_resolve_aux_flags_null_values_default_true():
+    # Explicit null is malformed for these bool settings, but should be treated
+    # as unset rather than as a disabled toggle.
+    assert _resolve_aux_generation_flags(
+        {'ui': {'title': {'auto': None}, 'autoFollowUps': None}}
+    ) == (True, True)
+
+
+def test_resolve_aux_flags_parses_string_booleans_defensively():
+    assert _resolve_aux_generation_flags(
+        {'ui': {'title': {'auto': 'false'}, 'autoFollowUps': '0'}}
+    ) == (False, False)
+
+
+def test_resolve_aux_flags_handles_pydantic_model():
+    class _FakeSettings:
+        def model_dump(self):
+            return {'ui': {'title': {'auto': False}, 'autoFollowUps': False}}
+
+    assert _resolve_aux_generation_flags(_FakeSettings()) == (False, False)
+
+
+def _run_final_message_and_capture_ctx(monkeypatch, settings):
+    """Helper: POST /messages/final with the given persisted user settings and
+    return the ctx dict handed to background_tasks_handler."""
+    monkeypatch.setenv('MYAH_AGENT_BEARER_TOKEN', 'tok')
+    client = _make_app()
+
+    bg_calls = []
+
+    async def _fake_bg(ctx):
+        bg_calls.append(ctx)
+
+    fake_chat = SimpleNamespace(id='chat1', user_id='u1', chat={'history': {'messages': {}}})
+    scheduled = []
+
+    def _fake_create_task(coro):
+        scheduled.append(coro)
+        task = Mock()
+        task.exception.return_value = None
+        task.add_done_callback.return_value = None
+        return task
+
+    with (
+        patch('myah.routers.myah.Chats.get_chat_by_id_and_user_id', return_value=fake_chat),
+        patch('myah.routers.myah.Users.get_user_by_id', return_value=SimpleNamespace(settings=settings)),
+        patch('myah.routers.myah.Chats.upsert_message_to_chat_by_id_and_message_id', return_value=fake_chat),
+        patch('myah.routers.myah.background_tasks_handler', new=_fake_bg),
+        patch('myah.routers.myah.asyncio.create_task', side_effect=_fake_create_task),
+    ):
+        resp = client.post(
+            '/api/v1/myah/messages/final',
+            headers={'Authorization': 'Bearer tok'},
+            json={
+                'user_id': 'u1',
+                'chat_id': 'chat1',
+                'message_id': 'msg1',
+                'response': 'final answer',
+                'model': 'gpt-5.4',
+            },
+        )
+
+    assert resp.status_code == 200
+    assert len(scheduled) == 1
+
+    import asyncio
+
+    asyncio.run(scheduled[0])
+    assert len(bg_calls) == 1
+    return bg_calls[0]
+
+
+def test_final_message_respects_disabled_nested_ui_settings(monkeypatch):
+    """UI-shaped persisted settings (settings.ui.*) with both flags False must
+    produce a background ctx with both aux tasks disabled."""
+    ctx = _run_final_message_and_capture_ctx(
+        monkeypatch,
+        settings={'ui': {'title': {'auto': False}, 'autoFollowUps': False}},
+    )
+    assert ctx['tasks']['title_generation'] is False
+    assert ctx['tasks']['follow_up_generation'] is False
+
+
+def test_final_message_enables_generation_with_nested_ui_settings(monkeypatch):
+    """UI-shaped persisted settings with both flags True keep aux generation on."""
+    ctx = _run_final_message_and_capture_ctx(
+        monkeypatch,
+        settings={'ui': {'title': {'auto': True}, 'autoFollowUps': True}},
+    )
+    assert ctx['tasks']['title_generation'] is True
+    assert ctx['tasks']['follow_up_generation'] is True

@@ -33,13 +33,37 @@
 		await updateUserSettings(localStorage.token, { ui: $settings });
 	};
 
-	// Validity check needs to be composite-aware: selectedModels[0] may be a
+	let selectedModelValue = selectedModels[0] ?? '';
+
+	// Keep the scalar value in sync with the parent array. Chat.svelte can resolve
+	// the default model after this wrapper mounts (once $models/defaultModel hydrate),
+	// so the visible composer must adopt that late parent selection instead of
+	// staying blank.
+	$: {
+		const incoming = selectedModels[0] ?? '';
+		if (incoming !== selectedModelValue) {
+			selectedModelValue = incoming;
+		}
+	}
+
+	// Reassign the array when the child selector changes. Binding directly to
+	// selectedModels[0] updates this wrapper's button label, but does not reliably
+	// propagate the new array value back to Chat.svelte's bind:selectedModels;
+	// the send path can then still see [''] and toast "Model not selected".
+	const syncSelectedModelToParent = (event?: CustomEvent<{ selectionKey?: string }>) => {
+		const nextValue = event?.detail?.selectionKey ?? selectedModelValue;
+		selectedModelValue = nextValue;
+		selectedModels = [nextValue];
+	};
+
+	// Validity check needs to be composite-aware: selectedModelValue may be a
 	// composite selection_key ('provider::model_id') after the user picks a
 	// row in the model dropdown, or a legacy bare model.id from older state.
 	// Accept either form so we don't spuriously clear the selection.
-	$: if (selectedModels.length > 0 && $models.length > 0) {
+	$: if (selectedModelValue && $models.length > 0) {
 		const validKeys = new Set($models.flatMap((m) => [m.id, m.selection_key].filter(Boolean)));
-		if (!validKeys.has(selectedModels[0])) {
+		if (!validKeys.has(selectedModelValue)) {
+			selectedModelValue = '';
 			selectedModels = [''];
 		}
 	}
@@ -65,7 +89,8 @@
 						(model as { selection_key?: string }).selection_key ?? `default::${model.id}`
 				}))}
 				{pinModelHandler}
-				bind:value={selectedModels[0]}
+				bind:value={selectedModelValue}
+				on:change={syncSelectedModelToParent}
 			/>
 		</div>
 	</div>

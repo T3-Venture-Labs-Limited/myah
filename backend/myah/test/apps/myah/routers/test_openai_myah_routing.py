@@ -105,6 +105,66 @@ def _fake_user(**overrides):
     return SimpleNamespace(**data)
 
 
+def test_build_cron_chat_context_matches_normalized_linked_chat_id():
+    from myah.routers.openai import _build_cron_chat_context_block
+
+    jobs = [
+        {
+            'id': 'abc123def456',
+            'name': 'wiki-hermes-upstream-sync',
+            'schedule': {'display': 'Every hour', 'expr': '0 * * * *'},
+            'chat_id': 'chat-cron',
+            'adoption_state': 'myah_linked',
+        }
+    ]
+
+    block = _build_cron_chat_context_block('chat-cron', jobs)
+
+    assert block is not None
+    assert '[MYAH_CRON_CHAT_CONTEXT]' in block
+    assert 'wiki-hermes-upstream-sync' in block
+    assert 'abc123def456' in block
+    assert 'Every hour' in block
+    assert 'this linked scheduled task' in block
+
+
+def test_build_cron_chat_context_returns_none_for_unlinked_chat():
+    from myah.routers.openai import _build_cron_chat_context_block
+
+    block = _build_cron_chat_context_block(
+        'regular-chat',
+        [
+            {
+                'id': 'abc123def456',
+                'name': 'wiki-hermes-upstream-sync',
+                'chat_id': 'other-chat',
+                'adoption_state': 'myah_linked',
+            }
+        ],
+    )
+
+    assert block is None
+
+
+def test_build_cron_chat_context_ignores_unverified_raw_myah_metadata():
+    from myah.routers.openai import _build_cron_chat_context_block
+
+    block = _build_cron_chat_context_block(
+        'chat-cron',
+        [
+            {
+                'id': 'abc123def456',
+                'name': 'wiki-hermes-upstream-sync',
+                'myah': {'chat_id': 'chat-cron'},
+                'chat_id': None,
+                'adoption_state': 'myah_origin_missing_chat',
+            }
+        ],
+    )
+
+    assert block is None
+
+
 def test_empty_payload_returns_empty_list():
     from myah.routers.openai import _build_myah_attachments
 
@@ -404,7 +464,183 @@ async def test_myah_dispatch_payload_preserves_session_chat_user_and_model_metad
 
 
 @pytest.mark.asyncio
+async def test_myah_dispatch_preserves_openrouter_deepseek_selection_without_claude_fallback():
+    import myah.routers.openai as openai_router
+
+    user = _fake_user(id='user-openrouter')
+    session = _FakeMyahClientSession(
+        start_response=_FakeAiohttpResponse(status=202, json_data={'stream_id': 'stream-openrouter'})
+    )
+
+    async def fake_container(_user_id, *, event_emitter=None):
+        return SimpleNamespace(host_port=18080, gateway_port=18081)
+
+    with (
+        patch('myah.routers.openai.get_or_create_container', side_effect=fake_container),
+        patch('myah.routers.openai.aiohttp.ClientSession', return_value=session),
+        patch('myah.routers.openai._build_myah_attachments', return_value=[]),
+        patch('myah.routers.openai.Chats.set_hermes_session_id'),
+        patch('myah.socket.main.get_event_emitter', return_value=None),
+        patch('myah.utils.ui_state.prepend_user_ref_block', side_effect=lambda text, ui_state: text),
+    ):
+        response = await openai_router.generate_chat_completion(
+            _fake_openai_request(),
+            {
+                'model': 'deepseek/deepseek-v4-flash',
+                'model_item': {
+                    'id': 'deepseek/deepseek-v4-flash',
+                    'selection_key': 'openrouter::deepseek/deepseek-v4-flash',
+                    'tags': [{'name': 'openrouter'}],
+                },
+                'messages': [{'role': 'user', 'content': 'hello from openrouter deepseek'}],
+                'metadata': {'chat_id': 'chat-openrouter', 'message_id': 'msg-openrouter'},
+            },
+            user=user,
+        )
+
+    assert response.status_code == 200
+    myah_payload = session.posts[0]['json']
+    assert myah_payload['model'] == 'deepseek/deepseek-v4-flash'
+    assert myah_payload['provider'] == 'openrouter'
+    assert myah_payload['model'] != 'claude-opus-4'
+    assert myah_payload['provider'] != 'anthropic-claude-code'
+
+
+@pytest.mark.asyncio
+async def test_myah_dispatch_strips_composite_openrouter_deepseek_model_before_adapter():
+    import myah.routers.openai as openai_router
+
+    user = _fake_user(id='user-openrouter-composite')
+    session = _FakeMyahClientSession(
+        start_response=_FakeAiohttpResponse(
+            status=202,
+            json_data={'stream_id': 'stream-openrouter-composite', 'session_id': 'chat-openrouter-composite'},
+        )
+    )
+    with patch.object(openai_router, 'get_or_create_container', return_value=SimpleNamespace(host_port=7777, gateway_port=7778)), \
+         patch.object(openai_router, 'resolve_user_agent_base', return_value='http://agent.local'), \
+         patch.object(openai_router, '_add_myah_model_dispatch_breadcrumb') as sentry_breadcrumb, \
+         patch.object(openai_router.aiohttp, 'ClientSession', return_value=session):
+        response = await openai_router.generate_chat_completion(
+            _fake_openai_request(),
+            {
+                'model': 'openrouter::deepseek/deepseek-v4-flash',
+                'model_item': {
+                    'id': 'deepseek/deepseek-v4-flash',
+                    'selection_key': 'openrouter::deepseek/deepseek-v4-flash',
+                    'tags': [{'name': 'openrouter'}],
+                },
+                'messages': [{'role': 'user', 'content': 'hello from composite openrouter deepseek'}],
+                'metadata': {'chat_id': 'chat-openrouter-composite', 'message_id': 'msg-openrouter-composite'},
+            },
+            user=user,
+        )
+
+    assert response.status_code == 200
+    myah_payload = session.posts[0]['json']
+    assert myah_payload['model'] == 'deepseek/deepseek-v4-flash'
+    assert myah_payload['provider'] == 'openrouter'
+    assert '::' not in myah_payload['model']
+    assert myah_payload['model'] != 'anthropic/claude-opus-4.8'
+    sentry_breadcrumb.assert_called_once_with(
+        raw_model='openrouter::deepseek/deepseek-v4-flash',
+        normalized_model='deepseek/deepseek-v4-flash',
+        provider='openrouter',
+        metadata={'chat_id': 'chat-openrouter-composite', 'message_id': 'msg-openrouter-composite'},
+    )
+
+
+@pytest.mark.asyncio
+async def test_myah_dispatch_prepends_linked_cron_context_for_adopted_cron_chat():
+    import myah.routers.openai as openai_router
+
+    user = _fake_user(id='user-cron')
+    session = _FakeMyahClientSession(
+        start_response=_FakeAiohttpResponse(status=202, json_data={'stream_id': 'stream-cron'})
+    )
+
+    async def fake_container(_user_id, *, event_emitter=None):
+        return SimpleNamespace(host_port=18080, gateway_port=18081)
+
+    async def fake_fetch_jobs(_user):
+        return [
+            {
+                'id': 'abc123def456',
+                'name': 'wiki-hermes-upstream-sync',
+                'schedule': {'display': 'Every hour', 'expr': '0 * * * *'},
+                'myah': {'chat_id': 'chat-cron'},
+                'chat_id': 'chat-cron',
+                'adoption_state': 'myah_linked',
+            }
+        ]
+
+    with (
+        patch('myah.routers.openai.get_or_create_container', side_effect=fake_container),
+        patch('myah.routers.openai.aiohttp.ClientSession', return_value=session),
+        patch('myah.routers.openai._build_myah_attachments', return_value=[]),
+        patch('myah.routers.openai.Chats.set_hermes_session_id'),
+        patch('myah.socket.main.get_event_emitter', return_value=None),
+        patch('myah.utils.ui_state.prepend_user_ref_block', side_effect=lambda text, ui_state: text),
+        patch('myah.routers.openai._fetch_user_cron_jobs_for_context', side_effect=fake_fetch_jobs),
+    ):
+        response = await openai_router.generate_chat_completion(
+            _fake_openai_request(),
+            {
+                'messages': [{'role': 'user', 'content': 'Summarize for me'}],
+                'metadata': {'chat_id': 'chat-cron', 'message_id': 'msg-cron'},
+            },
+            user=user,
+        )
+
+    assert response.status_code == 200
+    message = session.posts[0]['json']['message']
+    assert message.startswith('[MYAH_CRON_CHAT_CONTEXT]')
+    assert 'wiki-hermes-upstream-sync' in message
+    assert message.rstrip().endswith('Summarize for me')
+
+
+@pytest.mark.asyncio
+async def test_myah_dispatch_without_linked_cron_leaves_message_unchanged():
+    import myah.routers.openai as openai_router
+
+    user = _fake_user(id='user-no-cron')
+    session = _FakeMyahClientSession(
+        start_response=_FakeAiohttpResponse(status=202, json_data={'stream_id': 'stream-no-cron'})
+    )
+
+    async def fake_container(_user_id, *, event_emitter=None):
+        return SimpleNamespace(host_port=18080, gateway_port=18081)
+
+    async def fake_fetch_jobs(_user):
+        return []
+
+    with (
+        patch('myah.routers.openai.get_or_create_container', side_effect=fake_container),
+        patch('myah.routers.openai.aiohttp.ClientSession', return_value=session),
+        patch('myah.routers.openai._build_myah_attachments', return_value=[]),
+        patch('myah.routers.openai.Chats.set_hermes_session_id'),
+        patch('myah.socket.main.get_event_emitter', return_value=None),
+        patch('myah.utils.ui_state.prepend_user_ref_block', side_effect=lambda text, ui_state: text),
+        patch('myah.routers.openai._fetch_user_cron_jobs_for_context', side_effect=fake_fetch_jobs),
+    ):
+        response = await openai_router.generate_chat_completion(
+            _fake_openai_request(),
+            {
+                'messages': [{'role': 'user', 'content': 'just a normal message'}],
+                'metadata': {'chat_id': 'regular-chat', 'message_id': 'msg-regular'},
+            },
+            user=user,
+        )
+
+    assert response.status_code == 200
+    message = session.posts[0]['json']['message']
+    assert message == 'just a normal message'
+    assert '[MYAH_CRON_CHAT_CONTEXT]' not in message
+
+
+@pytest.mark.asyncio
 async def test_myah_events_stream_uses_safe_chunk_handler_for_oversized_sse_lines():
+
     """Hermes can emit very large single-line SSE tool events.
 
     aiohttp's default StreamReader line iterator raises ``ValueError('Chunk too big')``
