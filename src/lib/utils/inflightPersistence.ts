@@ -50,6 +50,24 @@ export function clearInflightSnapshot(chatId: string): void {
 	localStorage.removeItem(`${KEY_PREFIX}${chatId}`);
 }
 
+// Clear the inflight paint hint only once its assistant message is durably
+// final (persisted to DB). If a newer in-flight message has already replaced
+// the stored snapshot for this chat, a late durable-final ack for the OLD
+// message must not wipe the live one — so the message ids must match.
+//
+// This replaces the previous fixed 10-second timer that cleared snapshots
+// eagerly regardless of whether the final state had actually settled.
+export function markInflightDurableFinal(chatId: string, messageId?: string): boolean {
+	if (!chatId || chatId.startsWith('local:')) return false;
+	const stored = loadInflightSnapshot(chatId);
+	if (!stored) return false;
+	if (messageId && stored.message_id && stored.message_id !== messageId) {
+		return false;
+	}
+	clearInflightSnapshot(chatId);
+	return true;
+}
+
 export function pruneStaleSnapshots(): void {
 	const cutoff = Date.now() - STALE_THRESHOLD_MS;
 	const keysToRemove: string[] = [];
