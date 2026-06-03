@@ -27,6 +27,12 @@ export type ChatRuntimeMessage = JsonRecord & {
 	output?: unknown[];
 	done?: boolean;
 	timestamp?: number;
+	// Graph fields, populated by seedHistory so route-independent projection can
+	// render the current user + assistant pair before DB load returns.
+	parentId?: string | null;
+	childrenIds?: string[];
+	model?: string;
+	modelName?: string;
 };
 
 export type ChatRuntimeChatState = {
@@ -34,6 +40,10 @@ export type ChatRuntimeChatState = {
 	messages: Record<string, ChatRuntimeMessage>;
 	currentId: string | null;
 	active: boolean;
+	// A final event (done=true) or chat:active=false was observed. The projection
+	// is retained — streamEnded is NOT the same as "safe to clear". Clearing waits
+	// for durable final (DB) acknowledgement or a stale TTL.
+	streamEnded?: boolean;
 	lastUpdated: number;
 	lastEventId?: string;
 };
@@ -104,12 +114,29 @@ export function applyChatRuntimeEvent(
 	const chat = ensureChat(state, normalized.chatId);
 
 	if (normalized.type === 'chat:active') {
+		const active = normalized.payload.active === true;
+		const hasRuntimeMessages = Object.keys(chat.messages).length > 0;
+
+		// active=false without a known assistant projection is just a completion
+		// signal for a stream this tab cannot durably reconcile. Do not fabricate
+		// awaiting-durable-final state or the active indicator will hang until TTL.
+		if (!active && !hasRuntimeMessages) {
+			if (!state.chats[normalized.chatId]) return state;
+			const chats = { ...state.chats };
+			delete chats[normalized.chatId];
+			return { chats };
+		}
+
 		return {
 			chats: {
 				...state.chats,
 				[normalized.chatId]: {
 					...chat,
-					active: normalized.payload.active === true,
+					active,
+					// active=false means the backend observed the stream end, but the
+					// projection is kept until durable final / stale TTL. active=true is
+					// a new/current run and must clear any stale ended marker from a prior run.
+					streamEnded: active ? false : true,
 					lastUpdated: now,
 					lastEventId: normalized.eventId ?? chat.lastEventId
 				}
@@ -142,6 +169,7 @@ export function applyChatRuntimeEvent(
 				messages: { ...chat.messages, [messageId]: nextMessage },
 				currentId: messageId,
 				active: !done,
+				streamEnded: done ? true : chat.streamEnded,
 				lastUpdated: now,
 				lastEventId: normalized.eventId ?? chat.lastEventId
 			}
@@ -149,12 +177,62 @@ export function applyChatRuntimeEvent(
 	};
 }
 
+const STREAMING_FIELDS = ['content', 'output', 'usage', 'error', 'done'] as const;
+
 function streamingFieldOverlay(message: ChatRuntimeMessage): JsonRecord {
 	const overlay: JsonRecord = {};
-	for (const key of ['content', 'output', 'usage', 'error', 'done']) {
+	for (const key of STREAMING_FIELDS) {
 		if (typeof message[key] !== 'undefined') overlay[key] = message[key];
 	}
 	return overlay;
+}
+
+// Seed the per-chat runtime state with the outgoing user/assistant graph so a
+// route-independent projection can render the current pair before DB load.
+// Existing streaming fields (from socket events that arrived first) win over
+// the seeded shells, so seeding never overwrites newer content.
+export function seedChatRuntimeGraph(
+	prevChat: ChatRuntimeChatState | null | undefined,
+	chatId: string,
+	history: unknown,
+	now = Date.now()
+): ChatRuntimeChatState {
+	const h = asHistory(history);
+	const base: ChatRuntimeChatState = prevChat ?? {
+		chatId,
+		messages: {},
+		currentId: null,
+		active: false,
+		lastUpdated: 0
+	};
+	const messages: Record<string, ChatRuntimeMessage> = { ...base.messages };
+
+	for (const [id, raw] of Object.entries(h.messages)) {
+		const seeded: ChatRuntimeMessage = {
+			id,
+			role: typeof raw.role === 'string' ? raw.role : 'assistant',
+			parentId: typeof raw.parentId === 'string' ? raw.parentId : null,
+			childrenIds: Array.isArray(raw.childrenIds) ? [...raw.childrenIds] : [],
+			timestamp: typeof raw.timestamp === 'number' ? raw.timestamp : now,
+			...(typeof raw.content === 'string' ? { content: raw.content } : {}),
+			...(typeof raw.done === 'boolean' ? { done: raw.done } : {}),
+			...(typeof raw.model === 'string' ? { model: raw.model } : {}),
+			...(typeof raw.modelName === 'string' ? { modelName: raw.modelName } : {})
+		};
+
+		const existing = messages[id];
+		messages[id] = existing ? { ...seeded, ...streamingFieldOverlay(existing) } : seeded;
+	}
+
+	return {
+		...base,
+		chatId,
+		messages,
+		// A socket event may have already advanced currentId — prefer it so
+		// seeding can't rewind a live stream.
+		currentId: base.currentId ?? optionalString(h.currentId) ?? null,
+		lastUpdated: now
+	};
 }
 
 function parentIdForSyntheticAssistant(history: ChatHistory): string | null {
@@ -213,17 +291,37 @@ function applyRuntimeChatToHistory(
 			continue;
 		}
 
-		const parentId = parentIdForSyntheticAssistant({ ...base, messages, currentId });
+		// A message carries seeded graph context if it knows its own parent or
+		// children. Without that we fall back to inferring a parent from the
+		// current user turn.
+		const hasSeededGraph =
+			typeof runtimeMessage.parentId !== 'undefined' || Array.isArray(runtimeMessage.childrenIds);
+		const parentId = hasSeededGraph
+			? (runtimeMessage.parentId ?? null)
+			: parentIdForSyntheticAssistant({ ...base, messages, currentId });
+
+		// Do not fabricate a parent for assistant-only runtime state. An orphan
+		// assistant with no graph context is a fast-paint miss, not a render.
+		if (!hasSeededGraph && parentId === null) {
+			continue;
+		}
+
 		messages[messageId] = {
 			id: messageId,
 			role: runtimeMessage.role ?? 'assistant',
 			parentId,
-			childrenIds: [],
+			childrenIds: Array.isArray(runtimeMessage.childrenIds)
+				? [...runtimeMessage.childrenIds]
+				: [],
 			timestamp: runtimeMessage.timestamp ?? now,
+			...(runtimeMessage.model ? { model: runtimeMessage.model } : {}),
+			...(runtimeMessage.modelName ? { modelName: runtimeMessage.modelName } : {}),
 			...streamingFieldOverlay(runtimeMessage)
 		};
 
-		if (parentId && messages[parentId]) {
+		// For inferred (non-seeded) parents, link the child back. Seeded graphs
+		// already carry authoritative childrenIds and must not be recomputed.
+		if (!hasSeededGraph && parentId && messages[parentId]) {
 			const childrenIds = Array.isArray(messages[parentId].childrenIds)
 				? messages[parentId].childrenIds
 				: [];
@@ -235,9 +333,14 @@ function applyRuntimeChatToHistory(
 		currentId = messageId;
 	}
 
+	// Only honour runtime currentId if that message was actually materialized;
+	// otherwise an orphan-skipped message must not become the rendered head.
+	const finalCurrentId =
+		runtimeChat.currentId && messages[runtimeChat.currentId] ? runtimeChat.currentId : currentId;
+
 	return {
 		...base,
-		currentId: runtimeChat.currentId ?? currentId,
+		currentId: finalCurrentId,
 		messages
 	};
 }

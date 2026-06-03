@@ -5,6 +5,7 @@ import {
 	getProjectedChatHistory,
 	normalizeChatRuntimeEvent,
 	reconcileLoadedHistoryWithRuntime,
+	seedChatRuntimeGraph,
 	type ChatRuntimeState
 } from './chatRuntimeProjection';
 
@@ -107,10 +108,11 @@ describe('chatRuntimeProjection', () => {
 		);
 
 		expect(state.chats['chat-a'].messages['assistant-1'].content).toBe('Thinking done');
-		expect(state.chats['chat-a'].messages['assistant-1'].output?.map((item) => item.type)).toEqual([
-			'reasoning',
-			'function_call'
-		]);
+		expect(
+			(state.chats['chat-a'].messages['assistant-1'].output as Array<{ type: string }> | undefined)?.map(
+				(item) => item.type
+			)
+		).toEqual(['reasoning', 'function_call']);
 	});
 
 	it('marks a chat inactive on done true but keeps final output projection', () => {
@@ -210,8 +212,38 @@ describe('chatRuntimeProjection', () => {
 	});
 
 	it('fast projection for a different chat does not retain previous chat history', () => {
-		const state = applyChatRuntimeEvent(
-			emptyChatRuntimeState(),
+		// Chat B has its outgoing graph seeded (Task 3) so its assistant has a
+		// real parent — this exercises isolation, not orphan fabrication.
+		let state: ChatRuntimeState = {
+			chats: {
+				'chat-b': seedChatRuntimeGraph(
+					null,
+					'chat-b',
+					{
+						currentId: 'assistant-b',
+						messages: {
+							'user-b': {
+								id: 'user-b',
+								role: 'user',
+								content: 'Question for B',
+								childrenIds: ['assistant-b']
+							},
+							'assistant-b': {
+								id: 'assistant-b',
+								role: 'assistant',
+								parentId: 'user-b',
+								childrenIds: [],
+								content: '',
+								done: false
+							}
+						}
+					},
+					1000
+				)
+			}
+		};
+		state = applyChatRuntimeEvent(
+			state,
 			completionEvent({
 				chat_id: 'chat-b',
 				message_id: 'assistant-b',
@@ -232,7 +264,7 @@ describe('chatRuntimeProjection', () => {
 					}
 				}
 			}),
-			1000
+			1500
 		);
 
 		const projected = getProjectedChatHistory(
@@ -263,9 +295,11 @@ describe('chatRuntimeProjection', () => {
 		expect(projected.messages['user-a']).toBeUndefined();
 		expect(projected.messages['assistant-a']).toBeUndefined();
 		expect(projected.currentId).toBe('assistant-b');
+		expect(projected.messages['user-b']).toBeTruthy();
 		expect(projected.messages['assistant-b']).toMatchObject({
 			id: 'assistant-b',
 			role: 'assistant',
+			parentId: 'user-b',
 			content: 'Live answer for chat B'
 		});
 	});
@@ -295,14 +329,66 @@ describe('chatRuntimeProjection', () => {
 		expect(reconciled.messages['assistant-1'].parentId).toBe('user-1');
 	});
 
-	it('preserves existing user/assistant messages when isolating to chat with no chatId in history', () => {
+	it('treats assistant-only runtime state as a fast-projection miss when no user graph has been seeded', () => {
 		const state = applyChatRuntimeEvent(
 			emptyChatRuntimeState(),
+			{
+				chat_id: 'chat-a',
+				message_id: 'assistant-1',
+				data: { type: 'chat:completion', data: { done: false, content: 'partial' } }
+			},
+			1000
+		);
+
+		const projected = getProjectedChatHistory({ currentId: null, messages: {} }, state.chats['chat-a'], 1000, {
+			chatId: 'chat-a',
+			isolateToChat: true
+		});
+
+		// Without a seeded user/assistant graph there is no renderable parent, so
+		// the orphan assistant must NOT be fabricated with parentId: null.
+		expect(projected.currentId).toBeNull();
+		expect(projected.messages['assistant-1']).toBeUndefined();
+	});
+
+	it('preserves existing user/assistant messages when isolating to chat with no chatId in history', () => {
+		// New turn (user-new -> assistant-runtime) is seeded into runtime; the
+		// prior DB pair must survive the merge.
+		let state: ChatRuntimeState = {
+			chats: {
+				'chat-a': seedChatRuntimeGraph(
+					null,
+					'chat-a',
+					{
+						currentId: 'assistant-runtime',
+						messages: {
+							'user-new': {
+								id: 'user-new',
+								role: 'user',
+								content: 'Follow-up question',
+								childrenIds: ['assistant-runtime']
+							},
+							'assistant-runtime': {
+								id: 'assistant-runtime',
+								role: 'assistant',
+								parentId: 'user-new',
+								childrenIds: [],
+								content: '',
+								done: false
+							}
+						}
+					},
+					1000
+				)
+			}
+		};
+		state = applyChatRuntimeEvent(
+			state,
 			completionEvent({
 				chat_id: 'chat-a',
 				message_id: 'assistant-runtime'
 			}),
-			1000
+			1500
 		);
 
 		const projected = getProjectedChatHistory(
@@ -339,9 +425,11 @@ describe('chatRuntimeProjection', () => {
 			role: 'assistant',
 			content: 'Previous answer'
 		});
+		expect(projected.messages['user-new']).toBeTruthy();
 		expect(projected.messages['assistant-runtime']).toMatchObject({
 			id: 'assistant-runtime',
 			role: 'assistant',
+			parentId: 'user-new',
 			content: 'Hello'
 		});
 	});
