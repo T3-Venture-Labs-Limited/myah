@@ -39,6 +39,7 @@ from pydantic import BaseModel
 from myah.utils.auth import get_admin_user, get_verified_user
 from myah.utils.access_control import has_permission
 from myah.utils.hermes_stream_handler import get_active_runs, get_live_state
+from myah.utils.live_state import resolve_live_state
 
 log = logging.getLogger(__name__)
 
@@ -895,8 +896,13 @@ async def get_live_state_by_chat_id_and_message_id(
     if not chat:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=ERROR_MESSAGES.NOT_FOUND)
 
-    live_state = get_live_state()
-    snapshot = live_state.get((id, message_id))
+    # In-memory live snapshot wins while a run is active; otherwise fall back to a
+    # DB-derived final snapshot from this (already-owned) chat's history so the
+    # endpoint stays reachable after the grace window or a refresh where the
+    # process-local active run is gone. The fallback is NOT gated on an active
+    # run existing — see myah.utils.live_state.resolve_live_state.
+    messages = (chat.chat or {}).get('history', {}).get('messages', {})
+    snapshot = resolve_live_state(id, message_id, get_live_state(), messages)
     if snapshot is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,

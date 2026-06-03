@@ -80,7 +80,7 @@ export function getTaskStatus(
 }
 
 export function getTaskFiles(chatOrProcess: ChatLike | Process): TaskFile[] {
-	if (chatOrProcess?.meta?.files && Array.isArray(chatOrProcess.meta.files)) {
+	if ('meta' in chatOrProcess && Array.isArray(chatOrProcess.meta?.files)) {
 		return chatOrProcess.meta.files;
 	}
 	return [];
@@ -125,7 +125,7 @@ export function mergeChatsAndProcesses(chats: ChatLike[], processes: Process[]):
 			updated_at: chat.updated_at ?? 0,
 			files: getTaskFiles(chat),
 			chat,
-			folder_id: chat.folder_id
+			folder_id: chat.folder_id ?? undefined
 		});
 	}
 
@@ -179,6 +179,62 @@ export function mergeChatsAndProcesses(chats: ChatLike[], processes: Process[]):
 	tasks.sort((a, b) => b.updated_at - a.updated_at);
 
 	return tasks;
+}
+
+/**
+ * Project a freshly persisted chat row onto an existing task list so the Tasks
+ * sidebar reflects the new recency without reloading from the server.
+ *
+ * - Updates the matching task (keyed by `task.chatId ?? task.id`).
+ * - Preserves process-derived title/type/process fields for recurring tasks,
+ *   bumping only recency-related fields (updated_at, files, chat, folder_id).
+ * - Inserts a new chat task when nothing matches and the chat is not a process
+ *   output chat (titled "Process: ...").
+ * - Returns a new array sorted by updated_at descending.
+ */
+export function applyChatUpdateToTasks(tasks: TaskItem[], chat: ChatLike): TaskItem[] {
+	const chatId = chat.id;
+	let matched = false;
+
+	const next = tasks.map((task) => {
+		const taskChatId = task.chatId ?? task.id;
+		if (taskChatId !== chatId) {
+			return task;
+		}
+
+		matched = true;
+		const isRecurring = task.type === 'recurring';
+		const updatedAt = chat.updated_at ?? task.updated_at;
+
+		return {
+			...task,
+			...(isRecurring ? {} : { title: chat.title ?? task.title ?? 'New Chat' }),
+			updated_at: updatedAt,
+			files: getTaskFiles(chat),
+			chat: {
+				...task.chat,
+				...chat
+			},
+			folder_id: chat.folder_id ?? task.folder_id
+		};
+	});
+
+	if (!matched && !(chat.title ?? '').startsWith('Process: ')) {
+		const updatedAt = chat.updated_at ?? 0;
+		next.push({
+			id: chat.id,
+			chatId: chat.id,
+			title: chat.title ?? 'New Chat',
+			type: 'chat',
+			status: 'completed',
+			updated_at: updatedAt,
+			files: getTaskFiles(chat),
+			chat,
+			folder_id: chat.folder_id ?? undefined
+		});
+	}
+
+	return [...next].sort((a, b) => b.updated_at - a.updated_at);
 }
 
 /**

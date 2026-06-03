@@ -4,7 +4,8 @@ import {
 	saveInflightSnapshot,
 	loadInflightSnapshot,
 	clearInflightSnapshot,
-	pruneStaleSnapshots
+	pruneStaleSnapshots,
+	markInflightDurableFinal
 } from './inflightPersistence';
 
 // ---------------------------------------------------------------------------
@@ -64,7 +65,16 @@ describe('inflightPersistence', () => {
 	it('save/load round-trip preserves snapshot content', () => {
 		const snapshot = makeSnapshot({
 			message_content: 'round-trip test',
-			output: [{ id: 'tool-1', type: 'function_call', status: 'in_progress' }]
+			output: [
+				{
+					id: 'tool-1',
+					type: 'function_call',
+					call_id: 'call-1',
+					name: 'demo_tool',
+					arguments: '{}',
+					status: 'in_progress'
+				}
+			]
 		});
 		saveInflightSnapshot(snapshot);
 		const loaded = loadInflightSnapshot(snapshot.chat_id);
@@ -100,8 +110,14 @@ describe('inflightPersistence', () => {
 	});
 
 	it('drops oversized output before storage while preserving message content', () => {
-		const oversizedOutput = [
-			{ id: 'huge-tool', type: 'function_call_output', output: 'x'.repeat(250_000) }
+		const oversizedOutput: NonNullable<InflightSnapshot['output']> = [
+			{
+				id: 'huge-tool',
+				type: 'function_call_output',
+				call_id: 'call-huge',
+				status: 'completed',
+				output: [{ type: 'input_text', text: 'x'.repeat(250_000) }]
+			}
 		];
 		const snapshot = makeSnapshot({
 			message_content: 'partial answer',
@@ -155,5 +171,67 @@ describe('inflightPersistence', () => {
 		pruneStaleSnapshots();
 
 		expect(stub.getItem(`${KEY_PREFIX}chat-broken`)).toBeNull();
+	});
+
+	describe('durable-final aware cleanup', () => {
+		it('markInflightDurableFinal clears a matching settled snapshot', () => {
+			saveInflightSnapshot(
+				makeSnapshot({ chat_id: 'chat-x', message_id: 'msg-x', status: 'settled' })
+			);
+			expect(markInflightDurableFinal('chat-x', 'msg-x')).toBe(true);
+			expect(loadInflightSnapshot('chat-x')).toBeNull();
+		});
+
+		it('markInflightDurableFinal does not clear a different in-flight message snapshot', () => {
+			// A newer in-flight message already replaced the snapshot for this chat.
+			saveInflightSnapshot(
+				makeSnapshot({ chat_id: 'chat-x', message_id: 'msg-new', status: 'streaming' })
+			);
+			// A late durable-final ack for the OLD message must not wipe it.
+			expect(markInflightDurableFinal('chat-x', 'msg-old')).toBe(false);
+			expect(loadInflightSnapshot('chat-x')?.message_id).toBe('msg-new');
+		});
+
+		it('a settled snapshot survives past the old fixed 10s window — only durable final clears it', () => {
+			vi.useFakeTimers();
+			try {
+				saveInflightSnapshot(
+					makeSnapshot({ chat_id: 'chat-x', message_id: 'msg-x', status: 'settled' })
+				);
+
+				// The old behaviour cleared after a fixed 10s; that must no longer happen.
+				vi.advanceTimersByTime(11_000);
+				expect(loadInflightSnapshot('chat-x')).not.toBeNull();
+
+				// Durable final acknowledgement is what clears it.
+				markInflightDurableFinal('chat-x', 'msg-x');
+				expect(loadInflightSnapshot('chat-x')).toBeNull();
+			} finally {
+				vi.useRealTimers();
+			}
+		});
+
+		it('a never-confirmed snapshot (e.g. failed DB save) is only removed by the stale TTL', () => {
+			vi.useFakeTimers();
+			try {
+				// updated_at far enough in the past that it is already stale.
+				const now = Date.now();
+				const snap = makeSnapshot({
+					chat_id: 'chat-x',
+					message_id: 'msg-x',
+					status: 'settled',
+					updated_at: now - 700_000
+				});
+				stub.setItem(`${KEY_PREFIX}chat-x`, JSON.stringify(snap));
+
+				// No durable final ack happened (DB save failed). It is not cleared
+				// eagerly, only when the stale TTL prune runs.
+				expect(loadInflightSnapshot('chat-x')).not.toBeNull();
+				pruneStaleSnapshots();
+				expect(loadInflightSnapshot('chat-x')).toBeNull();
+			} finally {
+				vi.useRealTimers();
+			}
+		});
 	});
 });

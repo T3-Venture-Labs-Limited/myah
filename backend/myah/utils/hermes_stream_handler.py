@@ -209,10 +209,46 @@ def get_live_state_snapshot(chat_id: str, message_id: str) -> dict | None:
 
 
 def clear_stream_state(chat_id: str, message_id: str | None = None) -> None:
-    """Clear process-local live stream state for a chat/message pair."""
-    _active_runs.pop(chat_id, None)
+    """Clear process-local live stream state for a chat/message pair.
+
+    When a message id is supplied, only clear the chat-level active-run entry if
+    it still points at that message. This prevents an older delayed cleanup from
+    deleting a newer same-chat run that started during the grace/TTL window.
+    """
     if message_id:
+        current = _active_runs.get(chat_id)
+        if current is None or current.get('message_id') == message_id:
+            _active_runs.pop(chat_id, None)
         _live_state.pop((chat_id, message_id), None)
+    else:
+        _active_runs.pop(chat_id, None)
+
+
+# ── Registry cleanup windows (T3-1096) ───────────────────────────────────────
+# A run completing is NOT proof its final message is durable. We only release
+# the live registries on the short grace window once the DB save is confirmed
+# (final_save_is_durable). When the save did not land we keep the registries
+# (the only useful state) until a longer stale TTL, rather than erasing them on
+# the old fixed 10s assumption.
+_REGISTRY_GRACE_SECONDS = 10
+_REGISTRY_STALE_TTL_SECONDS = 60
+
+
+def final_save_is_durable(saved_chat, message_id: str | None) -> bool:
+    """True iff a final save returned a real chat whose persisted history now
+    contains ``message_id`` marked done. Used to decide whether the live
+    registries can be released on the short grace window or must be kept until
+    the stale TTL.
+    """
+    if saved_chat is None or not message_id:
+        return False
+    chat_dict = getattr(saved_chat, 'chat', None)
+    if not isinstance(chat_dict, dict):
+        return False
+    message = chat_dict.get('history', {}).get('messages', {}).get(message_id)
+    if not isinstance(message, dict):
+        return False
+    return message.get('done') is True
 
 
 def _sse_chunk(delta: str = '', done: bool = False) -> str:
@@ -325,6 +361,12 @@ async def handle_hermes_stream(response, ctx: dict) -> StreamingResponse | None:
         reasoning_start: float | None = None
         last_save_time = time.monotonic()
         upstream_iterator = response.body_iterator
+        # ── Durable-final-aware cleanup delay (T3-1096 Task 5) ───────────
+        # Starts at the short grace window; promoted to the stale TTL in
+        # run.completed when the final DB save is not proven durable. Used
+        # by both the run.completed registry teardown AND the finally block
+        # so every exit path respects the same durability decision.
+        _final_cleanup_delay = _REGISTRY_GRACE_SECONDS
         # 2026-05-05 dogfooding: guard so the persist+artifact_card emission
         # block at run.completed fires AT MOST ONCE per _generate() call.
         # The upstream SSE iterator can deliver run.completed more than once
@@ -456,9 +498,11 @@ async def handle_hermes_stream(response, ctx: dict) -> StreamingResponse | None:
             }
 
         # ── Helper: save to DB ────────────────────────────────────────────
-        async def _save_to_db(done_flag: bool = False) -> None:
+        # Returns the updated chat (or None) so callers can verify the final
+        # message was actually persisted before releasing the live registries.
+        async def _save_to_db(done_flag: bool = False):
             if not chat_id or not message_id or chat_id.startswith('local:'):
-                return
+                return None
             update: dict = {
                 'role': 'assistant',
                 'content': serialize_output(output),
@@ -473,7 +517,7 @@ async def handle_hermes_stream(response, ctx: dict) -> StreamingResponse | None:
             if done_flag and model_used:
                 update['modelUsed'] = model_used
             # ─────────────────────────────────────────────────────────────
-            Chats.upsert_message_to_chat_by_id_and_message_id(chat_id, message_id, update)
+            return Chats.upsert_message_to_chat_by_id_and_message_id(chat_id, message_id, update)
 
         # ── Main stream processing ─────────────────────────────────────────
         try:
@@ -1204,14 +1248,28 @@ async def handle_hermes_stream(response, ctx: dict) -> StreamingResponse | None:
                         _persist_finalized = True
                     # ─────────────────────────────────────────────────────────
 
-                    await _save_to_db(done_flag=True)
+                    saved_chat = await _save_to_db(done_flag=True)
                     await _emit_completion(done_flag=True)
 
-                    # ── Myah: settle registries with 10s grace (T3-1001) ──
+                    # ── Myah: settle registries, durable-final aware (T3-1096) ──
+                    # Only release on the short grace once the DB save is proven
+                    # durable; otherwise keep the live state until the stale TTL so
+                    # a refresh isn't left with no recoverable final state.
                     _update_live_state(status='settled')
-                    asyncio.get_running_loop().call_later(10, _active_runs.pop, chat_id, None)
-                    asyncio.get_running_loop().call_later(10, _live_state.pop, (chat_id, message_id), None)
-                    # ─────────────────────────────────────────────────────
+                    durable = final_save_is_durable(saved_chat, message_id)
+                    if not durable:
+                        log.warning(
+                            '[HERMES] final save not durable for chat_id={} message_id={}; '
+                            'holding live registries until stale TTL ({}s)',
+                            chat_id,
+                            message_id,
+                            _REGISTRY_STALE_TTL_SECONDS,
+                        )
+                    _final_cleanup_delay = _REGISTRY_GRACE_SECONDS if durable else _REGISTRY_STALE_TTL_SECONDS
+                    asyncio.get_running_loop().call_later(
+                        _final_cleanup_delay, clear_stream_state, chat_id, message_id
+                    )
+                    # ────────────────────────────────────────────────────────────
 
                     log.info(
                         '[HERMES] step=run_completed chat_id={} message_id={}',
@@ -1258,10 +1316,11 @@ async def handle_hermes_stream(response, ctx: dict) -> StreamingResponse | None:
 
                     await _emit_completion(done_flag=True, error=error_text)
 
-                    # ── Myah: settle registries with 10s grace (T3-1001) ──
+                    # ── Myah: settle registries with 10s grace (T3-1096) ──
                     _update_live_state(status='settled')
-                    asyncio.get_running_loop().call_later(10, _active_runs.pop, chat_id, None)
-                    asyncio.get_running_loop().call_later(10, _live_state.pop, (chat_id, message_id), None)
+                    asyncio.get_running_loop().call_later(
+                        _REGISTRY_GRACE_SECONDS, clear_stream_state, chat_id, message_id
+                    )
                     # ─────────────────────────────────────────────────────
 
                     log.error('[HERMES] step=run_failed chat_id={} error={}', chat_id, error_text)
@@ -1309,10 +1368,11 @@ async def handle_hermes_stream(response, ctx: dict) -> StreamingResponse | None:
 
                     await _emit_completion(done_flag=True)
 
-                    # ── Myah: settle registries with 10s grace (T3-1001) ──
+                    # ── Myah: settle registries with 10s grace (T3-1096) ──
                     _update_live_state(status='settled')
-                    asyncio.get_running_loop().call_later(10, _active_runs.pop, chat_id, None)
-                    asyncio.get_running_loop().call_later(10, _live_state.pop, (chat_id, message_id), None)
+                    asyncio.get_running_loop().call_later(
+                        _REGISTRY_GRACE_SECONDS, clear_stream_state, chat_id, message_id
+                    )
                     # ─────────────────────────────────────────────────────
 
                     yield _sse_chunk(done=True)
@@ -1349,7 +1409,11 @@ async def handle_hermes_stream(response, ctx: dict) -> StreamingResponse | None:
             if chat_id:
                 try:
                     loop = asyncio.get_running_loop()
-                    loop.call_later(10, clear_stream_state, chat_id, message_id)
+                    # Use the durable-final-aware delay set during run.completed so a
+                    # non-durable final save keeps the registries until the stale TTL
+                    # even when the exit path is an exception or disconnect rather than
+                    # a clean run.completed event.
+                    loop.call_later(_final_cleanup_delay, clear_stream_state, chat_id, message_id)
                 except RuntimeError:
                     # No running loop (e.g. during test teardown) — clean up immediately
                     clear_stream_state(chat_id, message_id)

@@ -114,12 +114,17 @@
 	import {
 		loadInflightSnapshot,
 		clearInflightSnapshot,
+		markInflightDurableFinal,
 		pruneStaleSnapshots
 	} from '$lib/utils/inflightPersistence';
-	import { reconnectBanner, pendingComposerFileAttach, pendingChatFiles } from '$lib/stores';
+	import { reconnectBanner, pendingComposerFileAttach, pendingChatFiles, activeChatIds } from '$lib/stores';
+	import { applyChatUpdateToAllTasks } from '$lib/stores/tasks';
+	import { clearActiveChatOnDurableFinal } from '$lib/utils/activeRuns';
 	import { applyDurableFinalMessageEvent } from '$lib/utils/chatEventFallback';
 	import { resumeChatAfterCriticalLoad } from '$lib/utils/chatNavigationResume';
+	import { resolveInflightServerState } from '$lib/utils/resolveInflightServerState';
 	import { chatRuntimeStore } from '$lib/stores/chatRuntime';
+	import { streamContinuityTrace } from '$lib/utils/streamContinuityTrace';
 	import type { InflightSnapshot } from '$lib/types';
 	import ReconnectBanner from './ReconnectBanner.svelte';
 	import {
@@ -256,12 +261,21 @@
 		);
 
 		if (chatIdProp) {
+			streamContinuityTrace.record(chatIdProp, 'chat:route:mount');
 			const loaded = await resumeChatAfterCriticalLoad({
 				chatId: chatIdProp,
-				loadCriticalChat: loadChat,
+				loadCriticalChat: async () => {
+					streamContinuityTrace.record(chatIdProp, 'db:load:start');
+					const result = await loadChat();
+					streamContinuityTrace.record(chatIdProp, 'db:load:finish', { ok: !!result });
+					return result;
+				},
 				loadFastProjection: loadFastProjectionForCurrentChat,
 				setLoading: (value) => {
 					loading = value;
+					if (value === false) {
+						streamContinuityTrace.record(chatIdProp, 'render:loading:false');
+					}
 				},
 				afterCriticalRender: async () => {
 					await tick();
@@ -718,7 +732,16 @@
 		const msgId = String(snapshot.message_id ?? '');
 		if (!msgId) return;
 		const msg = (history.messages as Record<string, any>)[msgId];
-		if (!msg) return;
+
+		// Assistant shell missing from loaded history — e.g. a refresh/navigation
+		// return where /live_state (in-memory or DB/final fallback) returned a
+		// message that the slow DB load has not produced yet. Paint it through the
+		// runtime projection store so a graph-safe shell is materialized instead of
+		// silently dropping the snapshot. (T3-1096 Task 6.)
+		if (!msg) {
+			_applyServerSnapshotViaRuntime(snapshot, msgId);
+			return;
+		}
 		// Only update if the message is still in-progress (not done)
 		if (msg.done) return;
 
@@ -732,6 +755,69 @@
 		(history.messages as Record<string, any>)[msgId] = msg;
 	}
 
+	// Current assistant message id from loaded/known history — the /live_state
+	// fallback target when no process-local active run exists.
+	function _currentAssistantMessageId(): string | null {
+		const currentId = history?.currentId;
+		if (!currentId) return null;
+		const current = (history.messages as Record<string, any>)?.[currentId];
+		return current?.role === 'assistant' ? String(currentId) : null;
+	}
+
+	function _currentUserMessageId(): string | null {
+		const currentId = history?.currentId;
+		if (!currentId) return null;
+		const current = (history.messages as Record<string, any>)?.[currentId];
+		if (current?.role === 'user') return String(currentId);
+		if (current?.role === 'assistant' && typeof current.parentId === 'string') {
+			return current.parentId;
+		}
+		return null;
+	}
+
+	// Paint a server live/final snapshot for a message that isn't in loaded
+	// history through chatRuntimeStore + projection. We seed a graph-safe shell
+	// (so the projection materializes it instead of treating it as an orphan)
+	// then overlay the snapshot's streaming/final fields.
+	function _applyServerSnapshotViaRuntime(
+		snapshot: InflightSnapshot | Record<string, any>,
+		msgId: string
+	) {
+		const cid = String(snapshot.chat_id ?? chatIdProp ?? '');
+		// Stale-chat guard: never paint into a chat the user has navigated away from.
+		if (!cid || cid !== chatIdProp) return;
+
+		const parentId = _currentUserMessageId();
+		chatRuntimeStore.seedHistory(cid, {
+			currentId: msgId,
+			messages: {
+				[msgId]: {
+					id: msgId,
+					role: 'assistant',
+					parentId: parentId ?? null,
+					childrenIds: [],
+					content: '',
+					done: false
+				}
+			}
+		});
+		chatRuntimeStore.applyEvent({
+			chat_id: cid,
+			message_id: msgId,
+			data: {
+				type: 'chat:completion',
+				data: {
+					done: snapshot.status === 'settled' || snapshot.done === true,
+					content: snapshot.message_content,
+					output: snapshot.output
+				}
+			}
+		});
+		history = chatRuntimeStore.mergeHistory(cid, history, Date.now(), {
+			isolateToChat: true
+		});
+	}
+
 	function loadFastProjectionForCurrentChat() {
 		if (!chatIdProp || chatIdProp.startsWith('local:')) return false;
 
@@ -740,28 +826,23 @@
 			history = chatRuntimeStore.mergeHistory(chatIdProp, history, Date.now(), {
 				isolateToChat: true
 			});
+			streamContinuityTrace.record(chatIdProp, 'fastProjection:hit', { source: 'runtime' });
 			return true;
 		}
 
 		const stored = loadInflightSnapshot(chatIdProp);
-		if (!stored || stored.chat_id !== chatIdProp) return false;
+		if (!stored || stored.chat_id !== chatIdProp) {
+			streamContinuityTrace.record(chatIdProp, 'fastProjection:miss');
+			return false;
+		}
 
-		const runtimeEvent = {
-			chat_id: stored.chat_id,
-			message_id: stored.message_id,
-			data: {
-				type: 'chat:completion',
-				data: {
-					done: stored.status === 'settled',
-					content: stored.message_content,
-					output: stored.output
-				}
-			}
-		};
-		chatRuntimeStore.applyEvent(runtimeEvent);
-		history = chatRuntimeStore.mergeHistory(chatIdProp, history, Date.now(), {
-			isolateToChat: true
-		});
+		_applyServerSnapshotViaRuntime(stored, stored.message_id);
+		const projectedMessage = (history.messages as Record<string, any>)?.[stored.message_id];
+		if (!projectedMessage) {
+			streamContinuityTrace.record(chatIdProp, 'fastProjection:miss', { source: 'snapshot' });
+			return false;
+		}
+		streamContinuityTrace.record(chatIdProp, 'fastProjection:hit', { source: 'snapshot' });
 		return true;
 	}
 
@@ -786,22 +867,31 @@
 		// so we don't stomp the new chat's banner or message state.
 		const isStale = () => chatIdProp !== chatId;
 
+		streamContinuityTrace.record(chatId, 'resume:active:start');
 		const serverPromise = (async () => {
 			try {
-				const active = await getActiveRun(localStorage.token, chatId);
+				const serverState = await resolveInflightServerState({
+					token: localStorage.token,
+					chatId,
+					getActiveRun,
+					getChatLiveState,
+					knownAssistantMessageId: _currentAssistantMessageId,
+					isStale,
+					onActiveResolved: (active) => {
+						streamContinuityTrace.record(chatId, 'resume:active:finish', {
+							run_id: active.run_id ?? undefined,
+							message_id: active.message_id ?? undefined
+						});
+					},
+					onLiveStateStart: (messageId) => {
+						streamContinuityTrace.record(chatId, 'liveState:start', { message_id: messageId });
+					},
+					onLiveStateFinish: (messageId, ok) => {
+						streamContinuityTrace.record(chatId, 'liveState:finish', { message_id: messageId, ok });
+					}
+				});
 				if (isStale()) return null;
-				// Class-7: shape validation is the success gate
-				if (typeof active?.run_id === 'undefined') {
-					throw new Error('malformed active_run response');
-				}
-				if (active.run_id === null) {
-					return null; // no active run — DB load wins
-				}
-				const live = active.message_id
-					? await getChatLiveState(localStorage.token, chatId, active.message_id)
-					: null;
-				if (isStale()) return null;
-				return live ? { ...active, ...live } : null;
+				return serverState;
 			} catch (err) {
 				if (isStale()) throw err; // don't update banner for stale chat
 				// Class-7: terminal failure; NOT a retry
@@ -843,7 +933,12 @@
 			clearTimeout(hardTimeout);
 			if (isStale()) return; // navigated away — discard result
 			if (serverState) {
-				_applyInflightSnapshot(serverState);
+				const serverMessageId = String(serverState.message_id ?? '');
+				if (serverMessageId && (history.messages as Record<string, any>)?.[serverMessageId]) {
+					_applyInflightSnapshot(serverState);
+				} else if (serverMessageId) {
+					_applyServerSnapshotViaRuntime(serverState, serverMessageId);
+				}
 				reconnectBanner.set(null);
 			} else if (snapshotPainted) {
 				// Stale snapshot was painted — replace it with the authoritative DB state
@@ -1357,12 +1452,32 @@
 					files: chatFiles
 				});
 
+				if (chat) {
+					applyChatUpdateToAllTasks(chat);
+					// Durable final: the assistant message is now persisted to the DB,
+					// so it is safe to release the live projection, the paint hint, and
+					// the active indicator for this chat/message.
+					acknowledgeDurableFinal(_chatId, responseMessageId);
+				}
+
 				currentChatPage.set(1);
 				await chats.set(await getChatList(localStorage.token, $currentChatPage));
 			}
 		}
 
 		taskIds = null;
+	};
+
+	// Release live/paint/active state for (chatId, messageId) only once the final
+	// assistant message is durably saved. This replaces the previous fixed-timer
+	// cleanup that cleared state on a 10s assumption regardless of DB settle.
+	const acknowledgeDurableFinal = (ackChatId: string, messageId: string) => {
+		if (!ackChatId || ackChatId.startsWith('local:')) return;
+		chatRuntimeStore.markDurableFinal(ackChatId, messageId);
+		markInflightDurableFinal(ackChatId, messageId);
+		activeChatIds.update((ids) => clearActiveChatOnDurableFinal(ids, ackChatId));
+		streamContinuityTrace.record(ackChatId, 'durableFinal:ack', { message_id: messageId });
+		streamContinuityTrace.record(ackChatId, 'snapshot:clear', { message_id: messageId });
 	};
 
 	const chatActionHandler = async (_chatId, actionId, modelId, responseMessageId, event = null) => {
@@ -1411,6 +1526,10 @@
 					params: params,
 					files: chatFiles
 				});
+
+				if (chat) {
+					applyChatUpdateToAllTasks(chat);
+				}
 
 				currentChatPage.set(1);
 				await chats.set(await getChatList(localStorage.token, $currentChatPage));
@@ -1562,8 +1681,16 @@
 		message.done = true;
 		bumpArtifactExplorerRefresh();
 
-		if (chatId && !chatId.startsWith('local:')) {
-			setTimeout(() => clearInflightSnapshot(chatId), 10_000);
+		// The paint hint / live projection are NOT cleared on a fixed timer here.
+		// Clearing waits for durable final (DB save) acknowledgement — see
+		// acknowledgeDurableFinal() — or the stale TTL (pruneStaleSnapshots).
+		// For the route-independent durable-final fallback path
+		// (runBackgroundCompletion=false) the snapshot is already cleared by
+		// applyDurableFinalMessageEvent; release the runtime + active state too.
+		if (!runBackgroundCompletion && chatId && !chatId.startsWith('local:')) {
+			chatRuntimeStore.markDurableFinal(chatId, message.id);
+			activeChatIds.update((ids) => clearActiveChatOnDurableFinal(ids, chatId));
+			streamContinuityTrace.record(chatId, 'durableFinal:ack', { message_id: message.id });
 		}
 
 		if ($settings.responseAutoCopy) {
@@ -1978,6 +2105,14 @@
 		await tick();
 
 		_history = structuredClone(history);
+
+		// Seed route-independent runtime projection with the outgoing user +
+		// assistant graph now that the persisted chat id and full graph exist.
+		// This lets a chat switch / return paint the current pair immediately,
+		// before DB load resolves. Guard against empty/temporary ids.
+		if (_chatId && !String(_chatId).startsWith('local:')) {
+			chatRuntimeStore.seedHistory(_chatId, _history);
+		}
 
 		// Check vision capability
 		const hasImages = createMessagesList(_history, parentId).some((message) =>
@@ -2486,6 +2621,10 @@
 			_chatId = chat.id;
 			await chatId.set(_chatId);
 
+			if (chat) {
+				applyChatUpdateToAllTasks(chat);
+			}
+
 			window.history.replaceState(history.state, '', `/c/${_chatId}`);
 
 			await tick();
@@ -2518,6 +2657,10 @@
 					params: params,
 					files: chatFiles
 				});
+
+				if (chat) {
+					applyChatUpdateToAllTasks(chat);
+				}
 			}
 		}
 	};
@@ -2717,6 +2860,7 @@
 								);
 
 								if (savedChat) {
+									applyChatUpdateToAllTasks(savedChat);
 									temporaryChatEnabled.set(false);
 									chatId.set(savedChat.id);
 									chats.set(await getChatList(localStorage.token, $currentChatPage));

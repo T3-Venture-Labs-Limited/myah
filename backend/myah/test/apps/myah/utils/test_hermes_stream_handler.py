@@ -23,6 +23,7 @@ Both paths are pure async logic tests — no real DB, no real network.
 import io
 import json
 import pytest
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 from loguru import logger
 from starlette.responses import StreamingResponse
@@ -528,6 +529,186 @@ def _clear_registries():
     _mod._registry_warning_emitted = False
 
 
+def _durable_chat(message_id='test-message-id', content='Hello', done=True):
+    """A ChatModel-like object whose persisted history proves the final save landed."""
+    return SimpleNamespace(
+        chat={
+            'history': {
+                'messages': {
+                    message_id: {
+                        'id': message_id,
+                        'role': 'assistant',
+                        'content': content,
+                        'done': done,
+                    }
+                }
+            }
+        }
+    )
+
+
+# ── Final-save durability gate (T3-1096 Task 5) ──────────────────────────────
+
+
+def test_final_save_is_durable_true_for_real_chat_with_done_message():
+    from myah.utils.hermes_stream_handler import final_save_is_durable
+
+    assert final_save_is_durable(_durable_chat(), 'test-message-id') is True
+
+
+def test_final_save_is_durable_false_when_save_returned_none():
+    from myah.utils.hermes_stream_handler import final_save_is_durable
+
+    # _save_to_db / upsert returns None when the chat row was missing.
+    assert final_save_is_durable(None, 'test-message-id') is False
+
+
+def test_final_save_is_durable_false_when_message_absent():
+    from myah.utils.hermes_stream_handler import final_save_is_durable
+
+    chat = SimpleNamespace(chat={'history': {'messages': {}}})
+    assert final_save_is_durable(chat, 'test-message-id') is False
+
+
+def test_final_save_is_durable_false_when_message_not_done():
+    from myah.utils.hermes_stream_handler import final_save_is_durable
+
+    assert final_save_is_durable(_durable_chat(done=False), 'test-message-id') is False
+
+
+@pytest.mark.asyncio
+async def test_completed_durable_save_uses_short_grace():
+    """When the final save is durable, the registries clear on the 10s grace."""
+    _clear_registries()
+
+    sse_lines = _make_sse_lines(
+        {'event': 'message.delta', 'run_id': 'run-d', 'delta': 'Hi'},
+        {'event': 'run.completed', 'usage': None},
+    )
+    response = _make_upstream_response(sse_lines)
+    ctx = _make_ctx(with_event_caller=True)
+
+    scheduled_callbacks: list[tuple] = []
+
+    class _FakeLoop:
+        def call_later(self, delay, fn, *args):
+            scheduled_callbacks.append((delay, fn, args))
+
+    with (
+        patch('myah.utils.hermes_stream_handler.Chats') as mock_chats,
+        patch('myah.utils.hermes_stream_handler.background_tasks_handler', new=AsyncMock()),
+        patch('myah.utils.hermes_stream_handler.asyncio.get_running_loop', return_value=_FakeLoop()),
+    ):
+        mock_chats.upsert_message_to_chat_by_id_and_message_id.return_value = _durable_chat()
+        from myah.utils.hermes_stream_handler import handle_hermes_stream
+
+        await handle_hermes_stream(response, ctx)
+
+    assert scheduled_callbacks, 'no cleanup scheduled'
+    assert all(delay == 10 for delay, _fn, _args in scheduled_callbacks), (
+        f'durable save should clear on the 10s grace, got {[d for d, *_ in scheduled_callbacks]}'
+    )
+
+
+@pytest.mark.asyncio
+async def test_old_completed_cleanup_does_not_remove_newer_same_chat_run():
+    """A delayed cleanup for run A must not delete run B for the same chat.
+
+    This is the core race behind T3-1096: the active-run registry is keyed by
+    chat_id, while cleanup is delayed so refresh/navigation can recover final
+    state. If another message starts in that grace window, the older delayed
+    callback must only clear message A's live state, not B's active indicator.
+    """
+    _clear_registries()
+
+    sse_lines = _make_sse_lines(
+        {'event': 'message.delta', 'run_id': 'run-old', 'delta': 'Hi'},
+        {'event': 'run.completed', 'usage': None},
+    )
+    response = _make_upstream_response(sse_lines)
+    ctx = _make_ctx(with_event_caller=True)
+
+    scheduled_callbacks: list[tuple] = []
+
+    class _FakeLoop:
+        def call_later(self, delay, fn, *args):
+            scheduled_callbacks.append((delay, fn, args))
+
+    with (
+        patch('myah.utils.hermes_stream_handler.Chats') as mock_chats,
+        patch('myah.utils.hermes_stream_handler.background_tasks_handler', new=AsyncMock()),
+        patch('myah.utils.hermes_stream_handler.asyncio.get_running_loop', return_value=_FakeLoop()),
+    ):
+        mock_chats.upsert_message_to_chat_by_id_and_message_id.return_value = _durable_chat()
+        import myah.utils.hermes_stream_handler as _mod
+        from myah.utils.hermes_stream_handler import handle_hermes_stream
+
+        await handle_hermes_stream(response, ctx)
+
+        # Simulate a newer assistant message starting before old cleanup fires.
+        _mod._active_runs['test-chat-id'] = {
+            'run_id': 'run-new',
+            'started_at': 999,
+            'message_id': 'new-message-id',
+        }
+        _mod._live_state[('test-chat-id', 'new-message-id')] = {
+            'chat_id': 'test-chat-id',
+            'message_id': 'new-message-id',
+            'status': 'streaming',
+        }
+
+        for _delay, fn, args in scheduled_callbacks:
+            fn(*args)
+
+        assert _mod._active_runs['test-chat-id']['message_id'] == 'new-message-id'
+        assert ('test-chat-id', 'test-message-id') not in _mod._live_state
+        assert ('test-chat-id', 'new-message-id') in _mod._live_state
+
+
+@pytest.mark.asyncio
+async def test_completed_non_durable_save_keeps_registry_until_stale_ttl():
+    """When the final DB save did NOT land (returns None), the registries must not
+    be cleared on the old fixed 10s — they survive until a longer stale TTL so the
+    only useful state is not erased before the message is durable."""
+    _clear_registries()
+
+    sse_lines = _make_sse_lines(
+        {'event': 'message.delta', 'run_id': 'run-nd', 'delta': 'Hi'},
+        {'event': 'run.completed', 'usage': None},
+    )
+    response = _make_upstream_response(sse_lines)
+    ctx = _make_ctx(with_event_caller=True)
+
+    scheduled_callbacks: list[tuple] = []
+
+    class _FakeLoop:
+        def call_later(self, delay, fn, *args):
+            scheduled_callbacks.append((delay, fn, args))
+
+    with (
+        patch('myah.utils.hermes_stream_handler.Chats') as mock_chats,
+        patch('myah.utils.hermes_stream_handler.background_tasks_handler', new=AsyncMock()),
+        patch('myah.utils.hermes_stream_handler.asyncio.get_running_loop', return_value=_FakeLoop()),
+    ):
+        # Simulate a failed/missing final save.
+        mock_chats.upsert_message_to_chat_by_id_and_message_id.return_value = None
+        import myah.utils.hermes_stream_handler as _mod
+        from myah.utils.hermes_stream_handler import handle_hermes_stream
+
+        await handle_hermes_stream(response, ctx)
+
+        # Entry still present right after the stream.
+        assert 'test-chat-id' in _mod._active_runs
+
+        cleanup_delays = [delay for delay, _fn, _args in scheduled_callbacks]
+        assert cleanup_delays, 'no cleanup scheduled'
+        # Must NOT clear on the old fixed 10s window.
+        assert all(delay > 10 for delay in cleanup_delays), (
+            f'non-durable save must outlive the 10s grace, got {cleanup_delays}'
+        )
+        assert max(cleanup_delays) >= _mod._REGISTRY_STALE_TTL_SECONDS
+
+
 @pytest.mark.asyncio
 async def test_active_runs_populated_on_run_started():
     """_active_runs must be populated when the first run_id is captured.
@@ -554,10 +735,12 @@ async def test_active_runs_populated_on_run_started():
     fake_loop = _FakeLoop()
 
     with (
-        patch('myah.utils.hermes_stream_handler.Chats'),
+        patch('myah.utils.hermes_stream_handler.Chats') as mock_chats,
         patch('myah.utils.hermes_stream_handler.background_tasks_handler', new=AsyncMock()),
         patch('myah.utils.hermes_stream_handler.asyncio.get_running_loop', return_value=fake_loop),
     ):
+        # Durable final save → registries clear on the standard 10s grace.
+        mock_chats.upsert_message_to_chat_by_id_and_message_id.return_value = _durable_chat()
         import myah.utils.hermes_stream_handler as _mod
         from myah.utils.hermes_stream_handler import handle_hermes_stream
 

@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import type { ActiveRun } from '$lib/apis/chats';
-import { activeChatIdSetFromRuns, applyActiveChatEvent } from './activeRuns';
+import {
+	activeChatIdSetFromRuns,
+	applyActiveChatEvent,
+	clearActiveChatOnDurableFinal
+} from './activeRuns';
 
 describe('active run helpers', () => {
 	it('builds a replacement set from valid active runs', () => {
@@ -31,5 +35,29 @@ describe('active run helpers', () => {
 		expect(applyActiveChatEvent(hydrated, 'chat-3', true)).toEqual(
 			new Set(['chat-1', 'chat-2', 'chat-3'])
 		);
+	});
+
+	it('does not flip the indicator to completed on active=false while durable final is unresolved', () => {
+		const current = new Set(['chat-1']);
+
+		// chat:active=false arrived but the final assistant message is not yet
+		// durably saved — the spinner must remain.
+		expect(
+			applyActiveChatEvent(current, 'chat-1', false, { awaitingDurableFinal: true })
+		).toEqual(new Set(['chat-1']));
+	});
+
+	it('removes the indicator once durable final is acknowledged', () => {
+		const current = new Set(['chat-1', 'chat-2']);
+		expect(clearActiveChatOnDurableFinal(current, 'chat-1')).toEqual(new Set(['chat-2']));
+		// original set is not mutated
+		expect(current).toEqual(new Set(['chat-1', 'chat-2']));
+	});
+
+	it('still removes the indicator on active=false when nothing is awaiting durable final', () => {
+		const current = new Set(['chat-1']);
+		expect(
+			applyActiveChatEvent(current, 'chat-1', false, { awaitingDurableFinal: false })
+		).toEqual(new Set());
 	});
 });

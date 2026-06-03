@@ -3,7 +3,11 @@
 
 import { writable } from 'svelte/store';
 import type { Process } from '$lib/apis/processes';
-import type { TaskItem, TaskStatus } from '$lib/utils/tasks';
+import { applyChatUpdateToTasks, type ChatLike, type TaskItem, type TaskStatus } from '$lib/utils/tasks';
+
+export function applyChatUpdateToAllTasks(chat: ChatLike) {
+	allTasks.update((tasks) => applyChatUpdateToTasks(tasks, chat));
+}
 
 export function applyAdoptedProcessToTasks(tasks: TaskItem[], process: Process, chatId?: string): TaskItem[] {
 	return tasks.map((task) => {

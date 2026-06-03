@@ -132,14 +132,18 @@
 	import AppSidebar from '$lib/components/app/AppSidebar.svelte';
 	import Spinner from '$lib/components/common/Spinner.svelte';
 	import { getUserSettings } from '$lib/apis/users';
-	import { activeChatIdSetFromRuns, applyActiveChatEvent } from '$lib/utils/activeRuns';
 	import {
-		saveInflightSnapshot,
-		loadInflightSnapshot,
-		clearInflightSnapshot
-	} from '$lib/utils/inflightPersistence';
+		activeChatIdSetFromRuns,
+		applyActiveChatEvent,
+		clearActiveChatOnDurableFinal
+	} from '$lib/utils/activeRuns';
+	import { saveInflightSnapshot, loadInflightSnapshot } from '$lib/utils/inflightPersistence';
 	import { snapshotUpdateFromChatCompletionEvent } from '$lib/utils/inflightSnapshotEvents';
 	import { ingestChatRuntimeSocketEvent } from '$lib/utils/chatRuntimeSocketIngestion';
+	import {
+		streamContinuityTrace,
+		exposeStreamContinuityTraceForDebug
+	} from '$lib/utils/streamContinuityTrace';
 	import dayjs from 'dayjs';
 	const unregisterServiceWorkers = async () => {
 		if ('serviceWorker' in navigator) {
@@ -200,6 +204,35 @@
 		}
 	};
 
+	// Stale-TTL backstop for the active indicator. If a chat:active=false arrives
+	// while durable final is unresolved AND no mounted chat ever acknowledges the
+	// durable final (e.g. the chat is unmounted on another device/tab), the
+	// spinner must not hang forever. After this window we force-resolve: drop the
+	// runtime projection and the active indicator, recording a stale-ttl marker.
+	const DURABLE_FINAL_STALE_TTL_MS = 30_000;
+	const activeIndicatorStaleTimers = new Map();
+	/** @param {string} chatId */
+	const cancelActiveIndicatorStaleTtl = (chatId) => {
+		const timer = activeIndicatorStaleTimers.get(chatId);
+		if (timer) {
+			clearTimeout(timer);
+			activeIndicatorStaleTimers.delete(chatId);
+		}
+	};
+	/** @param {string} chatId */
+	const scheduleActiveIndicatorStaleTtl = (chatId) => {
+		if (!chatId || activeIndicatorStaleTimers.has(chatId)) return;
+		const timer = setTimeout(() => {
+			activeIndicatorStaleTimers.delete(chatId);
+			// If durable final already resolved this chat, do nothing.
+			if (!chatRuntimeStore.isAwaitingDurableFinal(chatId)) return;
+			chatRuntimeStore.clearChat(chatId);
+			activeChatIds.update((ids) => clearActiveChatOnDurableFinal(ids, chatId));
+			streamContinuityTrace.record(chatId, 'durableFinal:stale-ttl');
+		}, DURABLE_FINAL_STALE_TTL_MS);
+		activeIndicatorStaleTimers.set(chatId, timer);
+	};
+
 	const persistInflightSnapshotFromEvent = (event) => {
 		if (!event?.chat_id || event.chat_id.startsWith('local:')) return;
 		const update = snapshotUpdateFromChatCompletionEvent(
@@ -208,9 +241,23 @@
 		);
 		if (update.kind === 'save') {
 			saveInflightSnapshot(update.snapshot);
+			streamContinuityTrace.record(event.chat_id, 'snapshot:save', {
+				message_id: update.snapshot.message_id,
+				output_count: update.snapshot.output?.length ?? 0
+			});
 		} else if (update.kind === 'complete') {
+			// Keep the settled snapshot as a paint hint. It is NOT cleared on a
+			// fixed 10s timer anymore — clearing waits for durable final (the
+			// mounted chat's DB save acknowledgement) or the stale TTL
+			// (pruneStaleSnapshots). This prevents a refresh in the gap between
+			// completion and DB-settle from losing the final content.
 			saveInflightSnapshot(update.snapshot);
-			setTimeout(() => clearInflightSnapshot(event.chat_id), 10_000);
+			streamContinuityTrace.record(event.chat_id, 'snapshot:complete', {
+				message_id: update.snapshot.message_id
+			});
+			streamContinuityTrace.record(event.chat_id, 'durableFinal:pending', {
+				message_id: update.snapshot.message_id
+			});
 		}
 	};
 
@@ -332,8 +379,22 @@
 	};
 
 	const chatEventHandler = async (event, cb) => {
+		if (event?.chat_id) {
+			streamContinuityTrace.record(event.chat_id, 'layout:socket:event', {
+				message_id: event.message_id,
+				source: event?.data?.type ?? undefined
+			});
+		}
 		ingestChatRuntimeSocketEvent(event, {
-			applyEvent: (socketEvent) => chatRuntimeStore.applyEvent(socketEvent),
+			applyEvent: (socketEvent) => {
+				chatRuntimeStore.applyEvent(socketEvent);
+				const runtimeEvent = /** @type {{ chat_id?: string; message_id?: string }} */ (socketEvent ?? {});
+				if (runtimeEvent.chat_id) {
+					streamContinuityTrace.record(runtimeEvent.chat_id, 'runtime:apply', {
+						message_id: runtimeEvent.message_id
+					});
+				}
+			},
 			persistInflightSnapshotFromEvent
 		});
 
@@ -368,7 +429,23 @@
 		// (`main.py`) and the Hermes-first chat stream wrapper (`routers/openai.py`).
 		if (type === 'chat:active' && event.chat_id) {
 			const isActive = !!data?.active;
-			activeChatIds.update((ids) => applyActiveChatEvent(ids, event.chat_id, isActive));
+			if (isActive) {
+				cancelActiveIndicatorStaleTtl(event.chat_id);
+			}
+			// Do not flip the indicator to completed purely because chat:active=false
+			// arrived: if the stream has ended but durable final is not yet
+			// acknowledged, keep the spinner until durable final (the chat's DB save)
+			// or a stale TTL resolves it. Without this, the indicator can blink off
+			// while finalization is still in flight.
+			const awaitingDurableFinal =
+				!isActive && chatRuntimeStore.isAwaitingDurableFinal(event.chat_id);
+			activeChatIds.update((ids) =>
+				applyActiveChatEvent(ids, event.chat_id, isActive, { awaitingDurableFinal })
+			);
+			if (awaitingDurableFinal) {
+				streamContinuityTrace.record(event.chat_id, 'durableFinal:pending');
+				scheduleActiveIndicatorStaleTtl(event.chat_id);
+			}
 			return;
 		}
 
@@ -589,6 +666,9 @@
 		}
 
 		window.addEventListener('message', windowMessageEventHandler);
+
+		// Expose the stream-continuity RCA probe for manual smoke (dev only).
+		exposeStreamContinuityTraceForDebug();
 
 		let touchstartY = 0;
 
