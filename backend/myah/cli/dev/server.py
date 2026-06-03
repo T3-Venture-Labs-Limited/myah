@@ -387,6 +387,8 @@ def _start_frontend_impl(worktree: Path) -> int:
     # and leaves the browser stuck on the splash screen.
     env['NODE_ENV'] = 'development'
     env['ENV'] = 'dev'
+    if env.get('MYAH_DEPLOYMENT_MODE') and not env.get('PUBLIC_DEPLOYMENT_MODE'):
+        env['PUBLIC_DEPLOYMENT_MODE'] = env['MYAH_DEPLOYMENT_MODE']
 
     try:
         frontend_port = int(env['FRONTEND_PORT'])

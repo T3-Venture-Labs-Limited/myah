@@ -36,6 +36,7 @@
 	export let readOnly = false;
 	export let editCodeBlock = true;
 	export let topPadding = false;
+	export let linkedProcess = null;
 </script>
 
 <div
@@ -86,6 +87,7 @@
 				{readOnly}
 				{editCodeBlock}
 				{topPadding}
+				{linkedProcess}
 				on:ui-interaction
 			/>
 		{/if}

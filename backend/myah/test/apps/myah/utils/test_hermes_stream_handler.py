@@ -82,6 +82,43 @@ def _make_ctx(*, with_event_caller: bool = True) -> dict:
     return ctx
 
 
+class _FakeSentryScope:
+    def __init__(self, sentry):
+        self.sentry = sentry
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def set_tag(self, key, value):
+        self.sentry.tags[key] = value
+
+    def set_context(self, key, value):
+        self.sentry.contexts[key] = value
+
+
+class _FakeSentry:
+    def __init__(self):
+        self.tags = {}
+        self.contexts = {}
+        self.messages = []
+        self.user = None
+
+    def set_tag(self, key, value):
+        self.tags[key] = value
+
+    def set_user(self, user):
+        self.user = user
+
+    def push_scope(self):
+        return _FakeSentryScope(self)
+
+    def capture_message(self, message, level=None):
+        self.messages.append({'message': message, 'level': level})
+
+
 def test_register_active_run_tracks_stream_before_first_event():
     from myah.utils import hermes_stream_handler as h
 
@@ -178,6 +215,101 @@ async def test_background_path_emits_socket_events():
     assert any(e['data'].get('done') is True for e in completion_events), (
         'No chat:completion event with done=True — browser will not know the response is finished.'
     )
+
+
+@pytest.mark.asyncio
+async def test_run_completed_without_visible_assistant_output_reports_sentry_error():
+    """A successful run with no message.delta is the hosted empty-output regression signal."""
+    sse_lines = _make_sse_lines(
+        {
+            'event': 'run.completed',
+            'stream_id': 'stream-empty-output',
+            'model': 'deepseek/deepseek-v4-flash',
+            'provider': 'openrouter',
+        },
+    )
+    response = _make_upstream_response(sse_lines)
+    ctx = _make_ctx(with_event_caller=True)
+    ctx['form_data'] = {
+        'model': 'openrouter::deepseek/deepseek-v4-flash',
+        'model_item': {'tags': [{'name': 'openrouter'}]},
+    }
+    fake_sentry = _FakeSentry()
+
+    with (
+        patch('myah.utils.hermes_stream_handler.Chats'),
+        patch('myah.utils.hermes_stream_handler.background_tasks_handler', new=AsyncMock()),
+        patch('myah.utils.hermes_stream_handler._SENTRY_AVAILABLE', True),
+        patch('myah.utils.hermes_stream_handler.sentry_sdk', fake_sentry),
+    ):
+        from myah.utils.hermes_stream_handler import handle_hermes_stream
+
+        await handle_hermes_stream(response, ctx)
+
+    assert fake_sentry.messages == [
+        {
+            'message': 'Myah Hermes run completed without visible assistant output',
+            'level': 'error',
+        }
+    ]
+    assert fake_sentry.tags['myah.chat_anomaly'] == 'empty_assistant_output'
+    sentry_context = fake_sentry.contexts['myah_empty_assistant_output']
+    assert sentry_context['requested_model'] == 'openrouter::deepseek/deepseek-v4-flash'
+    assert sentry_context['requested_provider'] == 'openrouter'
+    assert sentry_context['model_used'] == 'deepseek/deepseek-v4-flash'
+    assert sentry_context['provider_used'] == 'openrouter'
+    assert sentry_context['event_counts']['run.completed'] == 1
+
+
+@pytest.mark.asyncio
+async def test_run_completed_with_only_tool_output_reports_missing_visible_message():
+    """Tool-only completion is still an empty visible assistant-message signal."""
+    sse_lines = _make_sse_lines(
+        {
+            'event': 'tool.started',
+            'run_id': 'stream-tool-only',
+            'tool': 'search_files',
+            'call_id': 'call_tool_only',
+            'args': {'pattern': 'nothing-visible'},
+        },
+        {
+            'event': 'tool.completed',
+            'run_id': 'stream-tool-only',
+            'tool': 'search_files',
+            'call_id': 'call_tool_only',
+            'result': 'tool result only',
+        },
+        {
+            'event': 'run.completed',
+            'run_id': 'stream-tool-only',
+            'model': 'deepseek/deepseek-v4-flash',
+            'provider': 'openrouter',
+        },
+    )
+    response = _make_upstream_response(sse_lines)
+    ctx = _make_ctx(with_event_caller=True)
+    fake_sentry = _FakeSentry()
+
+    with (
+        patch('myah.utils.hermes_stream_handler.Chats'),
+        patch('myah.utils.hermes_stream_handler.background_tasks_handler', new=AsyncMock()),
+        patch('myah.utils.hermes_stream_handler._SENTRY_AVAILABLE', True),
+        patch('myah.utils.hermes_stream_handler.sentry_sdk', fake_sentry),
+    ):
+        from myah.utils.hermes_stream_handler import handle_hermes_stream
+
+        await handle_hermes_stream(response, ctx)
+
+    assert fake_sentry.messages == [
+        {
+            'message': 'Myah Hermes run completed without visible assistant output',
+            'level': 'error',
+        }
+    ]
+    sentry_context = fake_sentry.contexts['myah_empty_assistant_output']
+    assert sentry_context['event_counts']['tool.completed'] == 1
+    assert 'function_call' in sentry_context['output_types']
+    assert 'function_call_output' in sentry_context['output_types']
 
 
 @pytest.mark.asyncio

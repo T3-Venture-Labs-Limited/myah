@@ -7,6 +7,7 @@
 
 	export let item: SecretInputItem;
 	export let messageId: string = '';
+	export let messageDone: boolean = false;
 	export let localStatus: 'pending' | 'stored' | 'timeout' | 'cancelled' = item.status;
 
 	const dispatch = createEventDispatcher<{
@@ -16,6 +17,7 @@
 	let inputValue = '';
 	let loading = false;
 	let error = '';
+	$: displayStatus = messageDone && localStatus === 'pending' ? 'timeout' : localStatus;
 
 	async function handleSubmit() {
 		if (!inputValue.trim()) return;
@@ -98,7 +100,7 @@
 
 	<!-- Body -->
 	<div class="px-4 py-3">
-		{#if localStatus === 'pending'}
+		{#if displayStatus === 'pending'}
 			<div class="space-y-3">
 				<div>
 					<label
@@ -173,17 +175,17 @@
 					<p class="text-xs text-red-500">{error}</p>
 				{/if}
 			</div>
-		{:else if localStatus === 'stored'}
+		{:else if displayStatus === 'stored'}
 			<p class="text-gray-500 dark:text-gray-400">Secret stored securely.</p>
-		{:else if localStatus === 'timeout'}
+		{:else if displayStatus === 'timeout'}
 			<p class="text-gray-400 dark:text-gray-500">Setup timed out — skill may not work.</p>
-		{:else if localStatus === 'cancelled'}
+		{:else if displayStatus === 'cancelled'}
 			<p class="text-gray-400 dark:text-gray-500">Secret entry was cancelled.</p>
 		{/if}
 	</div>
 
 	<!-- Pulsing "Awaiting input" indicator -->
-	{#if localStatus === 'pending'}
+	{#if displayStatus === 'pending'}
 		<div class="px-4 pb-3 flex items-center gap-1.5 text-xs text-blue-500 dark:text-blue-400">
 			<span class="relative flex h-2 w-2 flex-shrink-0">
 				<span

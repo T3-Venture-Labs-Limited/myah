@@ -654,12 +654,21 @@ def test_bearer_keys_are_not_in_non_bearer_copy_set() -> None:
 _FAKE_PORTS_JSON = '{"backend_port": 8189, "frontend_port": 5234}'
 
 
-def _mock_e2e_ports(mocker, backend_port: int = 8189, frontend_port: int = 5234):
-    """Helper: patch run() to return a ShellResult with a JSON ports payload."""
+def _mock_e2e_ports(
+    mocker,
+    backend_port: int = 8189,
+    frontend_port: int = 5234,
+    tailscale_stdout: str = '',
+):
+    """Patch run() for tailscale detection plus the JSON ports payload."""
     payload = json.dumps({'backend_port': backend_port, 'frontend_port': frontend_port})
-    mock_run = mocker.patch('myah.lib.cli.worktree_setup.run')
-    mock_run.return_value = ShellResult(returncode=0, stdout=payload, stderr='')
-    return mock_run
+
+    def _fake_run(cmd, **kwargs):
+        if cmd == ['tailscale', 'ip', '-4']:
+            return ShellResult(returncode=0 if tailscale_stdout else 1, stdout=tailscale_stdout, stderr='')
+        return ShellResult(returncode=0, stdout=payload, stderr='')
+
+    return mocker.patch('myah.lib.cli.worktree_setup.run', side_effect=_fake_run)
 
 
 def test_write_worktree_env_invokes_e2e_ports_via_subprocess(tmp_path: Path, mocker) -> None:
@@ -672,8 +681,12 @@ def test_write_worktree_env_invokes_e2e_ports_via_subprocess(tmp_path: Path, moc
 
     write_worktree_env(worktree, branch='feat/example', main_repo_root=main_root)
 
-    assert mock_run.call_count == 1
-    call_args, call_kwargs = mock_run.call_args
+    e2e_calls = [
+        call for call in mock_run.call_args_list
+        if call.args and 'e2e_ports.py' in str(call.args[0][1])
+    ]
+    assert len(e2e_calls) == 1
+    call_args, call_kwargs = e2e_calls[0]
     cmd = call_args[0]
     assert cmd[0] == str(main_root / 'platform-oss' / '.venv' / 'bin' / 'python')
     assert cmd[1] == str(main_root / 'platform-oss' / 'scripts' / 'e2e_ports.py')
@@ -757,7 +770,26 @@ def test_write_worktree_env_file_contains_cors_allow_origin(tmp_path: Path, mock
     write_worktree_env(worktree, branch='feat/x', main_repo_root=main_root)
 
     content = (worktree / '.worktree-env').read_text(encoding='utf-8')
-    assert "export CORS_ALLOW_ORIGIN='http://localhost:5234;http://localhost:5173'" in content
+    assert "export CORS_ALLOW_ORIGIN='http://localhost:5234;http://127.0.0.1:5234;http://localhost:5173'" in content
+
+
+def test_write_worktree_env_file_includes_tailscale_origin_when_available(tmp_path: Path, mocker) -> None:
+    """Mac-over-Tailscale browser QA must be accepted by Socket.IO origin checks."""
+    main_root = tmp_path / 'main'
+    main_root.mkdir()
+    worktree = tmp_path / 'worktree'
+    worktree.mkdir()
+    _mock_e2e_ports(
+        mocker,
+        backend_port=8189,
+        frontend_port=5234,
+        tailscale_stdout='100.102.65.22\nnot-an-ip\n',
+    )
+
+    write_worktree_env(worktree, branch='feat/x', main_repo_root=main_root)
+
+    content = (worktree / '.worktree-env').read_text(encoding='utf-8')
+    assert 'http://100.102.65.22:5234' in content
 
 
 def test_write_worktree_env_returns_ports_dict(tmp_path: Path, mocker) -> None:
@@ -1117,6 +1149,7 @@ def test_write_worktree_platform_env_oss_mode_writes_deployment_mode_and_auth_fa
     )
     content = (tmp_path / 'platform-oss' / '.env').read_text(encoding='utf-8')
     assert 'MYAH_DEPLOYMENT_MODE=oss' in content
+    assert 'PUBLIC_DEPLOYMENT_MODE=oss' in content
     assert 'MYAH_AUTH=false' in content
 
 

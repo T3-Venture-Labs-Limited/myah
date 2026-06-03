@@ -284,8 +284,15 @@ async def _patch_agent_config(
     so we fetch the current config, deep-merge the partial, and PUT the
     full body. Returns the raw ``web_call`` result dict so callers can
     inspect ``status`` for fallback behavior (e.g. seed_aux_defaults).
+
+    Use the dashboard-native ``/api/config`` endpoint rather than the
+    ``myah-admin`` plugin namespace. In OSS worktree mode the dashboard's
+    native endpoints authenticate with ``HERMES_WEB_SESSION_TOKEN`` while
+    ``/api/plugins/myah-admin/config`` can return 401, which breaks the
+    model selector's fire-and-forget sync and leaves chat running with a
+    stale Hermes model config.
     """
-    current = await web_call(user, 'GET', '/api/plugins/myah-admin/config', timeout=timeout)
+    current = await web_call(user, 'GET', '/api/config', timeout=timeout)
     if current['status'] >= 400:
         return current
 
@@ -294,7 +301,7 @@ async def _patch_agent_config(
     return await web_call(
         user,
         'PUT',
-        '/api/plugins/myah-admin/config',
+        '/api/config',
         json_body={'config': merged},
         timeout=timeout,
     )
@@ -303,7 +310,7 @@ async def _patch_agent_config(
 @router.get('/config')
 async def get_agent_config(user: UserModel = Depends(get_verified_user)):
     _ensure_feature_enabled()
-    result = await web_call(user, 'GET', '/api/plugins/myah-admin/config')
+    result = await web_call(user, 'GET', '/api/config')
     _raise_for_upstream_error(result)
     return result['body']
 

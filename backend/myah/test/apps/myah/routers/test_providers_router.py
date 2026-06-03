@@ -178,6 +178,8 @@ async def test_poll_device_auth_normalises_approved_to_complete():
         aux_calls.append((method, path, kwargs.get('json_body')))
         if method == 'GET' and 'oauth/openai-codex/poll' in path:
             return dict(poll_response)
+        if method == 'GET' and path == '/api/plugins/myah-admin/config':
+            return {'plugins': {'enabled': ['myah-platform']}, 'model': {'default': 'old', 'provider': 'old'}}
         if method == 'PUT' and path == '/api/plugins/myah-admin/config':
             return {}
         raise AssertionError(f'unexpected web_call_or_raise: {method} {path}')
@@ -198,14 +200,23 @@ async def test_poll_device_auth_normalises_approved_to_complete():
     assert result['status'] == 'complete'
     assert result['default_model'] == 'openai/gpt-5.3-codex'
 
-    # Hermes config was updated with the new provider + model. Dict-form
-    # model: payload (PR 1c Appendix A) — never the legacy scalar form.
+    # Hermes config was updated by GET-merging current config and PUTing the
+    # wrapped full config body expected by the dashboard.
     put_calls = [c for c in aux_calls if c[0] == 'PUT']
     assert put_calls == [
         (
             'PUT',
             '/api/plugins/myah-admin/config',
-            {'model': {'default': 'openai/gpt-5.3-codex', 'provider': 'openai-codex'}},
+            {
+                'config': {
+                    'plugins': {'enabled': ['myah-platform']},
+                    'platforms': {'myah': {'enabled': True}},
+                    'model': {
+                        'default': 'openai/gpt-5.3-codex',
+                        'provider': 'openai-codex',
+                    },
+                }
+            },
         ),
     ]
 
@@ -279,10 +290,12 @@ async def test_poll_device_auth_propagates_terminal_error_states():
         assert result['status'] == terminal_status, f'mangled {terminal_status}'
 
 
-# ── Appendix Task A: connect_credential must send dict-form model: ────────────
-# Regression tests for the fix that changed PUT /api/config body from
-# {model.provider: '...', model: '<string>'} (scalar — clobbers dict sub-keys)
-# to {model: {name: '...', provider: '...'}} (dict-form — merges correctly).
+# ── Appendix Task A: provider config writes preserve existing non-model config. ─
+# Regression tests for the safe Hermes admin config contract: fetch the current
+# config, replace the provider-bound model block with catalog-derived fields,
+# then PUT the full config wrapped as {config: ...}. This avoids 422s from bare
+# fragments, preserves unrelated config sections, and prevents stale base_url
+# values from a previous provider from surviving a provider switch.
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -305,13 +318,8 @@ def _build_catalog_entry(provider_id, model_provider_value=None, base_url=None):
 
 
 @pytest.mark.asyncio
-async def test_connect_credential_patches_dict_form():
-    """connect_credential must send dict-form model: with name and provider keys.
-
-    The old bug sent 'model': '<string>' (scalar), which set_config_value wrote
-    as a bare string to config.yaml — destroying the model.provider sub-key
-    sent in the same PATCH. The fix sends 'model': {name, provider} instead.
-    """
+async def test_connect_credential_patches_agent_config_with_wrapped_merge():
+    """connect_credential must GET current config and PUT a wrapped merged config."""
     from myah.routers import providers as mod
 
     user = MagicMock()
@@ -321,7 +329,11 @@ async def test_connect_credential_patches_dict_form():
 
     async def mock_aux(user_arg, method, path, json_body=None, **kwargs):
         captured_calls.append({'method': method, 'path': path, 'json_body': json_body})
-        return {'entry_id': 'test-entry-id', 'key_last_four': '1234'}
+        if method == 'POST':
+            return {'entry_id': 'test-entry-id', 'key_last_four': '1234'}
+        if method == 'GET' and path == '/api/plugins/myah-admin/config':
+            return {'plugins': {'enabled': ['myah-platform']}, 'model': {'default': 'old'}}
+        return {'ok': True}
 
     entry = _build_catalog_entry('openrouter')
 
@@ -336,22 +348,28 @@ async def test_connect_credential_patches_dict_form():
         body.label = 'primary'
         await mod.connect_credential(provider_id='openrouter', body=body, user=user)
 
-    # Find the PUT call
     patch_calls = [c for c in captured_calls if c['method'] == 'PUT']
-    assert patch_calls, 'No PUT call to /api/config'
-    patch_body = patch_calls[0]['json_body']
-
-    # model: must be a dict, not a scalar string
-    assert isinstance(patch_body.get('model'), dict), f'model: must be dict-form. Got: {patch_body.get("model")!r}'
-    assert 'default' in patch_body['model'], "model dict must have 'default' key (not 'name')"
-    assert 'provider' in patch_body['model'], "model dict must have 'provider' key"
-    assert patch_body['model']['default'] == 'openrouter-default-model'
-    assert patch_body['model']['provider'] == 'openrouter'
+    assert patch_calls == [
+        {
+            'method': 'PUT',
+            'path': '/api/plugins/myah-admin/config',
+            'json_body': {
+                'config': {
+                    'plugins': {'enabled': ['myah-platform']},
+                    'platforms': {'myah': {'enabled': True}},
+                    'model': {
+                        'default': 'openrouter-default-model',
+                        'provider': 'openrouter',
+                    },
+                }
+            },
+        }
+    ]
 
 
 @pytest.mark.asyncio
-async def test_connect_credential_preserves_base_url_when_catalog_specifies():
-    """When catalog custom_provider.base_url is present, include it in model dict."""
+async def test_connect_credential_preserves_custom_provider_base_url_in_wrapped_merge():
+    """custom_provider.model_provider_value/base_url are preserved in the merged model block."""
     from myah.routers import providers as mod
 
     user = MagicMock()
@@ -361,7 +379,11 @@ async def test_connect_credential_preserves_base_url_when_catalog_specifies():
 
     async def mock_aux(user_arg, method, path, json_body=None, **kwargs):
         captured_calls.append({'method': method, 'path': path, 'json_body': json_body})
-        return {'entry_id': 'test-entry-id', 'key_last_four': '1234'}
+        if method == 'POST':
+            return {'entry_id': 'test-entry-id', 'key_last_four': '1234'}
+        if method == 'GET' and path == '/api/plugins/myah-admin/config':
+            return {'plugins': {'enabled': ['myah-platform']}}
+        return {'ok': True}
 
     entry = _build_catalog_entry(
         'openai',
@@ -382,17 +404,18 @@ async def test_connect_credential_preserves_base_url_when_catalog_specifies():
 
     patch_calls = [c for c in captured_calls if c['method'] == 'PUT']
     assert patch_calls
-    patch_body = patch_calls[0]['json_body']
-    assert patch_body['model']['base_url'] == 'https://api.openai.com/v1'
-    assert patch_body['model']['provider'] == 'custom:openai-direct'
+    assert patch_calls[0]['path'] == '/api/plugins/myah-admin/config'
+    assert patch_calls[0]['json_body']['config']['model'] == {
+        'default': 'openai-default-model',
+        'provider': 'custom:openai-direct',
+        'base_url': 'https://api.openai.com/v1',
+    }
+    assert patch_calls[0]['json_body']['config']['plugins'] == {'enabled': ['myah-platform']}
 
 
 @pytest.mark.asyncio
-async def test_connect_credential_omits_base_url_when_catalog_does_not_specify():
-    """When catalog has no custom_provider.base_url, omit base_url from model dict.
-
-    Don't write base_url: None — that would persist null to config.yaml.
-    """
+async def test_connect_credential_omits_stale_base_url_when_catalog_does_not_specify():
+    """Do not retain a previous provider's base_url when the new catalog lacks one."""
     from myah.routers import providers as mod
 
     user = MagicMock()
@@ -402,9 +425,19 @@ async def test_connect_credential_omits_base_url_when_catalog_does_not_specify()
 
     async def mock_aux(user_arg, method, path, json_body=None, **kwargs):
         captured_calls.append({'method': method, 'path': path, 'json_body': json_body})
-        return {'entry_id': 'test-entry-id', 'key_last_four': '1234'}
+        if method == 'POST':
+            return {'entry_id': 'test-entry-id', 'key_last_four': '1234'}
+        if method == 'GET' and path == '/api/plugins/myah-admin/config':
+            return {
+                'plugins': {'enabled': ['myah-platform']},
+                'model': {
+                    'default': 'deepseek/deepseek-v4-flash',
+                    'provider': 'openrouter',
+                    'base_url': 'https://openrouter.ai/api/v1',
+                },
+            }
+        return {'ok': True}
 
-    # No base_url in catalog entry
     entry = _build_catalog_entry('anthropic')
 
     with (
@@ -419,12 +452,12 @@ async def test_connect_credential_omits_base_url_when_catalog_does_not_specify()
         await mod.connect_credential(provider_id='anthropic', body=body, user=user)
 
     patch_calls = [c for c in captured_calls if c['method'] == 'PUT']
-    assert patch_calls
-    patch_body = patch_calls[0]['json_body']
-    # base_url key must be absent, not set to None
-    assert 'base_url' not in patch_body['model'], (
-        "base_url must be omitted when catalog has no base_url — don't write null to config.yaml"
-    )
+    model_patch = patch_calls[0]['json_body']['config']['model']
+    assert model_patch == {
+        'default': 'anthropic-default-model',
+        'provider': 'anthropic',
+    }
+    assert 'base_url' not in model_patch
 
 
 @pytest.mark.asyncio
@@ -472,11 +505,8 @@ async def test_connect_credential_uses_extended_timeout():
 
 
 @pytest.mark.asyncio
-async def test_connect_credential_writes_model_default_not_name():
-    """Hermes' canonical model config key is `model.default`. The platform
-    must send 'default' not 'name' to /api/config so cron schedulers can
-    read the configured model.
-    """
+async def test_connect_credential_wraps_full_config_payload():
+    """Credential connect wraps the merged config for the dashboard full-config endpoint."""
     from myah.routers import providers as mod
 
     user = MagicMock()
@@ -494,6 +524,8 @@ async def test_connect_credential_writes_model_default_not_name():
         )
         if path.endswith('/credential'):
             return {'entry_id': 'fake-entry-id'}
+        if method == 'GET' and path == '/api/plugins/myah-admin/config':
+            return {'plugins': {'enabled': ['myah-platform']}}
         return {'ok': True}
 
     fake_catalog = {
@@ -512,25 +544,32 @@ async def test_connect_credential_writes_model_default_not_name():
                 with patch.object(mod.Users, 'get_user_by_id', return_value=None):
                     await mod.connect_credential(provider_id='openrouter', body=body, user=user)
 
-    config_calls = [c for c in captured_calls if c['path'] == '/api/plugins/myah-admin/config']
-    assert len(config_calls) == 1, f'Expected exactly one /api/plugins/myah-admin/config call, got {len(config_calls)}: {captured_calls}'
-    model_patch = config_calls[0]['json_body']['model']
-    assert 'default' in model_patch, (
-        f"Expected 'default' key in model patch, got keys: {list(model_patch.keys())}. "
-        f'Hermes reads model.default; model.name is a normalizer fallback only.'
+    put_calls = [
+        c
+        for c in captured_calls
+        if c['method'] == 'PUT' and c['path'] == '/api/plugins/myah-admin/config'
+    ]
+    assert len(put_calls) == 1, (
+        'Expected exactly one wrapped /api/plugins/myah-admin/config PUT, '
+        f'got {len(put_calls)}: {captured_calls}'
     )
-    assert 'name' not in model_patch, (
-        f"Expected 'name' key NOT in model patch, but found {model_patch}. "
-        f'Sending model.name causes scheduler to read empty model.'
-    )
-    assert model_patch['default'] == 'meta-llama/llama-4'
-    assert model_patch['provider'] == 'openrouter'
+    assert put_calls[0]['json_body'] == {
+        'config': {
+            'plugins': {'enabled': ['myah-platform']},
+            'platforms': {'myah': {'enabled': True}},
+            'model': {'default': 'meta-llama/llama-4', 'provider': 'openrouter'},
+        }
+    }
 
 
 @pytest.mark.asyncio
-async def test_set_active_provider_writes_model_default_not_name():
-    """set_active_provider (the 'switch provider' path) ALSO uses
-    'default' not 'name'."""
+async def test_set_active_provider_wraps_merged_full_config_payload():
+    """set_active_provider must PUT wrapped merged config, not a bare model fragment.
+
+    The full config endpoint expects ``{'config': ...}``; sending
+    ``{'model': ...}`` 422s in the live dashboard. We also preserve unrelated
+    config sections by GET-merging before PUT.
+    """
     from myah.routers import providers as mod
 
     user = MagicMock()
@@ -546,6 +585,8 @@ async def test_set_active_provider_writes_model_default_not_name():
                 'json_body': kwargs.get('json_body'),
             }
         )
+        if method == 'GET' and path == '/api/plugins/myah-admin/config':
+            return {'plugins': {'enabled': ['myah-platform']}}
         return {'ok': True}
 
     fake_catalog = {
@@ -563,8 +604,75 @@ async def test_set_active_provider_writes_model_default_not_name():
             with patch.object(mod.Users, 'update_user_by_id', MagicMock()):
                 await mod.set_active_provider(body=body, user=user)
 
-    config_calls = [c for c in captured_calls if c['path'] == '/api/plugins/myah-admin/config']
-    assert len(config_calls) == 1
-    model_patch = config_calls[0]['json_body']['model']
-    assert 'default' in model_patch
-    assert 'name' not in model_patch
+    put_calls = [
+        c
+        for c in captured_calls
+        if c['method'] == 'PUT' and c['path'] == '/api/plugins/myah-admin/config'
+    ]
+    assert len(put_calls) == 1
+    assert put_calls[0]['json_body'] == {
+        'config': {
+            'plugins': {'enabled': ['myah-platform']},
+            'platforms': {'myah': {'enabled': True}},
+            'model': {'default': 'meta-llama/llama-4', 'provider': 'openrouter'},
+        }
+    }
+
+
+@pytest.mark.asyncio
+async def test_set_active_provider_preserves_inference_base_url_in_model_config():
+    """Built-in inference providers such as OpenRouter expose inference_base_url.
+
+    Active-provider sync must copy that into model.base_url; otherwise the
+    platform reports the selected provider/model while the agent container keeps
+    an incomplete model block.
+    """
+    from myah.routers import providers as mod
+
+    user = MagicMock()
+    user.id = 'test-user'
+
+    captured_calls: list[dict] = []
+
+    async def mock_web_call(user, method, path, **kwargs):
+        captured_calls.append(
+            {
+                'method': method,
+                'path': path,
+                'json_body': kwargs.get('json_body'),
+            }
+        )
+        if method == 'GET' and path == '/api/plugins/myah-admin/config':
+            return {'plugins': {'enabled': ['myah-platform']}}
+        return {'ok': True}
+
+    fake_catalog = {
+        'openrouter': {
+            'v1_visible': True,
+            'default_model': 'deepseek/deepseek-v4-flash',
+            'custom_provider': {},
+            'inference_base_url': 'https://openrouter.ai/api/v1',
+        }
+    }
+
+    body = mod.ActiveProviderBody(
+        provider_id='openrouter',
+        model_id='deepseek/deepseek-v4-flash',
+    )
+
+    with patch.object(mod, '_load_catalog', AsyncMock(return_value=fake_catalog)):
+        with patch.object(mod, 'web_call_or_raise', AsyncMock(side_effect=mock_web_call)):
+            with patch.object(mod.Users, 'update_user_by_id', MagicMock()):
+                await mod.set_active_provider(body=body, user=user)
+
+    put_calls = [
+        c
+        for c in captured_calls
+        if c['method'] == 'PUT' and c['path'] == '/api/plugins/myah-admin/config'
+    ]
+    assert len(put_calls) == 1
+    assert put_calls[0]['json_body']['config']['model'] == {
+        'default': 'deepseek/deepseek-v4-flash',
+        'provider': 'openrouter',
+        'base_url': 'https://openrouter.ai/api/v1',
+    }

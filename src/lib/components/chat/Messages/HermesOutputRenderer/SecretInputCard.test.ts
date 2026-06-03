@@ -87,4 +87,18 @@ describe('SecretInputCard', () => {
 		expect(screen.getByText('Secret entry was cancelled.')).toBeInTheDocument();
 		expect(screen.queryByLabelText('OPENROUTER_API_KEY')).not.toBeInTheDocument();
 	});
+
+	test('renders historical pending secret requests as timed out when the message is done', () => {
+		render(SecretInputCard, {
+			props: {
+				item: makeSecretItem({ status: 'pending' }),
+				messageDone: true
+			}
+		});
+
+		expect(screen.getByText(/Setup timed out/i)).toBeInTheDocument();
+		expect(screen.queryByLabelText('OPENROUTER_API_KEY')).not.toBeInTheDocument();
+		expect(screen.queryByText(/Awaiting input/i)).not.toBeInTheDocument();
+	});
+
 });

@@ -86,6 +86,87 @@ def _invalidate_catalog_cache() -> None:
     _catalog_cache = None
 
 
+def _ensure_myah_gateway_config(config: dict) -> dict:
+    """Ensure provider config writes do not disable the Myah gateway surface.
+
+    The dashboard config endpoint can omit non-dashboard sections from its
+    response. A full-config PUT built only from that body can then drop the
+    plugin/platform entries needed for /myah/*, leaving the agent gateway alive
+    but the Myah adapter unmounted. Preserve existing entries and add the
+    minimum required Myah ones when absent.
+    """
+    merged = dict(config)
+
+    plugins = dict(merged.get('plugins') or {})
+    enabled = plugins.get('enabled') or []
+    if not isinstance(enabled, list):
+        enabled = [enabled]
+    if 'myah-platform' not in enabled:
+        enabled = [*enabled, 'myah-platform']
+    plugins['enabled'] = enabled
+    merged['plugins'] = plugins
+
+    platforms = dict(merged.get('platforms') or {})
+    myah_platform = dict(platforms.get('myah') or {})
+    myah_platform['enabled'] = True
+    platforms['myah'] = myah_platform
+    merged['platforms'] = platforms
+
+    return merged
+
+
+async def _patch_agent_model_config(
+    user,
+    model_patch: dict,
+    *,
+    timeout: float = 20.0,
+) -> dict:
+    """Safely patch the agent model config via GET-merge-wrapped-PUT.
+
+    The dashboard's full config endpoint expects ``{'config': <full config>}``
+    and replaces the config tree. Provider flows only know the model section,
+    so fetch current config first, replace the provider-bound model block with
+    the explicit catalog-derived patch, then PUT the wrapped merged config. This
+    avoids the live 422 from bare fragments, preserves unrelated sections such
+    as plugins/platforms/auxiliary, and prevents stale provider-specific fields
+    such as a previous provider's base_url from surviving a provider switch.
+    """
+    current = await web_call_or_raise(
+        user,
+        'GET',
+        '/api/plugins/myah-admin/config',
+        timeout=timeout,
+    )
+    merged = dict(current) if isinstance(current, dict) else {}
+    merged['model'] = dict(model_patch)
+    merged = _ensure_myah_gateway_config(merged)
+    return await web_call_or_raise(
+        user,
+        'PUT',
+        '/api/plugins/myah-admin/config',
+        json_body={'config': merged},
+        timeout=timeout,
+    )
+
+
+def _provider_model_patch(provider_id: str, entry: dict, model_id: str) -> dict:
+    """Build the Hermes ``model`` config patch for a provider catalog entry.
+
+    Hermes catalog entries have two base-url shapes in the wild:
+    custom providers expose ``custom_provider.base_url`` while built-in
+    inference providers such as OpenRouter expose ``inference_base_url``.
+    Both should flow into ``model.base_url`` when present; otherwise switching
+    a provider can silently drop the endpoint needed by direct inference paths.
+    """
+    custom_provider = entry.get('custom_provider') or {}
+    provider_value = custom_provider.get('model_provider_value') or provider_id
+    model_patch: dict = {'default': model_id, 'provider': provider_value}
+    base_url = custom_provider.get('base_url') or entry.get('inference_base_url')
+    if base_url:
+        model_patch['base_url'] = base_url
+    return model_patch
+
+
 # ---------------------------------------------------------------------------
 # Request/response models
 # ---------------------------------------------------------------------------
@@ -259,22 +340,14 @@ async def connect_credential(
         timeout=30.0,
     )
 
-    # Set the agent config to route to this provider.
-    # Write dict-form model: so set_config_value merges correctly and does
-    # not clobber the provider sub-key (Appendix A fix — previously sent a
-    # scalar 'model': default_model which overwrote the entire model: block).
-    provider_value = entry.get('custom_provider', {}).get('model_provider_value') or provider_id
+    # Set the agent config to route to this provider through a safe
+    # GET-merge-wrapped-PUT. The full endpoint replaces the config tree, so
+    # never send a bare {'model': ...} fragment.
     default_model = entry.get('default_model', '')
-    model_patch: dict = {'default': default_model, 'provider': provider_value}
-    cp_base_url = entry.get('custom_provider', {}).get('base_url')
-    if cp_base_url:
-        model_patch['base_url'] = cp_base_url
     try:
-        await web_call_or_raise(
+        await _patch_agent_model_config(
             user,
-            'PUT',
-            '/api/plugins/myah-admin/config/model',
-            json_body={'model': default_model, 'provider': provider_value},
+            _provider_model_patch(provider_id, entry, default_model),
             timeout=30.0,
         )
     except Exception as exc:
@@ -418,24 +491,15 @@ async def poll_device_auth(
         entry = catalog.get(provider_id, {})
         default_model = entry.get('default_model', '')
 
-        # Update agent config.
-        # Write dict-form model: so set_config_value merges correctly and does not
-        # clobber the provider sub-key. The previous scalar form
-        # {'model.provider': ..., 'model': default_model} caused the bare-string
-        # 'model' write to replace the entire model: block after the dotted write,
-        # losing the provider identity and breaking aux resolution. This is the
-        # OAuth counterpart to PR 1c Appendix A (API-key connect flow).
-        provider_value = entry.get('custom_provider', {}).get('model_provider_value') or provider_id
-        model_patch: dict = {'default': default_model, 'provider': provider_value}
-        cp_base_url = entry.get('custom_provider', {}).get('base_url')
-        if cp_base_url:
-            model_patch['base_url'] = cp_base_url
+        # Update agent config through a safe GET-merge-wrapped-PUT. The full
+        # endpoint expects {'config': <full config>} and replaces the tree.
+        # Use the shared catalog-entry helper so built-in inference providers
+        # such as OpenRouter preserve entry['inference_base_url'] as
+        # model.base_url, not only custom_provider.base_url.
         try:
-            await web_call_or_raise(
+            await _patch_agent_model_config(
                 user,
-                'PUT',
-                '/api/plugins/myah-admin/config/model',
-                json_body={'model': default_model, 'provider': provider_value},
+                _provider_model_patch(provider_id, entry, default_model),
             )
         except Exception as exc:
             logger.warning(f'Failed to patch config after OAuth complete: {exc}')
@@ -484,22 +548,13 @@ async def set_active_provider(
         raise HTTPException(status_code=400, detail=f'Unknown provider: {body.provider_id}')
 
     model_id = body.model_id or entry.get('default_model', '')
-    provider_value = entry.get('custom_provider', {}).get('model_provider_value') or body.provider_id
-    # Dict-form write — same rationale as the OAuth complete path above and
-    # PR 1c Appendix A for the API-key connect path. The previous scalar
-    # {'model.provider': ..., 'model': ...} clobbered the model: block on
-    # disk because set_config_value processes keys sequentially and the
-    # bare-string 'model' write replaces the whole parent.
-    model_patch: dict = {'default': model_id, 'provider': provider_value}
-    cp_base_url = entry.get('custom_provider', {}).get('base_url')
-    if cp_base_url:
-        model_patch['base_url'] = cp_base_url
-    await web_call_or_raise(
-        user,
-        'PUT',
-        '/api/plugins/myah-admin/config/model',
-        json_body={'model': model_id, 'provider': provider_value},
-    )
+    # Use a safe GET-merge-wrapped-PUT against the dashboard full-config
+    # endpoint. Sending a bare {'model': ...} fragment 422s, and the narrow
+    # /config/model endpoint currently writes provider after a scalar model
+    # write, which can clobber model.default in config.yaml. Use the shared
+    # catalog-entry helper so built-in inference providers such as OpenRouter
+    # preserve entry['inference_base_url'] as model.base_url.
+    await _patch_agent_model_config(user, _provider_model_patch(body.provider_id, entry, model_id))
 
     # Mirror the user's intent into auth.json:active_provider so cron's
     # resolve_provider("auto") chain reads the right value. Tolerates rolling

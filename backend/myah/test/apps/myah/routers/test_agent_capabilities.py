@@ -148,6 +148,40 @@ async def test_patch_toolsets_proxies_enabled_flag_via_web_call(agent_capabiliti
 
 
 @pytest.mark.asyncio
+async def test_list_toolsets_uses_hermes_native_toolsets_endpoint(agent_capabilities_mod):
+    """GET /toolsets targets Hermes-native /api/tools/toolsets.
+
+    Regression: /api/plugins/myah-admin/toolsets returned 401 in OSS worktree
+    launches, while /api/tools/toolsets is the documented dashboard contract.
+    """
+    mod = agent_capabilities_mod
+
+    user = MagicMock()
+    user.id = 'test-user'
+
+    mock_web_call = AsyncMock(
+        return_value=[
+            {
+                'name': 'web',
+                'label': 'Web',
+                'enabled': True,
+                'tools': ['web_search'],
+            }
+        ]
+    )
+    with patch.object(mod, 'web_call_or_raise', mock_web_call):
+        result = await mod.list_toolsets(user=user)
+
+    assert result[0].name == 'web'
+    assert result[0].tools[0].name == 'web_search'
+
+    assert mock_web_call.await_count == 1
+    call = mock_web_call.await_args
+    assert call.args[1] == 'GET'
+    assert call.args[2] == '/api/tools/toolsets'
+
+
+@pytest.mark.asyncio
 async def test_clear_commands_cache_removes_only_requesting_user_entry(agent_capabilities_mod):
     """DELETE /commands/cache drops the per-user slash-command cache so
     marketplace installs can refresh the menu immediately after Hermes restarts."""

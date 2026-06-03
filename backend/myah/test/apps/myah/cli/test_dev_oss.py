@@ -145,6 +145,8 @@ def test_oss_up_spawns_dashboard_with_insecure_host_flags(worktree: Path, mocker
     assert '--insecure' in dash_cmd
     assert '--host' in dash_cmd
     assert '0.0.0.0' in dash_cmd
+    assert '--port' in dash_cmd
+    assert '9119' in dash_cmd
     assert '--no-open' in dash_cmd
 
 

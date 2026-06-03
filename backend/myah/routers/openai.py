@@ -173,6 +173,195 @@ def _extract_model_provider(payload: dict) -> str | None:
     return None
 
 
+def _schedule_label_for_cron_context(job: dict) -> str:
+    schedule = job.get('schedule') if isinstance(job, dict) else None
+    if isinstance(schedule, dict):
+        return str(schedule.get('display') or schedule.get('expr') or '').strip()
+    if schedule:
+        return str(schedule).strip()
+    return ''
+
+
+def _job_matches_myah_chat(job: dict, chat_id: str) -> bool:
+    if not isinstance(job, dict) or not chat_id:
+        return False
+    return bool(job.get('chat_id') == chat_id and job.get('adoption_state') == 'myah_linked')
+
+
+def _build_cron_chat_context_block(chat_id: str, jobs: list[dict]) -> str | None:
+    """Resolve a concise cron context block for a chat linked to Hermes job(s).
+
+    Returns a stable ``[MYAH_CRON_CHAT_CONTEXT]`` block when one or more jobs in
+    ``jobs`` are linked to ``chat_id`` after Myah ownership normalization, or
+    ``None`` when the chat is not a cron chat. Pure/stateless so it can be
+    unit-tested without touching the container or Hermes.
+    """
+    if not chat_id or not isinstance(jobs, list):
+        return None
+    linked = [job for job in jobs if _job_matches_myah_chat(job, chat_id)]
+    if not linked:
+        return None
+
+    lines = [
+        '[MYAH_CRON_CHAT_CONTEXT]',
+        'This Myah chat is linked to the following Hermes scheduled task(s).',
+        'When the user refers to "this cron", "these crons", "the scheduled task", asks to '
+        'summarize, or asks what happened in this chat, interpret that as referring to this '
+        'linked scheduled task unless they say otherwise.',
+    ]
+    for job in linked[:5]:
+        name = str(job.get('name') or job.get('id') or 'scheduled-task')
+        job_id = str(job.get('id') or '')
+        schedule = _schedule_label_for_cron_context(job)
+        state = str(job.get('adoption_state') or '')
+        lines.append(
+            f'- job_id: {job_id}; name: {name}; schedule: {schedule or "unknown"}; '
+            f'adoption_state: {state or "unknown"}'
+        )
+    if len(linked) > 5:
+        lines.append(f'- plus {len(linked) - 5} more linked scheduled task(s)')
+    lines.append('[/MYAH_CRON_CHAT_CONTEXT]')
+    return '\n'.join(lines)
+
+
+async def _fetch_user_cron_jobs_for_context(user, *, timeout: float = 3.0) -> list[dict]:
+    """Best-effort fetch of the current user's Hermes cron jobs for chat context.
+
+    Verifies ownership by reading the user's own agent container job list rather
+    than trusting arbitrary chat metadata. Always returns a list — transient
+    container/Hermes failures (or a slow wake) are swallowed and yield ``[]`` so
+    they never block normal chat dispatch. Bounded by ``timeout`` seconds.
+    """
+
+    async def _lookup() -> list[dict]:
+        from myah.routers import processes as processes_router
+
+        host_port = await processes_router._ensure_container(user)
+        raw = await processes_router._hermes_get(processes_router._jobs_url(host_port))
+        if isinstance(raw, dict) and isinstance(raw.get('jobs'), list):
+            jobs = raw['jobs']
+        elif isinstance(raw, list):
+            jobs = raw
+        else:
+            log.debug(f'[MYAH] cron chat context lookup ignored unexpected jobs payload: {type(raw).__name__}')
+            return []
+        for job in jobs:
+            if isinstance(job, dict):
+                processes_router._normalize_process_for_myah(job, user)
+        return [job for job in jobs if isinstance(job, dict)]
+
+    try:
+        return await asyncio.wait_for(_lookup(), timeout=timeout)
+    except Exception as exc:
+        log.debug(f'[MYAH] cron chat context lookup skipped: {exc}')
+        return []
+
+
+def _normalize_model_for_myah_adapter(payload: dict, selected_model: str) -> tuple[str, str | None]:
+    """Return the bare model id and provider hint expected by Hermes switch_model.
+
+    The frontend/model catalog may represent selections as composite
+    ``provider::model`` keys so duplicate bare model ids stay distinguishable in
+    the UI. The Hermes adapter's ``switch_model`` does not accept that composite
+    string as ``raw_input``; it expects the bare provider-native model id plus an
+    optional explicit provider. Forwarding the composite causes the adapter to
+    reject the override, which can leave a stale Opus session override in place.
+    """
+
+    model = (selected_model or '').strip()
+    provider = _extract_model_provider(payload)
+    if '::' not in model:
+        return model, provider
+
+    composite_provider, _, composite_model = model.partition('::')
+    if composite_model.strip():
+        model = composite_model.strip()
+    if not provider and composite_provider.strip():
+        provider = composite_provider.strip()
+    return model, provider
+
+
+def _add_myah_model_dispatch_breadcrumb(
+    *,
+    raw_model: str,
+    normalized_model: str,
+    provider: str | None,
+    metadata: dict | None,
+) -> None:
+    """Leave a non-error Sentry breadcrumb when a composite UI key is normalized.
+
+    Composite keys are expected from the frontend, so this must not page anyone.
+    It gives later stream errors the exact raw-vs-adapter model pair that was
+    dispatched without recording prompt/user content.
+    """
+    try:
+        import sentry_sdk
+
+        sentry_sdk.add_breadcrumb(
+            category='myah.model_dispatch',
+            message='normalized composite model key before Hermes adapter dispatch',
+            level='info',
+            data={
+                'chat_id': (metadata or {}).get('chat_id'),
+                'message_id': (metadata or {}).get('message_id'),
+                'raw_model': raw_model,
+                'adapter_model': normalized_model,
+                'provider': provider,
+            },
+        )
+    except Exception:
+        pass
+
+
+def _capture_myah_model_dispatch_anomaly(
+    *,
+    reason: str,
+    raw_model: str | None,
+    adapter_model: str | None,
+    provider: str | None,
+    metadata: dict | None,
+    user_id: str | None,
+    model_item: dict | None,
+) -> None:
+    """Report adapter-bound model invariant breaks to Sentry.
+
+    This is the early-warning tripwire for the DeepSeek/Opus stale override
+    regression class: the platform should never send ``provider::model`` to the
+    Hermes adapter. Context is intentionally limited to routing metadata, not
+    message text or secrets.
+    """
+    try:
+        import sentry_sdk
+
+        with sentry_sdk.push_scope() as scope:
+            scope.set_tag('myah.chat_anomaly', reason)
+            scope.set_tag('chat_id', (metadata or {}).get('chat_id') or '')
+            scope.set_tag('message_id', (metadata or {}).get('message_id') or '')
+            scope.set_context(
+                'myah_model_dispatch',
+                {
+                    'reason': reason,
+                    'user_id': user_id,
+                    'chat_id': (metadata or {}).get('chat_id'),
+                    'message_id': (metadata or {}).get('message_id'),
+                    'raw_model': raw_model,
+                    'adapter_model': adapter_model,
+                    'provider': provider,
+                    'model_item_id': (model_item or {}).get('id') if isinstance(model_item, dict) else None,
+                    'model_item_selection_key': (model_item or {}).get('selection_key')
+                    if isinstance(model_item, dict)
+                    else None,
+                    'model_item_tags': (model_item or {}).get('tags') if isinstance(model_item, dict) else None,
+                },
+            )
+            sentry_sdk.capture_message(
+                'Myah Hermes model dispatch anomaly: adapter payload contained a composite model key',
+                level='error',
+            )
+    except Exception:
+        pass
+
+
 def _build_myah_attachments(payload: dict, user) -> list[dict]:
     """Walk payload.files[] and payload.messages[].content[].image_url parts,
     resolve each to a FileModel, and return a deduped list of
@@ -1447,6 +1636,22 @@ async def generate_chat_completion(
         myah_payload['message'] = _last_user_text
         # ──────────────────────────────────────────────────────────────────────
 
+        # ── Myah: prepend linked cron context for adopted cron chats ──────────
+        # When this chat was created by adopting a Hermes cron (job.myah.chat_id
+        # == chat_id), the agent otherwise has no signal that the user's message
+        # ("summarize", "what happened") refers to that scheduled task. Resolve
+        # the linked job(s) from the user's OWN Hermes job list and prepend a
+        # concise [MYAH_CRON_CHAT_CONTEXT] block. Best-effort: the lookup is
+        # bounded and never blocks dispatch when no cron is linked or on failure.
+        if _session_id:
+            cron_jobs = await _fetch_user_cron_jobs_for_context(user)
+            cron_context = _build_cron_chat_context_block(_session_id, cron_jobs)
+            if cron_context:
+                _last_user_text = f'{cron_context}\n\n{_last_user_text}'
+                myah_payload['message'] = _last_user_text
+        # ──────────────────────────────────────────────────────────────────────
+
+
         # ── Myah: forward attachments unconditionally (baseline behavior) ─────────────
         # Files can arrive in two shapes:
         #   1. Top-level `files`/`metadata.files` (documents, text, collections) — the frontend
@@ -1533,7 +1738,8 @@ async def generate_chat_completion(
         # been applied yet (very first message in a chat), (b) the
         # selection changed racily after the PUT and before this POST.
         if _user_selected_model and _user_selected_model != 'myah':
-            myah_payload['model'] = _user_selected_model
+            _myah_model, _myah_provider = _normalize_model_for_myah_adapter(payload, _user_selected_model)
+            myah_payload['model'] = _myah_model
             # Also forward the provider tag so Hermes switch_model pins
             # the target provider instead of running auto-detect (which
             # falls back to OpenRouter for OAuth-only providers like
@@ -1541,10 +1747,34 @@ async def generate_chat_completion(
             # heuristic in PROVIDER_REGISTRY cannot find matching creds).
             # The frontend ships model_item in every chat-completion POST;
             # /api/models shaping in backend/myah/main.py tags each model as
-            # tags=[{'name': <provider_id>}].
-            _myah_provider = _extract_model_provider(payload)
+            # tags=[{'name': <provider_id>}]. Composite selection keys are
+            # split here because the Hermes adapter expects bare model ids.
             if _myah_provider:
                 myah_payload['provider'] = _myah_provider
+            if '::' in _user_selected_model:
+                _add_myah_model_dispatch_breadcrumb(
+                    raw_model=_user_selected_model,
+                    normalized_model=_myah_model,
+                    provider=_myah_provider,
+                    metadata=metadata,
+                )
+
+        if '::' in str(myah_payload.get('model') or ''):
+            log.error(
+                '[CHAT_PIPELINE] model dispatch invariant violation: adapter-bound model still contains provider prefix chat_id=%s model=%r provider=%r',
+                _chat_id,
+                myah_payload.get('model'),
+                myah_payload.get('provider'),
+            )
+            _capture_myah_model_dispatch_anomaly(
+                reason='adapter_composite_model_key',
+                raw_model=_user_selected_model,
+                adapter_model=myah_payload.get('model'),
+                provider=myah_payload.get('provider'),
+                metadata=metadata,
+                user_id=getattr(user, 'id', None),
+                model_item=payload.get('model_item') if isinstance(payload.get('model_item'), dict) else None,
+            )
         # ───────────────────────────────────────────────────────────
 
         # 2026-05-05 dogfooding: also log the first 200 chars of the message

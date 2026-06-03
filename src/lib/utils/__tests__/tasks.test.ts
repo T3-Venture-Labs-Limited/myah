@@ -6,7 +6,8 @@ import {
 	getTaskFiles,
 	filterTasks,
 	stripProcessPrefix,
-	isProcessAdoptable
+	isProcessAdoptable,
+	applyChatUpdateToTasks
 } from '$lib/utils/tasks';
 import type { TaskItem } from '$lib/utils/tasks';
 import { allTasks, applyAdoptedProcessToTasks } from '$lib/stores/tasks';
@@ -344,5 +345,116 @@ describe('adoption classification (Adopt Legacy Crons — Phase 6)', () => {
 		allTasks.set([task]);
 		allTasks.update((tasks) => applyAdoptedProcessToTasks(tasks, task.process as any, 'chat-1'));
 		expect(get(allTasks)[0].chatId).toBe('chat-1');
+	});
+});
+
+describe('applyChatUpdateToTasks', () => {
+	const baseTask = (overrides: Partial<TaskItem>): TaskItem => ({
+		id: 'task',
+		chatId: 'task',
+		title: 'Task',
+		type: 'chat',
+		status: 'completed',
+		updated_at: 1000,
+		files: [],
+		...overrides
+	});
+
+	it('moves an updated existing chat task to the top', () => {
+		const tasks: TaskItem[] = [
+			baseTask({ id: 'old-top', chatId: 'old-top', title: 'Old Top', updated_at: 3000 }),
+			baseTask({ id: 'target', chatId: 'target', title: 'Target', updated_at: 1000 })
+		];
+
+		const result = applyChatUpdateToTasks(tasks, {
+			id: 'target',
+			title: 'Target',
+			updated_at: 4000,
+			meta: { files: [{ name: 'new.txt' }] }
+		});
+
+		expect(result.map((task) => task.id)).toEqual(['target', 'old-top']);
+		expect(result[0]).toMatchObject({
+			id: 'target',
+			chatId: 'target',
+			title: 'Target',
+			updated_at: 4000
+		});
+		expect(result[0].files).toEqual([{ name: 'new.txt' }]);
+	});
+
+	it('updates a linked recurring task timestamp without losing process metadata', () => {
+		const tasks: TaskItem[] = [
+			baseTask({ id: 'plain', chatId: 'plain', title: 'Plain', updated_at: 3000 }),
+			baseTask({
+				id: 'process-chat',
+				chatId: 'process-chat',
+				title: 'Hourly report',
+				type: 'recurring',
+				processId: 'job-1',
+				process: { id: 'job-1', name: 'Hourly report', enabled: true, state: 'scheduled' } as any,
+				updated_at: 1000
+			})
+		];
+
+		const result = applyChatUpdateToTasks(tasks, {
+			id: 'process-chat',
+			title: 'Process: Hourly report',
+			updated_at: 5000
+		});
+
+		expect(result.map((task) => task.id)).toEqual(['process-chat', 'plain']);
+		expect(result[0]).toMatchObject({
+			type: 'recurring',
+			processId: 'job-1',
+			title: 'Hourly report',
+			updated_at: 5000
+		});
+	});
+
+	it('adds a new non-process chat task when no existing task matches', () => {
+		const tasks: TaskItem[] = [baseTask({ id: 'existing', updated_at: 1000 })];
+
+		const result = applyChatUpdateToTasks(tasks, {
+			id: 'new-chat',
+			title: 'New work',
+			updated_at: 2000,
+			folder_id: 'space-1'
+		});
+
+		expect(result.map((task) => task.id)).toEqual(['new-chat', 'existing']);
+		expect(result[0]).toMatchObject({
+			id: 'new-chat',
+			chatId: 'new-chat',
+			title: 'New work',
+			type: 'chat',
+			status: 'completed',
+			folder_id: 'space-1'
+		});
+	});
+
+	it('does not add a process-output chat as a plain chat when no matching task exists', () => {
+		const result = applyChatUpdateToTasks([], {
+			id: 'process-chat',
+			title: 'Process: Hourly report',
+			updated_at: 2000
+		});
+
+		expect(result).toEqual([]);
+	});
+
+	it('preserves an existing task timestamp when the chat update lacks updated_at', () => {
+		const tasks: TaskItem[] = [baseTask({ id: 'target', chatId: 'target', updated_at: 1000 })];
+
+		const result = applyChatUpdateToTasks(tasks, {
+			id: 'target',
+			title: 'Target renamed'
+		});
+
+		expect(result[0]).toMatchObject({
+			id: 'target',
+			title: 'Target renamed',
+			updated_at: 1000
+		});
 	});
 });

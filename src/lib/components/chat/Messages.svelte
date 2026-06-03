@@ -55,6 +55,7 @@
 	export let onSelect = (e) => {};
 
 	export let messagesCount: number | null = 20;
+	export let linkedProcess = null;
 	let messagesLoading = false;
 
 	const loadMoreMessages = async () => {
@@ -383,6 +384,7 @@
 								{readOnly}
 								{editCodeBlock}
 								{topPadding}
+								{linkedProcess}
 								on:ui-interaction
 							/>
 						{/each}

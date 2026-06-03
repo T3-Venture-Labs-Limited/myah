@@ -43,6 +43,7 @@
 	import FullHeightIframe from '$lib/components/common/FullHeightIframe.svelte';
 	import HermesOutputRenderer from './HermesOutputRenderer.svelte';
 	import type { OutputItem } from './HermesOutputRenderer/types';
+	import { computeHermesOutputDone } from './hermesOutputDone';
 	import { filterTodoToolOutput } from '$lib/utils/todoOutput';
 	import CronRunMessage from './CronRunMessage.svelte';
 
@@ -129,6 +130,11 @@
 	export let editCodeBlock = true;
 	export let topPadding = false;
 
+	// The Hermes process this chat is linked to, when the route knows it. Passed
+	// down so cron run messages render the real job name instead of the generic
+	// "Scheduled task" label. CronRunMessage already reads `linkedProcess?.name`.
+	export let linkedProcess: import('$lib/apis/processes').Process | null = null;
+
 	let contentContainerElement: HTMLDivElement;
 	let buttonsContainerElement: HTMLDivElement;
 
@@ -145,6 +151,11 @@
 	// Use the output-array renderer when the message has structured output items.
 	// Falls back to ContentRenderer for older messages or non-Hermes responses.
 	$: useOutputRenderer = Array.isArray(message?.output) && message.output.length > 0;
+	$: hermesOutputDone = computeHermesOutputDone({
+		message,
+		history,
+		chatFadeStreamingText: ($settings as any)?.chatFadeStreamingText ?? true
+	});
 
 	$: isCronRun =
 		message?.content?.startsWith('**Cron run** (') ||
@@ -376,14 +387,12 @@
 							{#if message.content === '' && !message.done && !message.error && !hasVisibleStatus && !useOutputRenderer}
 								<Skeleton />
 							{:else if isCronRun}
-								<CronRunMessage {message} output={message.output} />
+								<CronRunMessage {message} output={message.output} {linkedProcess} />
 							{:else if useOutputRenderer && message.error !== true && renderedOutput.length > 0}
 								<HermesOutputRenderer
 									output={renderedOutput}
 									messageId={message.id}
-									done={($settings?.chatFadeStreamingText ?? true)
-										? (message?.done ?? false)
-										: true}
+									done={hermesOutputDone}
 									on:retry={async () => {
 										// ConfirmationCard 404 recovery (Task 2.1):
 										// create a fresh assistant branch from the original
