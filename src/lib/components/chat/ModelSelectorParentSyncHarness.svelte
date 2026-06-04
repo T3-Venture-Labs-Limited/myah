@@ -5,6 +5,7 @@
 	export let nextSelectedModels = [''];
 
 	let selectedModels = initialSelectedModels;
+	let modelSelectionEvents = 0;
 
 	const restoreSelectionFromParent = () => {
 		selectedModels = [...nextSelectedModels];
@@ -15,4 +16,10 @@
 	Restore model selection
 </button>
 <div data-testid="bound-selection">{selectedModels[0]}</div>
-<ModelSelector bind:selectedModels />
+<div data-testid="model-selection-events">{modelSelectionEvents}</div>
+<ModelSelector
+	bind:selectedModels
+	on:model-selection={() => {
+		modelSelectionEvents += 1;
+	}}
+/>

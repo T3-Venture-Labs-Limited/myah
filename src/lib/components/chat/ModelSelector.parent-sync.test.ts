@@ -6,7 +6,7 @@ vi.mock('$env/dynamic/public', () => ({ env: { PUBLIC_DEPLOYMENT_MODE: 'oss' } }
 
 import ModelSelector from './ModelSelector.svelte';
 import ModelSelectorParentSyncHarness from './ModelSelectorParentSyncHarness.svelte';
-import { models, settings, mobile, chatId } from '$lib/stores';
+import { models, settings, mobile, chatId, defaultModel } from '$lib/stores';
 import { providerStatusV2 } from '$lib/stores/providers';
 
 const i18nStore = writable({
@@ -24,6 +24,14 @@ const testModels = [
 		id: 'deepseek/deepseek-v4-flash',
 		name: 'OpenRouter Flash',
 		selection_key: 'openrouter::deepseek/deepseek-v4-flash',
+		tags: [{ name: 'openrouter' }],
+		info: { meta: {} },
+		connection_type: 'external'
+	},
+	{
+		id: 'deepseek/deepseek-v4-pro',
+		name: 'OpenRouter Pro',
+		selection_key: 'openrouter::deepseek/deepseek-v4-pro',
 		tags: [{ name: 'openrouter' }],
 		info: { meta: {} },
 		connection_type: 'external'
@@ -55,8 +63,16 @@ const renderParentHarness = () =>
 
 describe('ModelSelector parent selectedModels synchronization', () => {
 	beforeEach(() => {
+		Element.prototype.animate = vi.fn(() => ({
+			cancel: vi.fn(),
+			finished: Promise.resolve(),
+			play: vi.fn()
+		})) as never;
+		Element.prototype.scrollIntoView = vi.fn();
+
 		models.set(testModels as never);
 		settings.set({} as never);
+		defaultModel.set(null);
 		mobile.set(false);
 		chatId.set('');
 		providerStatusV2.set([]);
@@ -88,7 +104,29 @@ describe('ModelSelector parent selectedModels synchronization', () => {
 		await waitFor(() => {
 			expect(screen.getByTestId('bound-selection').textContent).toBe('anthropic::claude-sonnet-4');
 			expect(screen.getByRole('button', { name: 'Selected model: Anthropic Sonnet' })).toBeTruthy();
+			expect(screen.getByTestId('model-selection-events').textContent).toBe('0');
 		});
 		expect(screen.queryByRole('button', { name: 'Selected model: OpenRouter Flash' })).toBeNull();
+	});
+
+	it('lets a manual picker choice replace the current default before send state is read', async () => {
+		defaultModel.set({ provider: 'openrouter', model: 'deepseek/deepseek-v4-pro' });
+		renderParentHarness();
+		await fireEvent.click(screen.getByRole('button', { name: 'restore model selection' }));
+
+		await waitFor(() => {
+			expect(screen.getByTestId('bound-selection').textContent).toBe('anthropic::claude-sonnet-4');
+		});
+
+		await fireEvent.click(screen.getByRole('button', { name: 'Selected model: Anthropic Sonnet' }));
+		await fireEvent.click(screen.getByRole('option', { name: 'Select OpenRouter Flash model' }));
+
+		await waitFor(() => {
+			expect(screen.getByTestId('bound-selection').textContent).toBe(
+				'openrouter::deepseek/deepseek-v4-flash'
+			);
+			expect(screen.getByRole('button', { name: 'Selected model: OpenRouter Flash' })).toBeTruthy();
+			expect(screen.getByTestId('model-selection-events').textContent).toBe('1');
+		});
 	});
 });

@@ -1548,7 +1548,14 @@
 										data-testid="composer-model-selector"
 										class="flex max-w-[10rem] sm:max-w-[14rem] items-center rounded-full px-2 py-1 text-sm text-gray-600 hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-gray-800/70 transition"
 									>
-										<ModelSelector id="composer" compact side="top" bind:selectedModels showSetDefault={false} />
+										<ModelSelector
+											id="composer"
+											compact
+											side="top"
+											bind:selectedModels
+											showSetDefault={false}
+											on:model-selection={(event) => dispatch('model-selection', event.detail)}
+										/>
 									</div>
 									{#if (taskIds && taskIds.length > 0) || (history.currentId && history.messages[history.currentId]?.done != true) || generating}
 										<div class=" flex items-center">

@@ -166,6 +166,7 @@
 	let eventCallback = null;
 
 	let selectedModels = [''];
+	let hasExplicitModelSelection = false;
 	let atSelectedModel: Model | undefined;
 	let selectedModelIds = [];
 	let pinnedTodoPlan: TodoPlanItem | null = null;
@@ -248,6 +249,7 @@
 
 	const navigateHandler = async () => {
 		loading = true;
+		hasExplicitModelSelection = false;
 
 		prompt = '';
 		messageInput?.setText('');
@@ -367,6 +369,14 @@
 	const normalizeModelSelection = (modelId: string) => {
 		const model = findModelByIdOrSelectionKey(modelId, $models);
 		return model?.selection_key ?? model?.id ?? modelId;
+	};
+
+	const handleModelSelection = (event: CustomEvent<{ selectionKey?: string }>) => {
+		const selectionKey = event.detail?.selectionKey;
+		if (!selectionKey) return;
+
+		hasExplicitModelSelection = chatIdProp === '' && Object.keys(history?.messages ?? {}).length === 0;
+		selectedModels = [selectionKey];
 	};
 
 	let oldSelectedModelIds = [''];
@@ -1175,18 +1185,20 @@
 				selectedModels = $selectedFolder?.data?.model_ids;
 			} else {
 				// Myah T3-932/T3-1031: current per-user defaults beat stale
-				// last-used session state. This prevents an old Copilot selection
-				// from silently routing slash commands such as /goal through the
-				// wrong provider when the user's default is Codex.
+				// last-used session state. A current-page picker event is the only
+				// explicit manual override that can beat the default before first
+				// send; old sessionStorage alone must stay non-explicit.
+				const sessionSelectedModels = sessionStorage.selectedModels;
 				selectedModels = resolveInitialSelectedModels({
 					models: $models,
 					defaultModel: $defaultModel,
-					sessionSelection: sessionStorage.selectedModels
-						? JSON.parse(sessionStorage.selectedModels)
-						: null,
+					persistedChatSelection: hasExplicitModelSelection ? selectedModels : null,
+					sessionSelection: sessionSelectedModels ? JSON.parse(sessionSelectedModels) : null,
+					explicitSelection: hasExplicitModelSelection,
 					adminDefaults: $settings?.models ?? defaultModels,
 					firstAvailable: availableModels?.at(0) ?? null
 				});
+				hasExplicitModelSelection = false;
 
 				if ($defaultModel || sessionStorage.selectedModels) {
 					sessionStorage.removeItem('selectedModels');
@@ -1200,6 +1212,8 @@
 				$models.some((m) => m.id === modelId || m.selection_key === modelId)
 			);
 		}
+
+		hasExplicitModelSelection = false;
 
 		// Normalize legacy bare IDs (e.g. qwen/qwen3.7-max from user.default_model
 		// or sessionStorage) to the exact composite picker value when the catalog
@@ -2042,6 +2056,7 @@
 		chatInput?.focus();
 
 		saveSessionSelectedModels();
+		hasExplicitModelSelection = false;
 
 		await sendMessage(history, userMessageId, { newChat: true });
 	};
@@ -3019,7 +3034,8 @@
 											submitPrompt(e.detail.replaceAll('\n\n', '\n'));
 										}
 									}}
-								/>
+									on:model-selection={handleModelSelection}
+									/>
 
 								<div
 									class="absolute bottom-1 text-xs text-gray-500 text-center line-clamp-1 right-0 left-0"
@@ -3058,7 +3074,8 @@
 											submitPrompt(e.detail.replaceAll('\n\n', '\n'));
 										}
 									}}
-								/>
+									on:model-selection={handleModelSelection}
+									/>
 							</div>
 						{/if}
 					</div>

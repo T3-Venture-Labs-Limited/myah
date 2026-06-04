@@ -175,7 +175,7 @@
 				<MessageInput
 					bind:this={messageInput}
 					{history}
-					{selectedModels}
+					bind:selectedModels
 					bind:files
 					bind:prompt
 					bind:autoScroll
@@ -192,6 +192,9 @@
 					{onUpload}
 					on:submit={(e) => {
 						dispatch('submit', e.detail);
+					}}
+					on:model-selection={(e) => {
+						dispatch('model-selection', e.detail);
 					}}
 				/>
 			</div>
