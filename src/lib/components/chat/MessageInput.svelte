@@ -79,6 +79,7 @@
 	import InputModal from '../common/InputModal.svelte';
 	import Expand from '../icons/Expand.svelte';
 	import QueuedMessageItem from './MessageInput/QueuedMessageItem.svelte';
+	import type { ChatQueuedMessage } from '$lib/utils/chatQueueActions';
 	import RefChipBar from './Artifacts/RefChipBar.svelte';
 	import ModelSelector from './ModelSelector.svelte';
 
@@ -101,7 +102,7 @@
 	$: selectedModelIds = atSelectedModel !== undefined ? [atSelectedModel.id] : selectedModels;
 
 	export let history;
-	export let taskIds = null;
+	export let taskIds: string[] | null = null;
 
 	export let prompt = '';
 	export let files = [];
@@ -117,8 +118,9 @@
 
 	export let pendingOAuthTools = [];
 
-	export let messageQueue: { id: string; prompt: string; files: any[] }[] = [];
-	export let onQueueSendNow: (id: string) => void = () => {};
+	export let messageQueue: ChatQueuedMessage[] = [];
+	export let onQueueSteer: (id: string) => void = () => {};
+	export let onQueueInterrupt: (id: string) => void = () => {};
 	export let onQueueEdit: (id: string) => void = () => {};
 	export let onQueueDelete: (id: string) => void = () => {};
 
@@ -1074,7 +1076,9 @@
 										id={queuedMessage.id}
 										content={queuedMessage.prompt}
 										files={queuedMessage.files}
-										onSendNow={onQueueSendNow}
+										onSteer={onQueueSteer}
+										onInterrupt={onQueueInterrupt}
+										steerDisabled={(queuedMessage.files ?? []).length > 0}
 										onEdit={onQueueEdit}
 										onDelete={onQueueDelete}
 									/>

@@ -5,6 +5,7 @@ import type { Banner } from '$lib/types';
 import type { AgentCommand } from '$lib/types';
 import type { AgentToolset, AgentSkill, MemoryConclusion } from '$lib/apis/agent';
 import type { ArtifactFile, SelectionPayload, AnchorPayload } from '$lib/types/artifact';
+import type { ChatQueuedMessage } from '$lib/utils/chatQueueActions';
 import type { Socket } from 'socket.io-client';
 
 import emojiShortCodes from '$lib/emoji-shortcodes.json';
@@ -96,9 +97,9 @@ export const banners: Writable<Banner[]> = writable([]);
 
 export const settings: Writable<Settings> = writable({});
 
-export const chatRequestQueues: Writable<
-	Record<string, { id: string; prompt: string; files: any[] }[]>
-> = writable({});
+export type ChatRequestQueueItem = ChatQueuedMessage;
+
+export const chatRequestQueues: Writable<Record<string, ChatRequestQueueItem[]>> = writable({});
 
 export const sidebarWidth = writable(260);
 
