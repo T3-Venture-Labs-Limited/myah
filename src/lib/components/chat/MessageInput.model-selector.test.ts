@@ -64,6 +64,25 @@ describe('composer model selector placement', () => {
 		expect(chat).toContain('firstAvailable: availableModels?.at(0) ?? null');
 	});
 
+	it('marks only current picker events as explicit so stale session selections cannot override defaults', () => {
+		const chat = source('src/lib/components/chat/Chat.svelte');
+		const wrapper = source('src/lib/components/chat/ModelSelector.svelte');
+		const messageInput = source('src/lib/components/chat/MessageInput.svelte');
+
+		expect(chat).toContain('let hasExplicitModelSelection = false');
+		expect(chat).toContain('explicitSelection: hasExplicitModelSelection');
+		expect(chat).toContain('persistedChatSelection: hasExplicitModelSelection ? selectedModels : null');
+		expect(chat).toContain(
+			"hasExplicitModelSelection = chatIdProp === '' && Object.keys(history?.messages ?? {}).length === 0"
+		);
+		expect(chat).toContain('loading = true;\n		hasExplicitModelSelection = false;');
+		expect(chat).toContain('// Normalize legacy bare IDs');
+
+		expect(chat).not.toContain('explicitSelection: Boolean(sessionSelectedModels)');
+
+		expect(messageInput).toContain("on:model-selection={(event) => dispatch('model-selection', event.detail)}");
+	});
+
 	it('reassigns selectedModels array when composer selector value changes', () => {
 		const wrapper = source('src/lib/components/chat/ModelSelector.svelte');
 
@@ -74,6 +93,7 @@ describe('composer model selector placement', () => {
 		expect(wrapper).toContain('const syncSelectedModelToParent = (event?: CustomEvent<{ selectionKey?: string }>) =>');
 		expect(wrapper).toContain('const nextValue = event?.detail?.selectionKey ?? selectedModelValue');
 		expect(wrapper).toContain('selectedModels = [nextValue]');
+		expect(wrapper).toContain("dispatch('model-selection', { selectionKey: nextValue })");
 		expect(wrapper).toContain('bind:value={selectedModelValue}');
 		expect(wrapper).toContain('on:change={syncSelectedModelToParent}');
 		expect(wrapper).not.toContain('bind:value={selectedModels[0]}');

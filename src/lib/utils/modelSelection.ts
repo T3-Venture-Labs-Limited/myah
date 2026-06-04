@@ -76,11 +76,11 @@ export function resolveInitialSelectedModels({
 	const defaultSelection = selectionKeyForDefaultModel(defaultModel, models);
 	if (defaultSelection) return [defaultSelection];
 
-	const session = filterAvailableSelections(sessionSelection, models);
-	if (session.length > 0 && !defaultModel) return session;
-
 	const admin = filterAvailableSelections(adminDefaults, models);
 	if (admin.length > 0) return admin;
+
+	const session = filterAvailableSelections(sessionSelection, models);
+	if (session.length > 0 && !defaultModel) return session;
 
 	const first = filterAvailableSelections(firstAvailable ? [firstAvailable] : [], models);
 	return first.length > 0 ? first : [''];

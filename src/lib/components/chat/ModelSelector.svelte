@@ -1,9 +1,10 @@
 <script lang="ts">
 	import { models, settings } from '$lib/stores';
-	import { getContext } from 'svelte';
+	import { createEventDispatcher, getContext } from 'svelte';
 	import Selector from './ModelSelector/Selector.svelte';
 
 	import { updateUserSettings } from '$lib/apis/users';
+	const dispatch = createEventDispatcher<{ 'model-selection': { selectionKey: string } }>();
 	const i18n = getContext('i18n');
 
 	export let selectedModels = [''];
@@ -54,6 +55,7 @@
 		const nextValue = event?.detail?.selectionKey ?? selectedModelValue;
 		selectedModelValue = nextValue;
 		selectedModels = [nextValue];
+		dispatch('model-selection', { selectionKey: nextValue });
 	};
 
 	// Validity check needs to be composite-aware: selectedModelValue may be a

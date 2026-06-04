@@ -226,7 +226,7 @@ describe('resolveInitialSelectedModels', () => {
 		).toEqual(['copilot::gpt-5.4']);
 	});
 
-	it('uses last-used session selection only when there is no user default', () => {
+	it('uses last-used session selection only when there is no user or admin default', () => {
 		expect(
 			resolveInitialSelectedModels({
 				models,
@@ -235,6 +235,17 @@ describe('resolveInitialSelectedModels', () => {
 				adminDefaults: []
 			})
 		).toEqual(['copilot::gpt-5.4']);
+	});
+
+	it('prefers admin defaults over stale sessionStorage when no user default exists', () => {
+		expect(
+			resolveInitialSelectedModels({
+				models,
+				defaultModel: null,
+				sessionSelection: ['copilot::gpt-5.4'],
+				adminDefaults: ['openai::gpt-4o']
+			})
+		).toEqual(['openai::gpt-4o']);
 	});
 
 	it('preserves explicit current-page selections even when they differ from default', () => {
