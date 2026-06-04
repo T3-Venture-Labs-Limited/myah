@@ -45,8 +45,15 @@
 		defaultModel,
 		closeArtifactPane,
 		agentCommands,
-		bumpArtifactExplorerRefresh,
+		bumpArtifactExplorerRefresh
 	} from '$lib/stores';
+	import {
+		combineQueuedMessages,
+		queuedMessageHasFiles,
+		removeQueuedMessage,
+		toHermesQueueCommand,
+		type ChatQueuedMessage
+	} from '$lib/utils/chatQueueActions';
 	import { get } from 'svelte/store';
 	import { assembleUIState } from '$lib/utils/uiState';
 
@@ -207,7 +214,7 @@
 	}
 	$: showTodoPanel = Boolean(currentTodoPanel && currentTodoPanel.key !== hiddenTodoPanelKey);
 
-	let taskIds = null;
+	let taskIds: string[] | null = null;
 
 	// Chat Input
 	let prompt = '';
@@ -1422,12 +1429,94 @@
 		}
 	};
 
-	const processNextInQueue = async (targetChatId: string) => {
-		const queue = $chatRequestQueues[targetChatId];
-		if (!queue || queue.length === 0) return;
+	const QUEUE_DRAIN_POLL_MS = 250;
+	const QUEUE_DRAIN_MAX_POLLS = 20;
 
-		const combinedPrompt = queue.map((m) => m.prompt).join('\n\n');
-		const combinedFiles = queue.flatMap((m) => m.files);
+	const waitForChatTasksToDrain = async (targetChatId: string) => {
+		if (!targetChatId || targetChatId.startsWith('local:')) return;
+
+		for (let attempt = 0; attempt < QUEUE_DRAIN_MAX_POLLS; attempt += 1) {
+			const activeTaskIds = await getTaskIdsByChatId(localStorage.token, targetChatId).catch(() => []);
+			if (!Array.isArray(activeTaskIds) || activeTaskIds.length === 0) return;
+			await new Promise((resolve) => setTimeout(resolve, QUEUE_DRAIN_POLL_MS));
+		}
+	};
+
+	const sendHiddenQueueCommand = async (command: string) => {
+		const activeMessageId = history.currentId;
+		const activeMessage = activeMessageId ? (history.messages as Record<string, any>)[activeMessageId] : null;
+		if (!activeMessage || activeMessage.role !== 'assistant') {
+			throw new Error('No active assistant response to steer');
+		}
+
+		const parentMessage = activeMessage.parentId
+			? (history.messages as Record<string, any>)[activeMessage.parentId]
+			: null;
+		const model = findModelByIdOrSelectionKey(atSelectedModel?.id ?? selectedModels[0], $models);
+		if (!model) throw new Error('Model not found');
+		const settingsValue = $settings as Record<string, any>;
+		const paramsValue = params as Record<string, any>;
+
+		const hiddenUserMessage = {
+			id: uuidv4(),
+			parentId: parentMessage?.id ?? null,
+			childrenIds: [],
+			role: 'user',
+			content: command,
+			timestamp: Math.floor(Date.now() / 1000),
+			models: selectedModels
+		};
+		const messages = [
+			...(paramsValue?.system || settingsValue.system
+				? [{ role: 'system', content: `${paramsValue?.system ?? settingsValue?.system ?? ''}` }]
+				: []),
+			...(parentMessage ? [{ role: 'user', content: parentMessage.content }] : []),
+			{ role: 'assistant', content: activeMessage.content ?? '' },
+			hiddenUserMessage
+		].filter((message) => message.role !== 'assistant' || message.content?.trim());
+
+		const res: any = await generateOpenAIChatCompletion(
+			localStorage.token,
+			{
+				stream: true,
+				model: model.id,
+				messages,
+				params: { ...settingsValue?.params, ...paramsValue, stop: getStopTokens() },
+				features: getFeatures(),
+				variables: {
+					...getPromptVariables(
+						$user?.name,
+						$settings?.userLocation ? await getAndUpdateUserLocation(localStorage.token).catch(() => undefined) : undefined,
+						$user?.email
+					)
+				},
+				model_item: model,
+				session_id: $socket?.id,
+				chat_id: $chatId,
+				folder_id: $selectedFolder?.id ?? undefined,
+				id: activeMessage.id,
+				parent_id: parentMessage?.id ?? null,
+				parent_message: hiddenUserMessage,
+				background_tasks: {}
+			},
+			`${MYAH_BASE_URL}/api`
+		);
+
+		if (res?.error) {
+			throw res.error;
+		}
+		if (!(res instanceof Response) && res?.task_id) {
+			taskIds = taskIds ? [...taskIds, res.task_id] : [res.task_id];
+		}
+	};
+
+	const processNextInQueue = async (targetChatId: string) => {
+		const queue = $chatRequestQueues[targetChatId] ?? [];
+		if (queue.length === 0) return;
+
+		await waitForChatTasksToDrain(targetChatId);
+
+		const { prompt: combinedPrompt, files: combinedFiles } = combineQueuedMessages(queue);
 
 		chatRequestQueues.update((q) => {
 			const { [targetChatId]: _, ...rest } = q;
@@ -1436,7 +1525,7 @@
 
 		files = combinedFiles;
 		await tick();
-		await submitPrompt(combinedPrompt);
+		await submitPrompt(combinedPrompt, { queuePolicy: 'bypass' });
 	};
 
 	const chatCompletedHandler = async (_chatId, modelId, responseMessageId, messages) => {
@@ -1907,7 +1996,10 @@
 		await submitPrompt(envelope, { _agui_interaction: true });
 	}
 
-	const submitPrompt = async (userPrompt, { _raw = false, _agui_interaction = false } = {}) => {
+	const submitPrompt = async (
+		userPrompt,
+		{ _raw = false, _agui_interaction = false, queuePolicy = 'auto' } = {}
+	) => {
 		// selectedModels[i] may be bare model.id (legacy) or composite selection_key
 		// (after the user picks a row from the dropdown). Accept either form when
 		// validating — same pattern as the ModelSelector wrapper. Without this,
@@ -1962,7 +2054,7 @@
 		const lastMessage = history.currentId ? history.messages[history.currentId] : null;
 		const isGenerating = lastMessage && lastMessage.role === 'assistant' && !lastMessage.done;
 
-		if (isGenerating) {
+		if (isGenerating && queuePolicy !== 'bypass') {
 			if ($settings?.enableMessageQueue ?? true) {
 				// Enqueue the request
 				const _files = structuredClone(files);
@@ -2564,7 +2656,21 @@
 		history.messages[responseMessage.id] = responseMessage;
 	};
 
-	const stopResponse = async () => {
+	const markCurrentAssistantDone = () => {
+		const responseMessage = history.currentId ? (history.messages as Record<string, any>)[history.currentId] : null;
+		if (!responseMessage || responseMessage.role !== 'assistant') return;
+		if (responseMessage.parentId && (history.messages as Record<string, any>)[responseMessage.parentId]) {
+			for (const messageId of (history.messages as Record<string, any>)[responseMessage.parentId].childrenIds ?? []) {
+				(history.messages as Record<string, any>)[messageId].done = true;
+			}
+		}
+		responseMessage.done = true;
+		if (history.currentId) {
+			(history.messages as Record<string, any>)[history.currentId] = responseMessage;
+		}
+	};
+
+	const stopResponse = async ({ drainQueue = true }: { drainQueue?: boolean } = {}) => {
 		if (taskIds) {
 			for (const taskId of taskIds) {
 				const res = await stopTask(localStorage.token, taskId).catch((error) => {
@@ -2574,20 +2680,12 @@
 			}
 
 			taskIds = null;
+		}
 
-			const responseMessage = history.messages[history.currentId];
-			// Set all response messages to done
-			if (responseMessage.parentId && history.messages[responseMessage.parentId]) {
-				for (const messageId of history.messages[responseMessage.parentId].childrenIds) {
-					history.messages[messageId].done = true;
-				}
-			}
+		markCurrentAssistantDone();
 
-			history.messages[history.currentId] = responseMessage;
-
-			if (autoScroll) {
-				scrollToBottom();
-			}
+		if (autoScroll) {
+			scrollToBottom();
 		}
 
 		if (generating) {
@@ -2596,7 +2694,9 @@
 			generationController = null;
 		}
 
-		await processNextInQueue($chatId);
+		if (drainQueue) {
+			await processNextInQueue($chatId);
+		}
 	};
 
 	const submitMessage = async (parentId, prompt) => {
@@ -2982,22 +3082,58 @@
 									{createMessagePair}
 									{onUpload}
 									messageQueue={$chatRequestQueues[$chatId] ?? []}
-									onQueueSendNow={async (id) => {
-										const queue = $chatRequestQueues[$chatId] ?? [];
+									onQueueSteer={async (id) => {
+									const queue: ChatQueuedMessage[] = $chatRequestQueues[$chatId] ?? [];
+									const item = queue.find((m) => m.id === id);
+									if (!item) return;
+
+									if (queuedMessageHasFiles(item)) {
+										toast.warning($i18n.t('Steer supports text-only queued messages for now. Use Interrupt for attachments.'));
+										return;
+									}
+
+									const command = toHermesQueueCommand(item.prompt);
+									if (!command) return;
+
+									chatRequestQueues.update((q) => ({
+										...q,
+										[$chatId]: removeQueuedMessage(queue, id)
+									}));
+									try {
+										await sendHiddenQueueCommand(command);
+									} catch (error) {
+											chatRequestQueues.update((q) => {
+												const currentQueue = q[$chatId] ?? [];
+												if (currentQueue.some((m) => m.id === id)) return q;
+												return { ...q, [$chatId]: [item, ...currentQueue] };
+											});
+											toast.error($i18n.t('Could not steer the active response. The queued message was restored.'));
+											throw error;
+										}
+									}}
+									onQueueInterrupt={async (id) => {
+										const queue: ChatQueuedMessage[] = $chatRequestQueues[$chatId] ?? [];
 										const item = queue.find((m) => m.id === id);
 										if (item) {
-											// Remove from queue
 											chatRequestQueues.update((q) => ({
 												...q,
-												[$chatId]: queue.filter((m) => m.id !== id)
+												[$chatId]: removeQueuedMessage(queue, id)
 											}));
-											// Stop current generation first
-											await stopResponse();
-											await tick();
-											// Set files and submit
-											files = item.files;
-											await tick();
-											await submitPrompt(item.prompt);
+											try {
+												await stopResponse({ drainQueue: false });
+												await tick();
+												files = item.files ?? [];
+												await tick();
+												await submitPrompt(item.prompt, { queuePolicy: 'bypass' });
+											} catch (error) {
+												chatRequestQueues.update((q) => {
+													const currentQueue = q[$chatId] ?? [];
+													if (currentQueue.some((m) => m.id === id)) return q;
+													return { ...q, [$chatId]: [item, ...currentQueue] };
+												});
+												toast.error($i18n.t('Could not interrupt the active response. The queued message was restored.'));
+												throw error;
+											}
 										}
 									}}
 									onQueueEdit={(id) => {

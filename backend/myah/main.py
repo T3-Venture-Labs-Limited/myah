@@ -277,6 +277,10 @@ from myah.tasks import (
 )  # Import from tasks.py
 
 from myah.utils.redis import get_sentinels_from_env
+from myah.utils.chat_overlap_guard import (
+    first_user_text_from_messages,
+    should_reject_overlapping_chat_run,
+)
 
 
 from myah.constants import ERROR_MESSAGES
@@ -1507,6 +1511,14 @@ async def chat_completion(
                 log.debug(f'Error emitting chat:active: {e}')
 
     if metadata.get('session_id') and metadata.get('chat_id') and metadata.get('message_id'):
+        active_task_ids = await list_task_ids_by_item_id(request.app.state.redis, metadata['chat_id'])
+        user_text = first_user_text_from_messages(form_data)
+        if should_reject_overlapping_chat_run(user_text, active_task_ids):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail='A response is already active for this chat. Queue, steer, or interrupt it before sending another message.',
+            )
+
         # Asynchronous Chat Processing
         task_id, _ = await create_task(
             request.app.state.redis,
